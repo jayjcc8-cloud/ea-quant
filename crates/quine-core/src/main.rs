@@ -8,6 +8,10 @@
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use quine_core::core::{Core, CoreConfig};
@@ -29,14 +33,19 @@ fn main() {
 
 fn serve(arguments: &[String]) {
     let flags = Flags::parse(arguments);
+    let parent_closed = Arc::new(AtomicBool::new(false));
     if flags.present("parent-stdin") {
         // Desktop-owned liveness pipe. Owner loss uses the same recovery semantics
         // as a crashed core; no terminal/cancellation state is fabricated here.
-        std::thread::spawn(|| {
+        let closed = parent_closed.clone();
+        std::thread::spawn(move || {
             let mut byte = [0u8; 1];
             loop {
                 match std::io::Read::read(&mut std::io::stdin(), &mut byte) {
-                    Ok(0) | Err(_) => std::process::exit(70),
+                    Ok(0) | Err(_) => {
+                        closed.store(true, Ordering::SeqCst);
+                        break;
+                    }
                     Ok(_) => {}
                 }
             }
@@ -55,6 +64,9 @@ fn serve(arguments: &[String]) {
             .unwrap_or_else(|| "python3".to_string()),
     );
     let mut config = CoreConfig::new(&workspace, &python);
+    if flags.present("parent-stdin") {
+        config.parent_closed = Some(parent_closed);
+    }
     if let Some(owner) = flags.value("owner") {
         config.owner = owner;
     }
@@ -84,7 +96,11 @@ fn serve(arguments: &[String]) {
     };
     if let Err(error) = core.serve() {
         eprintln!("{error}");
-        std::process::exit(1);
+        std::process::exit(if error.kind() == std::io::ErrorKind::BrokenPipe {
+            70
+        } else {
+            1
+        });
     }
 }
 
@@ -203,6 +219,12 @@ fn handle(store: &Store, line: &str) -> ReplyEnvelope {
         Request::List { params } => store
             .list(&params)
             .map(|value| serde_json::to_value(value).expect("list result serializes")),
+        Request::Quiesce { .. }
+        | Request::PrepareRecovery { .. }
+        | Request::ReleaseUnknown { .. } => Err(QuineError::new(
+            "invalid_request",
+            "quiesce requires the supervising core",
+        )),
     };
     match result {
         Ok(value) => ReplyEnvelope::ok(method, value),
@@ -216,6 +238,9 @@ fn request_method(request: &Request) -> &'static str {
         Request::Cancel { .. } => "cancel",
         Request::Query { .. } => "query",
         Request::List { .. } => "list",
+        Request::Quiesce { .. } => "quiesce",
+        Request::PrepareRecovery { .. } => "prepare_recovery",
+        Request::ReleaseUnknown { .. } => "release_unknown",
     }
 }
 

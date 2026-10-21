@@ -1,3 +1,4 @@
+import { SourceLink as Link } from './workspace-navigation'
 /**
  * QUINE 资源中心 — the workspace's directory of what this host has, and the one
  * place a reader can ask the host whether a composition of declared capabilities
@@ -28,7 +29,6 @@
  * and holds nothing beyond this render.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, ScenarioSummary } from './app'
 import {
   LAYER_ORDER,
@@ -697,7 +697,7 @@ export function ResourcesPage({ api }: { readonly api: ApiAdapter }) {
           {verifying ? '校验中…' : '校验组合'}
         </button>
         <Link to="/strategies">策略工作区</Link>
-        <Link to="/research">研究工作区</Link>
+        <Link to="/research">历史研究任务</Link>
       </div>
       <p className="muted">每一层都可以留空：留空表示交给主机默认路径。选择本身不写任何东西，也不询问主机；策略与研究工作区仍是上面两个入口，这一页不代答，也不调用任何模型。</p>
       {catalog.state === 'failed' && <p className="muted">能力目录不可用，这里没有可选择的版本。</p>}
@@ -814,7 +814,7 @@ export function ResourcesPage({ api }: { readonly api: ApiAdapter }) {
         </>}
         {datasets.value.length > 0 && visibleDatasets.length === 0 && <p className="muted">没有匹配当前搜索的资源。</p>}
       </>}
-      <p><Link to="/research">导入与声明</Link></p>
+      <p><Link to="/resources/data">导入数据</Link></p>
     </section>
 
     <section className="panel resource-section" aria-label="场景">

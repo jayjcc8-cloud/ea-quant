@@ -1,5 +1,7 @@
+import { SourceLink as Link } from './workspace-navigation'
 import { useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { StrategyAssociation } from './research-association-panel'
+import { useNavigate, useParams } from 'react-router-dom'
 import type { ApiAdapter, ChronologicalHoldout } from './app'
 
 type Evidence = { job_id: string; run_id: string; report_sha256: string; equity_path_sha256: string; input_sha256: string; scenario_sha256: string; data_sha256: string; record_count: number }
@@ -109,6 +111,7 @@ function CandidateDetailContent({ api, candidateId }: { api: ApiAdapter; candida
     <p><Link to="/candidates">Saved candidates</Link></p>
     {error && <p role="alert" className="notice error">{error}</p>}
     {record?.projection && <>
+      <StrategyAssociation key={record.projection.source.job_id} api={api} jobId={record.projection.source.job_id} />
       <section className="panel"><header><h2>Research decision</h2><strong>{record.status}</strong></header>
         <p>EVALUATED means the selected evidence is complete. ACCEPTED retains a research judgment and grants no execution permission.</p>
         <dl className="summary-list"><div><dt>Fingerprint</dt><dd>{record.fingerprint}</dd></div><div><dt>Strategy</dt><dd>{record.projection.strategy.id} v{record.projection.strategy.version}</dd></div><div><dt>Parameters</dt><dd>{Object.entries(record.projection.strategy.parameters).map(([key, value]) => `${key}: ${value}`).join(' · ')}</dd></div></dl>

@@ -99,7 +99,7 @@ function workspace(api: ApiAdapter) {
 }
 
 /** The guided controls, which is where every destination choice is made. */
-const guided = () => within(screen.getByRole('group', { name: /guided mapping/i }))
+const guided = () => within(screen.getByRole('group', { name: /表单映射/ }))
 
 /** The column names one destination is offered, as its own control lists them. */
 const columnOptions = (field: string): string[] =>
@@ -118,14 +118,14 @@ const declareColumn = (field: string, column: string) => {
 /** The constant choice is found by its own wording, never by a value invented here. */
 const declareConstant = (field: string, value: string) => {
   const select = columnSelect(field)
-  const constant = Array.from(select.options).find(option => /constant/i.test(option.textContent ?? ''))
+  const constant = Array.from(select.options).find(option => /常量/.test(option.textContent ?? ''))
   expect(constant, `${field} offers no constant choice`).toBeTruthy()
   fireEvent.change(select, { target: { value: constant?.value } })
-  fireEvent.change(guided().getByLabelText(`${field} constant value`), { target: { value } })
+  fireEvent.change(guided().getByLabelText(`${field} 常量`), { target: { value } })
 }
 
 const declareFormat = (field: string, format: string) => {
-  fireEvent.change(guided().getByLabelText(`${field} time format`), { target: { value: format } })
+  fireEvent.change(guided().getByLabelText(`${field} 时间格式`), { target: { value: format } })
 }
 
 const EXPECTED_MAPPING = {
@@ -156,8 +156,8 @@ const EXPECTED_TIME = {
 
 /** Open the mapped panel over a synthetic export, without touching any JSON field. */
 async function openMappedPanel(user: User, content: string = SYNTHETIC_CSV) {
-  fireEvent.change(await screen.findByLabelText('CSV content'), { target: { value: content } })
-  await user.selectOptions(screen.getByLabelText('Upload mode'), 'explicit-mapping')
+  fireEvent.change(await screen.findByLabelText('CSV 内容'), { target: { value: content } })
+  await user.selectOptions(screen.getByLabelText('导入方式'), 'explicit-mapping')
 }
 
 /** Every strict destination of the synthetic export, chosen by control only. */
@@ -177,14 +177,14 @@ function declareSyntheticMapping() {
   declareColumn('source_sequence', 'seq')
   declareConstant('revision', '0')
   declareColumn('available_at', 'say "hi"')
-  fireEvent.change(guided().getByLabelText('Time zone'), { target: { value: 'Asia/Shanghai' } })
+  fireEvent.change(guided().getByLabelText('时区'), { target: { value: 'Asia/Shanghai' } })
   declareFormat('interval_start', 'naive-seconds')
   declareFormat('interval_end', 'naive-seconds')
   declareFormat('available_at', 'naive-seconds')
 }
 
-const publishButton = () => screen.getByRole('button', { name: 'Publish version' }) as HTMLButtonElement
-const previewButton = () => screen.getByRole('button', { name: 'Preview sample' }) as HTMLButtonElement
+const publishButton = () => screen.getByRole('button', { name: '发布数据版本' }) as HTMLButtonElement
+const previewButton = () => screen.getByRole('button', { name: '检查数据' }) as HTMLButtonElement
 
 /**
  * The upload surface keeps the draft it is holding in this workspace's session
@@ -232,19 +232,19 @@ describe('guided mapping', () => {
 
     // Nothing is pre-filled: the zone is stated by the user, never guessed, and a
     // declaration and a policy are not a verification.
-    expect((guided().getByLabelText('Time zone') as HTMLInputElement).value).toBe('')
+    expect((guided().getByLabelText('时区') as HTMLInputElement).value).toBe('')
     expect(publishButton().disabled).toBe(true)
 
     declareSyntheticMapping()
 
     // The timestamp forms are the mapper's own closed allowlist, and nothing else.
     const formats = Array.from(
-      (guided().getByLabelText('interval_start time format') as HTMLSelectElement).options,
+      (guided().getByLabelText('interval_start 时间格式') as HTMLSelectElement).options,
       option => option.value,
     ).filter(value => value !== '')
     expect(formats).toEqual([...TIME_FORMAT_IDS])
 
-    await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_PROVIDED)
+    await user.selectOptions(screen.getByLabelText('可用时间策略'), AVAILABILITY_PROVIDED)
     await user.click(previewButton())
 
     await waitFor(() => expect(calls.previews).toBe(1))
@@ -263,7 +263,7 @@ describe('guided mapping', () => {
     await user.click(publishButton())
     await waitFor(() => expect(calls.publishes).toBe(1))
     const published = calls.lastPublish
-    const edited = (screen.getByLabelText('CSV content') as HTMLTextAreaElement).value
+    const edited = (screen.getByLabelText('CSV 内容') as HTMLTextAreaElement).value
     expect(edited).toBe(SYNTHETIC_CSV.replace(/\r\n/g, '\n'))
     expect(published?.content).toBe(edited)
     expect(published?.content_base64).toBeUndefined()
@@ -287,12 +287,12 @@ describe('guided mapping', () => {
     // payload is the file's own bytes rather than the text on screen, so the CRLF
     // endings and the quoted comma in the header reach the host as written.
     const file = new File([SYNTHETIC_CSV], SYNTHETIC_FILE_NAME, { type: 'text/csv' })
-    await user.upload(await screen.findByLabelText('CSV file'), file)
-    await waitFor(() => expect(screen.getByText(/sent as its own bytes/)).toBeTruthy())
+    await user.upload(await screen.findByLabelText('选择 CSV 文件'), file)
+    await waitFor(() => expect(screen.getByText(/保留所选文件原始字节/)).toBeTruthy())
 
-    await user.selectOptions(screen.getByLabelText('Upload mode'), 'explicit-mapping')
+    await user.selectOptions(screen.getByLabelText('导入方式'), 'explicit-mapping')
     declareSyntheticMapping()
-    await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_PROVIDED)
+    await user.selectOptions(screen.getByLabelText('可用时间策略'), AVAILABILITY_PROVIDED)
     await user.click(previewButton())
     await waitFor(() => expect(calls.previews).toBe(1))
     // The preview was of these bytes, and of the declaration the controls describe.
@@ -315,7 +315,7 @@ describe('guided mapping', () => {
     workspace(api)
     await openMappedPanel(user)
     declareSyntheticMapping()
-    await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_PROVIDED)
+    await user.selectOptions(screen.getByLabelText('可用时间策略'), AVAILABILITY_PROVIDED)
     await user.click(previewButton())
     await waitFor(() => expect(calls.previews).toBe(1))
     expect(publishButton().disabled).toBe(false)
@@ -333,27 +333,27 @@ describe('guided mapping', () => {
     workspace(api)
     await openMappedPanel(user)
     declareColumn('close', 'c')
-    await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_PROVIDED)
+    await user.selectOptions(screen.getByLabelText('可用时间策略'), AVAILABILITY_PROVIDED)
     await user.click(previewButton())
     await waitFor(() => expect(calls.previews).toBe(1))
     expect(publishButton().disabled).toBe(false)
 
     // The JSON editor is an explicit choice, and it edits the one declaration the
     // controls show rather than a second copy of it.
-    await user.click(screen.getByLabelText('Advanced JSON'))
-    fireEvent.change(screen.getByLabelText(/^Mapping declaration/), {
+    await user.click(screen.getByLabelText('高级 JSON'))
+    fireEvent.change(screen.getByLabelText(/^列映射声明/), {
       target: { value: '{"columns":{"close":"o"},"constants":{}}' },
     })
     // That is a different declaration from the one the preview verified.
     expect(publishButton().disabled).toBe(true)
 
     // Going back to the controls shows what the JSON says, not the earlier choice.
-    await user.click(screen.getByLabelText('Guided controls'))
+    await user.click(screen.getByLabelText('表单映射'))
     expect(columnSelect('close').value).toBe('o')
 
     // A guided change writes that same declaration back, so it neither reverts the
     // column the JSON editor stated nor keeps a choice of its own beside it.
-    fireEvent.change(guided().getByLabelText('Time zone'), { target: { value: 'UTC' } })
+    fireEvent.change(guided().getByLabelText('时区'), { target: { value: 'UTC' } })
     await user.click(previewButton())
     await waitFor(() => expect(calls.previews).toBe(2))
     expect(calls.lastDeclaration?.mapping).toEqual({ columns: { close: 'o' }, constants: {} })
@@ -369,18 +369,18 @@ describe('guided mapping', () => {
 
     // The guided controls are the default editor; choosing the JSON editor is what
     // makes this declaration one the user typed.
-    await user.click(screen.getByLabelText('Advanced JSON'))
+    await user.click(screen.getByLabelText('高级 JSON'))
     const typed = '{"columns":{"close":"c","volume":"v"},"constants":{"close":"1"}}'
-    fireEvent.change(screen.getByLabelText(/^Mapping declaration/), { target: { value: typed } })
+    fireEvent.change(screen.getByLabelText(/^列映射声明/), { target: { value: typed } })
 
     // `close` cannot be a column and a constant at once, so no control can hold
     // this declaration. It stays exactly as typed, the reason is on screen, and no
     // control is offered that would drop one of the two values or re-point it.
-    const controls = screen.getByLabelText('Guided controls') as HTMLInputElement
+    const controls = screen.getByLabelText('表单映射') as HTMLInputElement
     expect(controls.disabled).toBe(true)
-    expect((screen.getByLabelText(/^Mapping declaration/) as HTMLTextAreaElement).value).toBe(typed)
+    expect((screen.getByLabelText(/^列映射声明/) as HTMLTextAreaElement).value).toBe(typed)
     expect(screen.getByText(/both a column and a constant/)).toBeTruthy()
-    expect(screen.queryByRole('group', { name: /guided mapping/i })).toBeNull()
+    expect(screen.queryByRole('group', { name: /表单映射/ })).toBeNull()
     fireEvent.click(publishButton())
     expect(calls.publishes).toBe(0)
     expect(calls.previews).toBe(0)
@@ -392,13 +392,13 @@ describe('guided mapping', () => {
     workspace(api)
     await openMappedPanel(user)
     declareSyntheticMapping()
-    await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_PROVIDED)
+    await user.selectOptions(screen.getByLabelText('可用时间策略'), AVAILABILITY_PROVIDED)
     await user.click(previewButton())
     await waitFor(() => expect(calls.previews).toBe(1))
     expect(publishButton().disabled).toBe(false)
 
     // The next file from the same vendor renamed that column.
-    fireEvent.change(screen.getByLabelText('CSV content'), { target: { value: SYNTHETIC_CSV_ALTERNATE } })
+    fireEvent.change(screen.getByLabelText('CSV 内容'), { target: { value: SYNTHETIC_CSV_ALTERNATE } })
 
     // The earlier preview is not authorization for a different file...
     expect(publishButton().disabled).toBe(true)
@@ -406,7 +406,7 @@ describe('guided mapping', () => {
     // silently accepted: it stays as the user made it, and says it is not here.
     const select = columnSelect('available_at')
     expect(select.value).toBe('say "hi"')
-    expect(select.options[select.selectedIndex]?.textContent ?? '').toMatch(/not in this file/)
+    expect(select.options[select.selectedIndex]?.textContent ?? '').toMatch(/当前文件无此列/)
     expect(columnOptions('available_at')).toContain('seen')
 
     // The declaration is still the one the user made, so the host is what refuses
@@ -434,7 +434,7 @@ describe('guided mapping', () => {
     ).toBe(true)
     expect(publishButton().disabled).toBe(true)
 
-    fireEvent.change(screen.getByLabelText('CSV content'), { target: { value: SYNTHETIC_CSV_EMPTY_HEADER_NAME } })
+    fireEvent.change(screen.getByLabelText('CSV 内容'), { target: { value: SYNTHETIC_CSV_EMPTY_HEADER_NAME } })
     expect(columnOptions('close')).toEqual([])
     expect(publishButton().disabled).toBe(true)
     expect(calls.publishes).toBe(0)
@@ -447,7 +447,7 @@ describe('guided mapping', () => {
       [SYNTHETIC_CSV_QUOTE_IN_NAME, /quote inside the column name/i],
       [SYNTHETIC_CSV_AFTER_QUOTE, /right after a quoted column name/i],
     ] as const) {
-      fireEvent.change(screen.getByLabelText('CSV content'), { target: { value: source } })
+      fireEvent.change(screen.getByLabelText('CSV 内容'), { target: { value: source } })
       expect(columnOptions('close')).toEqual([])
       expect(columnOptions('interval_start')).toEqual([])
       expect(
@@ -459,7 +459,7 @@ describe('guided mapping', () => {
     // A byte-order mark is not part of a name either. The names are the file's
     // real ones, the mark is stated rather than repaired, and the source itself
     // is the host's to refuse — which it does.
-    fireEvent.change(screen.getByLabelText('CSV content'), { target: { value: SYNTHETIC_CSV_BYTE_ORDER_MARK } })
+    fireEvent.change(screen.getByLabelText('CSV 内容'), { target: { value: SYNTHETIC_CSV_BYTE_ORDER_MARK } })
     const markedNames = columnOptions('interval_start')
     expect(markedNames).toContain('bar_start')
     expect(markedNames).not.toContain('﻿bar_start')
@@ -467,7 +467,7 @@ describe('guided mapping', () => {
       screen.getAllByRole('alert').some(node => /byte-order mark/i.test(node.textContent ?? '')),
     ).toBe(true)
     declareSyntheticMapping()
-    await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_PROVIDED)
+    await user.selectOptions(screen.getByLabelText('可用时间策略'), AVAILABILITY_PROVIDED)
     await user.click(previewButton())
     await waitFor(() => expect(calls.previews).toBe(1))
     // The payload keeps the mark: nothing here silently strips it.
@@ -482,7 +482,7 @@ describe('guided mapping', () => {
     workspace(api)
     await openMappedPanel(user)
     declareSyntheticMapping()
-    await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_PROVIDED)
+    await user.selectOptions(screen.getByLabelText('可用时间策略'), AVAILABILITY_PROVIDED)
     await user.click(previewButton())
     await waitFor(() => expect(calls.previews).toBe(1))
     expect(calls.lastDeclaration?.mapping.columns.available_at).toBe('say "hi"')
@@ -491,9 +491,9 @@ describe('guided mapping', () => {
     // Under a derived policy the host computes availability itself, so declaring a
     // column for it would be a contradiction the host refuses. The panel asks for
     // the latency instead, and declares no availability column or form at all.
-    await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_SIMULATED)
-    expect(guided().queryByLabelText('available_at time format')).toBeNull()
-    fireEvent.change(screen.getByLabelText('Simulated latency (seconds)'), { target: { value: '45' } })
+    await user.selectOptions(screen.getByLabelText('可用时间策略'), AVAILABILITY_SIMULATED)
+    expect(guided().queryByLabelText('available_at 时间格式')).toBeNull()
+    fireEvent.change(screen.getByLabelText('模拟延迟（秒）'), { target: { value: '45' } })
     await user.click(previewButton())
     await waitFor(() => expect(calls.previews).toBe(2))
     const declaration = calls.lastDeclaration
@@ -517,8 +517,8 @@ describe('guided mapping', () => {
     // One destination is not a declaration, and this panel does not pretend to
     // judge that: it sends what the controls describe and shows the host's answer.
     declareColumn('close', 'c')
-    fireEvent.change(guided().getByLabelText('Time zone'), { target: { value: 'UTC' } })
-    await user.selectOptions(screen.getByLabelText('Availability policy'), AVAILABILITY_PROVIDED)
+    fireEvent.change(guided().getByLabelText('时区'), { target: { value: 'UTC' } })
+    await user.selectOptions(screen.getByLabelText('可用时间策略'), AVAILABILITY_PROVIDED)
     expect(calls.lastDeclaration).toBeUndefined()
     await user.click(previewButton())
 

@@ -171,3 +171,32 @@ def test_desktop_http_boundary_and_secret_redaction(tmp_path: Path) -> None:
             client.post("/api/desktop/settings", json={"theme": []}, headers=headers).status_code
             == 409
         )
+
+
+def test_application_identity_is_recorded_or_explicitly_unknown(tmp_path: Path) -> None:
+    from ea import __version__
+
+    desktop = context(tmp_path)
+    identity = desktop.status()["application"]
+    assert identity["engine_version"] == __version__
+    assert identity["build_id"] is None
+    assert identity["source_revision"] is None
+    desktop.runtime.mkdir()
+    info = desktop.runtime / "build-info.json"
+    info.write_text(
+        json.dumps(
+            {
+                "desktop_version": "0.1.0",
+                "build_id": "local-test",
+                "source_revision": "abc123",
+                "source_dirty": True,
+                "api_key": "must-not-copy",
+            }
+        )
+    )
+    identity = desktop.status()["application"]
+    assert identity["build_id"] == "local-test"
+    assert identity["source_dirty"] is True
+    assert "must-not-copy" not in json.dumps(identity)
+    info.write_text("broken")
+    assert desktop.status()["application"]["build_id"] is None

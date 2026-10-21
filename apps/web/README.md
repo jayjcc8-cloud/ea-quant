@@ -1,10 +1,14 @@
-# EA Quant Web
+# QUINE shared React/WebView frontend (internal development)
 
 This is the Dark Professional frontend for the real local offline backtest and bounded research
 loop defined by ADRs 0030-0035. The production build talks only to the same-origin `/api`
-served by `ea web serve`; it does not fall back to mock business data when the service is
+served by the embedded desktop app or the internal `ea web serve` test entry; it does not fall back to mock business data when the service is
 unavailable. Component tests inject an explicit fake adapter, while the Playwright suite uses an
 installed candidate wheel, actual loopback HTTP, the existing engine, and formal reports.
+
+The scenario details below describe inherited integration fixtures, not additional user entry
+points or the complete current desktop capability list. Final native acceptance is recorded
+separately from these shared-code tests.
 
 StrategyDescriptorV1 drives generic integer/decimal controls for both built-in research strategies:
 `bounded-long-v1` and `moving-average-entry-v1`. Initial cash is editable; symbol remains bound to
@@ -34,11 +38,12 @@ npm run test:e2e
 
 `npm run test:e2e` builds the wheel and UI, creates a repository-outside Python environment,
 installs the wheel non-editably with its Web extra, and runs Chromium against the installed
-service. Supported entries are `/backtests` and `/batches/new`; job, batch, and
+service. Internal test entries include `/backtests` and `/batches/new`; job, batch, and
 `/backtests/compare/{left_job_id}/{right_job_id}` URLs are refreshable.
 
-For direct use, build with `npm run build`, then follow the root README command using separate
-scenario, workspace, and `dist` roots:
+For internal integration debugging only, build with `npm run build` and use separate
+scenario, workspace, and `dist` roots. This is not a supported end-user browser installation;
+users open the [desktop candidate](../../docs/desktop-macos.md):
 
 ```bash
 WHEEL=/absolute/path/to/the-candidate-wheel.whl
@@ -55,7 +60,9 @@ web-env/bin/ea web serve \
 ```
 
 Open `http://127.0.0.1:8765/backtests`; stop the service with `Ctrl-C`. There is no host option and
-Vite development mode is not the delivery entrypoint.
+neither this browser service nor Vite development mode is a product delivery entrypoint.
+Final acceptance uses the installed desktop for native-specific behavior; reuse shared business
+checks rather than cloning them. Preserve narrow-content and text-scaling behavior.
 
 `bounded-long-commission.yaml` is a positive-fee sibling of the legacy scenario. Its registered
 execution policy charges 100 bps per actual Fill, half-even rounded to the settlement currency

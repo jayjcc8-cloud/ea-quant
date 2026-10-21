@@ -1,5 +1,10 @@
 # RADIAN Local Product
 
+Historical/internal API and model-contract reference. The user-facing product is now the
+[QUINE desktop](desktop-macos.md); independent browser/server support is withdrawn by
+[ADR 0050](adr/0050-desktop-only-product-delivery.md). The service commands below remain internal
+development/integration and historical compatibility tools, not a second user entry point.
+
 RADIAN is the AI-native research-and-promotion surface of the installed EA product. It is a
 single-user, loopback-only Web application served by `ea web serve` on top of the existing
 backtest, Candidate, evidence and Mac-local simulated Paper authorities. RADIAN adds no account,

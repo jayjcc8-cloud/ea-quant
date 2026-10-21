@@ -273,6 +273,19 @@ struct Client {
 }
 
 impl Client {
+    fn quiesce(&mut self) -> Value {
+        self.stream
+            .write_all(
+                b"{\"protocol\":\"quine.v1\",\"request\":{\"method\":\"quiesce\",\"params\":{}}}\n",
+            )
+            .unwrap();
+        let mut line = String::new();
+        self.reader.read_line(&mut line).unwrap();
+        let reply: ReplyEnvelope = serde_json::from_str(&line).unwrap();
+        assert!(reply.ok, "{:?}", reply.error);
+        reply.result.unwrap()
+    }
+
     fn connect(workspace: &Path) -> Client {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
@@ -330,7 +343,11 @@ impl CoreProcess {
             .arg("--python")
             .arg(python)
             .args(extras)
-            .stdin(Stdio::null())
+            .stdin(if extras.contains(&"--parent-stdin") {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
         let child = command.spawn().expect("the core must start");
@@ -401,6 +418,86 @@ fn wait_for_path(path: &Path) {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn quiesce_cancels_owned_work_and_reopens_without_replay() {
+    let root = temp_dir("quiesce");
+    let frozen = frozen_input(&scenario_root(&root), None);
+    let hook = root.join("slow-hook.py");
+    std::fs::write(&hook, SLOW_HOOK).unwrap();
+    let reference = format!("{}:hook", hook.display());
+    let mut core = CoreProcess::start(
+        &root,
+        &python(),
+        &["--parent-stdin", "--test-hook", &reference],
+    );
+    let first = confirmed(&core.client.confirm(params("quit-old", 1, &frozen)));
+    wait_for_status(&mut core.client, "quit-old", &["running"]);
+    core.client.quiesce();
+    let mut other = Client::connect(&root);
+    let refused = other.confirm(params("quit-racing", 2, &frozen));
+    assert_eq!(refused.error.unwrap().code, "core_quiescing");
+    assert!(other.query("strategy-a", "quit-racing")["experiment"].is_null());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while core.client.quiesce()["drained"] != true {
+        assert!(Instant::now() < deadline, "drain did not complete");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let settled = core.client.query("strategy-a", "quit-old");
+    assert_eq!(settled["experiment"]["status"], "cancelled");
+    assert!(settled["experiment"]["result"].is_null());
+    assert!(!root.join("official").join(&first.job_id).exists());
+    drop(core.child.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = core.child.try_wait().unwrap() {
+            assert!(status.success(), "cooperative core exit: {status}");
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut reopened = CoreProcess::start(&root, &python(), &[]);
+    let old = confirmed(&reopened.client.confirm(params("quit-old", 1, &frozen)));
+    assert_eq!(old.status, "cancelled");
+    assert_eq!(old.job_id, first.job_id);
+    assert_eq!(old.attempt_id, first.attempt_id);
+    confirmed(&reopened.client.confirm(params("quit-new", 2, &frozen)));
+    wait_for_status(&mut reopened.client, "quit-new", &["succeeded"]);
+    assert_eq!(std::fs::read_dir(root.join("control")).unwrap().count(), 2);
+}
+
+#[test]
+fn parent_eof_without_quiesce_still_uses_the_unknown_recovery_boundary() {
+    let root = temp_dir("owner-loss");
+    let frozen = frozen_input(&scenario_root(&root), None);
+    let hook = root.join("slow-hook.py");
+    std::fs::write(&hook, SLOW_HOOK).unwrap();
+    let reference = format!("{}:hook", hook.display());
+    let mut core = CoreProcess::start(
+        &root,
+        &python(),
+        &["--parent-stdin", "--test-hook", &reference],
+    );
+    let first = confirmed(&core.client.confirm(params("owner-lost", 1, &frozen)));
+    wait_for_status(&mut core.client, "owner-lost", &["running"]);
+    drop(core.child.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = core.child.try_wait().unwrap() {
+            assert_eq!(status.code(), Some(70));
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut reopened = CoreProcess::start(&root, &python(), &[]);
+    let before = reopened.client.query("strategy-a", "owner-lost");
+    assert_eq!(before["experiment"]["status"], "unknown");
+    assert_eq!(before["experiment"]["job_id"], first.job_id);
+    assert_eq!(reopened.client.quiesce()["drained"], true);
+    assert_eq!(reopened.client.query("strategy-a", "owner-lost"), before);
 }
 
 #[test]
@@ -516,6 +613,9 @@ fn real_run_is_registered_as_one_official_result_and_replays_its_identity() {
         "a replay materialized a second input"
     );
 
+    let before_exit = core.client.query("strategy-a", "intent-1");
+    assert_eq!(core.client.quiesce()["drained"], true);
+    assert_eq!(core.client.query("strategy-a", "intent-1"), before_exit);
     core.kill();
 }
 

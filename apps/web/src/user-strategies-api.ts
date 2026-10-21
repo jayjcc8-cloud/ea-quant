@@ -124,6 +124,8 @@ export type UserStrategyEvidenceRun = {
  * only thing such a call was told about them.
  */
 export type UserStrategyCall = {
+  tool_results?: { tool: string; tool_id: string; status: 'done' | 'failed'; text: string }[]
+  model_profile?: { id: string; name: string; revision: number; route_version: string }
   call_id: string
   /**
    * The turn this call belongs to. The root call of a turn is its own id; a call
@@ -134,6 +136,7 @@ export type UserStrategyCall = {
   base_revision: number
   status: UserStrategyCallStatus
   route: UserStrategyRoute
+  task?: { mode?: string; limit: number; status: string; stop_reason: string | null }
   approved_budget: { max_model_calls: number; max_backtests: number }
   reserved_at: string
   message: string | null
@@ -296,6 +299,13 @@ export type UserStrategyExperimentPayload = {
  * with is retained on the record, so the same intent always resolves to the same
  * run even after the draft moves on.
  */
+export type UnknownRecovery = {
+  status: 'unavailable' | 'prepare_required' | 'restart_required' | 'ready' | 'released'
+  preparation_id: string | null
+  prepared_at: number | null
+  released_at: number | null
+}
+
 export type UserStrategyExperiment = {
   launch_intent_id: string
   request_id: string
@@ -312,6 +322,9 @@ export type UserStrategyExperiment = {
    * of that owner's own record — never a second authority.
    */
   owner?: 'quine' | null
+  slot_held?: boolean | null
+  core_revision?: number | null
+  recovery?: UnknownRecovery | null
   /** The core's own last bounded progress phase while the run is live. */
   phase?: string | null
   /** Whether the core registered a success *and* its official bytes are readable. */
@@ -325,6 +338,7 @@ export type UserStrategyExperiment = {
 }
 
 export type UserStrategy = {
+  model_profile_id?: string | null
   schema: 'ea.user-strategy.v1'
   user_strategy_id: string
   created_at: string
@@ -388,6 +402,7 @@ export type UserStrategyConversationPhase =
   | 'awaiting_proposal'
   | 'awaiting_confirmation'
   | 'awaiting_observation'
+  | 'awaiting_budget'
 
 export type UserStrategyConversationPending = {
   phase: UserStrategyConversationPhase
@@ -401,10 +416,8 @@ export type UserStrategyConversationPending = {
 }
 
 /**
- * What one conversation is waiting for and what it may still spend, read from the
- * host rather than from a checkpoint: a reloaded page restores exactly this.
- * `remaining_model_calls` counts the workspace's own shared reservation ledger, so
- * it is the same bound every other conversation in this workspace is held to.
+ * Host-owned pending state, new-turn limit and cumulative recorded reservations.
+ * The cumulative count is usage evidence, not a remaining provider balance.
  */
 export type UserStrategyConversation = {
   strategy_id: string
@@ -412,10 +425,13 @@ export type UserStrategyConversation = {
   pending: UserStrategyConversationPending | null
   preview: UserStrategyPreview | null
   open_proposals: string[]
+  task?: { turn_id: string; limit: number; used: number; remaining: number; status: string; stop_reason: string | null } | null
   budget: {
-    max_model_calls: number
+    task_budget_required?: boolean
+    max_task_requests?: number
+    max_interactive_requests?: number
+    max_model_calls_per_turn: number
     reserved_model_calls: number
-    remaining_model_calls: number
     max_backtests: number
   }
 }
@@ -423,7 +439,9 @@ export type UserStrategyConversation = {
 /** One decision, naming the identities the pending record already holds. */
 export type UserStrategyResumeRequest = {
   turn_id: string
-  action: 'applied' | 'rejected' | 'confirm' | 'declined' | 'observe'
+  action: 'applied' | 'rejected' | 'confirm' | 'declined' | 'observe' | 'budget' | 'cancel' | 'continue'
+  grant_id?: string
+  total_model_calls?: number
   proposal_id?: string | null
   base_revision?: number | null
   launch_intent_id?: string | null
@@ -432,6 +450,7 @@ export type UserStrategyResumeRequest = {
 
 /** What one turn is waiting on, as the interrupt itself states it. */
 export type UserStrategyConversationWaiting =
+  | { kind: 'budget'; turn_id: string; reason: string }
   | { kind: 'proposal'; turn_id: string; proposal_id: string; base_revision: number }
   | {
       kind: 'confirmation'
@@ -631,6 +650,8 @@ async function streamRequest(
 }
 
 export const userStrategiesApi = {
+  selectModelProfile: (id: string, profileId: string | null) =>
+    write<UserStrategy>(`${base(id)}/model-profile`, { profile_id: profileId }),
   async list(): Promise<UserStrategy[]> {
     return (await apiRequest<{ strategies: UserStrategy[] }>('/api/user-strategies')).strategies
   },
@@ -656,6 +677,7 @@ export const userStrategiesApi = {
       operation_id: string
       base_revision: number
       scenario_id: string
+      dataset_id?: string
       criterion?: UserStrategyCriterionInput | null
     },
   ) => write<UserStrategy>(`${base(userStrategyId)}/bind-scenario`, input),
@@ -701,7 +723,8 @@ export const userStrategiesApi = {
       call_id: string
       base_revision: number
       text: string
-      approved_budget: ApprovedBudget
+      task_budget?: number
+      approved_budget?: ApprovedBudget
       evidence_job_ids?: string[]
     },
     signal?: AbortSignal,
@@ -773,6 +796,9 @@ export const userStrategiesApi = {
    * Ask the run's owner to stop one confirmed experiment. Only the owner decides
    * what that means; this returns the strategy, not a claim that the run stopped.
    */
+  recoverExperiment: (userStrategyId: string, launchIntentId: string, input: {
+    action: 'prepare' | 'release'; attempt_id: string; expected_revision: number; preparation_id: string
+  }) => write<UserStrategy>(`${base(userStrategyId)}/experiments/${encodeURIComponent(launchIntentId)}/recovery`, input),
   cancelExperiment: (userStrategyId: string, launchIntentId: string) =>
     write<UserStrategy>(
       `${base(userStrategyId)}/experiments/${encodeURIComponent(launchIntentId)}/cancel`,

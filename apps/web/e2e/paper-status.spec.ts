@@ -339,29 +339,24 @@ test('模拟观测 and 独立回测 are two separate entries, and the backtest e
   const traffic = record(page)
   await page.goto('/runs')
 
-  // The main navigation has three entries and no fourth one: the independent
-  // backtest area is not a destination of its own here.
-  const nav = page.getByRole('navigation', { name: '主导航' })
-  await expect(nav.getByRole('link', { name: '研究' })).toHaveAttribute('href', '/strategies')
-  await expect(nav.getByRole('link', { name: '运行' })).toHaveAttribute('href', '/runs')
-  await expect(nav.getByRole('link', { name: '数据' })).toHaveAttribute('href', '/data')
-  await expect(nav.getByRole('link', { name: '回测' })).toHaveCount(0)
-
-  // The backtest area is reached from the research workspace's own history
-  // disclosure; visiting it creates nothing, and it is a separate destination.
-  await nav.getByRole('link', { name: '研究' }).click()
+  // The read-only observation route returns through the shell brand. Research
+  // owns the current four business destinations and one history entry.
+  await page.getByRole('link', { name: 'QUINE', exact: true }).click()
   await expect(page).toHaveURL(/\/strategies$/)
-  await expect(page.getByRole('heading', { name: '研究', exact: true })).toBeVisible()
-  const history = page.locator('details.provenance')
-    .filter({ has: page.locator('summary', { hasText: '历史记录' }) }).first()
-  await expect(history).not.toHaveAttribute('open', '')
-  await history.locator('summary').first().click()
-  await history.getByRole('link', { name: '独立回测' }).click()
-  await expect(page).toHaveURL(/\/backtests$/)
-  await expect(page.getByRole('heading', { name: 'Offline Backtests' })).toBeVisible()
+  const nav = page.getByRole('navigation', { name: '主导航' })
+  for (const [name, href] of [['研究', '/strategies'], ['模拟运行', '/runs'], ['实盘运行', '/live'], ['回测记录', '/backtests']]) {
+    await expect(nav.getByRole('link', { name, exact: true })).toHaveAttribute('href', href)
+  }
+  await expect(nav.getByRole('link')).toHaveCount(4)
+  const history = page.getByRole('link', { name: '历史记录', exact: true })
+  await expect(history).toHaveCount(1)
+  await expect(history).toHaveAttribute('href', '/backtests#history-records')
+  await history.click()
+  await expect(page).toHaveURL(/\/backtests#history-records$/)
+  await expect(page.getByRole('heading', { name: '回测记录' })).toBeVisible()
   expect(traffic.methods().filter(method => method !== 'GET')).toEqual([])
 
-  await nav.getByRole('link', { name: '运行' }).click()
+  await nav.getByRole('link', { name: '模拟运行', exact: true }).click()
   await expect(page).toHaveURL(/\/runs$/)
   await expect(page.locator('.paper-status h1')).toHaveText('模拟观测')
   expect(traffic.methods().filter(method => method !== 'GET')).toEqual([])

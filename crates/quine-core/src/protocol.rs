@@ -13,10 +13,48 @@ pub struct Envelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum Request {
-    Confirm { params: ConfirmParams },
-    Cancel { params: CancelParams },
-    Query { params: QueryParams },
-    List { params: ListParams },
+    Confirm {
+        params: ConfirmParams,
+    },
+    Cancel {
+        params: CancelParams,
+    },
+    Query {
+        params: QueryParams,
+    },
+    List {
+        params: ListParams,
+    },
+    PrepareRecovery {
+        params: RecoveryParams,
+    },
+    ReleaseUnknown {
+        params: RecoveryParams,
+    },
+    /// Close dispatch admission and drain only work owned by this core session.
+    Quiesce {
+        params: ListParams,
+    },
+}
+
+/// Explicit recovery actions name the exact durable attempt/fence. OS evidence
+/// is never accepted from clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryParams {
+    pub strategy_id: String,
+    pub intent_id: String,
+    pub attempt_id: String,
+    pub expected_revision: i64,
+    pub preparation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryInfo {
+    pub status: String,
+    pub preparation_id: Option<String>,
+    pub prepared_at: Option<i64>,
+    pub released_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +138,8 @@ pub struct Experiment {
     pub job_id: String,
     pub attempt_id: String,
     pub dispatch_eligible: bool,
+    pub slot_held: bool,
+    pub recovery: Option<RecoveryInfo>,
     pub dispatch_owner: Option<String>,
     pub revision: i64,
     pub result: Option<serde_json::Value>,

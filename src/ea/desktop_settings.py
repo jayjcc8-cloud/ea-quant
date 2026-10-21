@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import stat
 import threading
 from dataclasses import dataclass, field
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from ea import __version__
 from ea.web.settings import RadianSettings, atomic_private_json
 
 
@@ -82,6 +84,28 @@ class DesktopSettings:
             raise ValueError("桌面偏好格式错误。")
         return value
 
+    def application_identity(self) -> dict[str, Any]:
+        identity: dict[str, Any] = {
+            "desktop_version": None,
+            "engine_version": __version__,
+            "build_id": None,
+            "source_revision": None,
+            "source_dirty": None,
+            "built_at": None,
+        }
+        try:
+            source = json.loads((self.runtime / "build-info.json").read_text())
+            if type(source) is dict:
+                for key in ("desktop_version", "build_id", "source_revision", "built_at"):
+                    value = source.get(key)
+                    if isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9.+_:T/-]{1,100}", value):
+                        identity[key] = value
+                if type(source.get("source_dirty")) is bool:
+                    identity["source_dirty"] = source["source_dirty"]
+        except (OSError, ValueError):
+            pass  # Older bundles truthfully have no build source.
+        return identity
+
     def status(self) -> dict[str, Any]:
         with self.mutex:
             prefs = self.preferences()
@@ -106,6 +130,7 @@ class DesktopSettings:
                     "configuration_error": model_error,
                 }
             return {
+                "application": self.application_identity(),
                 "workspace": str(self.root),
                 "next_workspace": prefs.get("next_workspace", str(self.root)),
                 "theme": prefs.get("theme", "system"),
@@ -114,14 +139,60 @@ class DesktopSettings:
                 "model_error": model_error,
             }
 
+    def validate_next_workspace(self, raw: object) -> Path:
+        """Validate the target before any runtime stop or settings write."""
+        self.status()
+        if not isinstance(raw, str) or len(raw) > 4096:
+            raise ValueError("工作区路径无效。")
+        target = Path(raw)
+        if target != self.root:
+            validate_workspace(target, self.runtime)
+            if target in self.root.parents or self.root in target.parents:
+                raise ValueError("工作区不能相互嵌套。")
+        return target
+
     def update(self, body: dict[str, Any]) -> dict[str, Any]:
         with self.mutex:
             self.status()  # Verify both stores are readable before any change.
             # One explicit save per operation; no cross-file partial transaction.
-            if len(body) != 1 or not set(body) <= {"model", "theme", "next_workspace"}:
+            if len(body) != 1 or not set(body) <= {
+                "model",
+                "model_profile",
+                "default_model_profile",
+                "theme",
+                "next_workspace",
+            }:
                 raise ValueError("请选择一个设置保存。")
             if "model" in body:
                 self.save_model(body["model"])
+            elif "model_profile" in body:
+                value = body["model_profile"]
+                if not isinstance(value, dict):
+                    raise ValueError("连接档案格式无效。")
+                identity, name = value.get("id"), value.get("name")
+                if (
+                    not isinstance(identity, str)
+                    or identity == "legacy"
+                    or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", identity)
+                ):
+                    raise ValueError("连接 ID 无效。")
+                if not isinstance(name, str) or not 1 <= len(name.strip()) <= 100:
+                    raise ValueError("请填写连接名称（最多 100 字）。")
+                self.save_model(
+                    {k: v for k, v in value.items() if k not in ("id", "name")},
+                    profile_id=identity,
+                    name=name.strip(),
+                )
+            elif "default_model_profile" in body:
+                store = RadianSettings(self.root / "settings.json")
+                private_file(store.path)
+                identity = body["default_model_profile"]
+                if not isinstance(identity, str):
+                    raise ValueError("连接 ID 无效。")
+                store.profile(identity)
+                document = store.load()
+                document["default_profile_id"] = identity
+                store.save(document)
             else:
                 prefs = self.preferences()
                 if "theme" in body:
@@ -133,19 +204,12 @@ class DesktopSettings:
                         raise ValueError("主题无效。")
                     prefs["theme"] = body["theme"]
                 else:
-                    raw = body["next_workspace"]
-                    if not isinstance(raw, str) or len(raw) > 4096:
-                        raise ValueError("工作区路径无效。")
-                    target = Path(raw)
-                    if target != self.root:
-                        validate_workspace(target, self.runtime)
-                        if target in self.root.parents or self.root in target.parents:
-                            raise ValueError("工作区不能相互嵌套。")
+                    target = self.validate_next_workspace(body["next_workspace"])
                     prefs["next_workspace"] = str(target)
                 atomic_private_json(self.path, prefs)
             return self.status()
 
-    def save_model(self, value: object) -> None:
+    def save_model(self, value: object, *, profile_id: str | None = None, name: str = "") -> None:
         if not isinstance(value, dict) or not set(value) <= {
             "provider",
             "model",
@@ -185,7 +249,11 @@ class DesktopSettings:
         store = RadianSettings(self.root / "settings.json")
         private_file(store.path)
         document = store.load() or {"schema": "radian.settings.v1"}
-        old = document.get("model") or {}
+        old = (
+            (document.get("model_profiles", {}).get(profile_id) or {})
+            if profile_id
+            else (document.get("model") or {})
+        )
         key = value.get("api_key", "")
         changed_route = (
             old.get("provider") != value.get("provider") or (old.get("base_url") or "") != endpoint
@@ -193,10 +261,16 @@ class DesktopSettings:
         # Never silently forward an existing credential to a different provider/URL.
         if changed_route and old.get("api_key") and not key and not value.get("clear_key"):
             raise ValueError("更改提供方或端点时，请重新输入凭据或明确清除旧凭据。")
-        document["model"] = {
+        model = {
             "provider": value.get("provider"),
             "model": value["model"].strip(),
             "base_url": endpoint or None,
             "api_key": None if value.get("clear_key") else (key or old.get("api_key")),
         }
+        if profile_id:
+            model.update({"name": name, "revision": int(old.get("revision", 0)) + 1})
+            document.setdefault("model_profiles", {})[profile_id] = model
+        else:
+            model["revision"] = int(old.get("revision", 0)) + 1
+            document["model"] = model
         store.save(document)

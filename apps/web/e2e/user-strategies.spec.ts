@@ -140,6 +140,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
 
   // One idea, saved through the browser first: the entry point asks for the idea,
   // not for a scenario, so a save needs no catalog and writes no executable field.
+  await page.getByRole('button', { name: '新建研究', exact: true }).click()
   await page.getByLabel('策略名称').fill('Trend follow')
   await page.getByLabel('意图').fill('Check whether a delayed entry still pays for its own costs on the registered data')
   await page.getByRole('button', { name: '保存想法' }).click()
@@ -195,8 +196,8 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   })
   // With a strategy open the save form gives way to the page, and one obvious
   // entry point to creating another stays on screen.
-  await expect(page.getByRole('region', { name: '新建策略' })).toBeHidden()
-  await expect(page.getByRole('link', { name: '新建策略' })).toBeVisible()
+  await expect(page.getByRole('region', { name: '新建研究' })).toBeHidden()
+  await expect(page.getByRole('navigation', { name: '主导航' }).getByRole('link', { name: '研究', exact: true })).toBeVisible()
   const draftPanel = page.getByRole('region', { name: '草稿' })
   await expect(draftPanel.getByText(`草稿修订 ${boundRevision}`, { exact: true })).toBeVisible()
   await expect(draftPanel.getByText(`${first.draft.initial_cash} USD`)).toBeVisible()
@@ -302,14 +303,13 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
 
   // Follow the current inline evidence entry and its own independent report link.
   await experimentPanel.getByRole('link', { name: '查看这次实验报告' }).click()
-  const reportDetails = page.getByRole('region', { name: '证据' }).locator('details.provenance')
-    .filter({ has: page.locator('summary', { hasText: '成交与完整报告' }) }).first()
-  await reportDetails.locator('summary').click()
-  await reportDetails.getByRole('link', { name: '独立报告链接' }).click()
+  await page.getByRole('region', { name: '证据' }).getByRole('link', { name: '独立报告链接' }).click()
   await expect(page).toHaveURL(new RegExp(`/backtests/${experiment.job_id}$`))
-  await expect(page.locator('.page-title .status')).toHaveText('succeeded')
+  await expect(page.locator('.page-title .status')).toHaveText('已完成')
+  await page.locator('summary').filter({ hasText: '原始执行字段' }).click()
   await expect(page.getByRole('link', { name: 'Download report.json' })).toBeVisible()
   await page.reload()
+  await page.locator('summary').filter({ hasText: '原始执行字段' }).click()
   await expect(page.getByRole('link', { name: 'Download report.json' })).toBeVisible()
 
   // The run executed the confirmed draft, not today's anything.
@@ -340,13 +340,15 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   // A strategy with a frozen run opens on the tab that holds it.
   await expect(page.getByRole('tab', { name: '实验' })).toHaveAttribute('aria-selected', 'true')
   const evidence = page.getByRole('region', { name: '证据' })
-  const metrics = evidence.locator('dl.evidence-metrics')
+  const metrics = evidence.locator('.report-raw-values')
+  await metrics.locator('summary').click()
   await expect(metrics).toContainText(`${netPnl.amount} ${netPnl.currency ?? report.economics.currency}`)
   await expect(metrics).toContainText(`${fee.amount} ${fee.currency ?? report.economics.currency}`)
   // The identity this report was read under stays on screen: the web job, the
   // engine run and the report digest are the persisted ones. It is deliberate
   // detail behind its own summary, so that summary is opened to read it.
   expect(jobDocument.engine_run_id, 'the engine run must have its own id').toBeTruthy()
+  await evidence.getByRole('navigation', { name: '报告视图' }).getByRole('button', { name: '输入与来源', exact: true }).click()
   const provenance = evidence.locator('details.provenance')
     .filter({ has: page.locator('summary', { hasText: '技术细节与来源' }) }).first()
   await expect(provenance).not.toHaveAttribute('open', '')
@@ -356,13 +358,9 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   await expect(provenance).toContainText(jobDocument.report_sha256)
   // The run itself, and its report, are one click from here — and the digest the
   // link carries is the digest of this run's own persisted report.
-  const trades = evidence.locator('details.provenance')
-    .filter({ has: page.locator('summary', { hasText: '成交与完整报告' }) }).first()
-  await expect(trades).not.toHaveAttribute('open', '')
-  await trades.locator('summary').first().click()
-  await expect(trades.getByRole('link', { name: '独立报告链接' }))
+  await expect(evidence.getByRole('link', { name: '独立报告链接' }))
     .toHaveAttribute('href', `/backtests/${experiment.job_id}`)
-  await expect(trades.getByRole('link', { name: '下载正式报告' }))
+  await expect(evidence.getByRole('link', { name: '下载正式报告', exact: true }))
     .toHaveAttribute('href', `/api/backtests/${experiment.job_id}/artifacts/report.json`)
   // And where the rest of the research belongs: one explicit holdout entry for
   // this exact frozen run.
@@ -385,13 +383,13 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   ).toBeLessThanOrEqual(1)
   await page.screenshot({ path: testInfo.outputPath('strategy-evidence-420.png'), fullPage: true })
 
-  // The other way into saving one: a single click on the header action opens the
-  // form here, and it asks for the idea alone — no scenario, so no catalog is
-  // needed and nothing is created by opening it.
+  // Return through the main research entry and open the create action. The form
+  // asks for the idea alone; opening it neither binds a scenario nor creates data.
   await page.setViewportSize({ width: 1400, height: 1000 })
-  await page.getByRole('link', { name: '新建策略' }).click()
+  await page.getByRole('navigation', { name: '主导航' }).getByRole('link', { name: '研究', exact: true }).click()
+  await page.getByRole('button', { name: '新建研究', exact: true }).click()
   await expect(page).toHaveURL(/\/strategies$/)
-  const createForm = page.getByRole('region', { name: '新建策略' })
+  const createForm = page.getByRole('region', { name: '新建研究' })
   await expect(createForm).toBeVisible()
   await expect(createForm.getByLabel('策略名称')).toBeVisible()
   await expect(createForm.getByLabel('意图')).toBeVisible()
@@ -436,12 +434,9 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   const firstRow = table.locator('tr').filter({ has: page.getByRole('link', { name: 'Trend follow', exact: true }) })
   await expect(firstRow.getByRole('link', { name: /成功/ }))
     .toHaveAttribute('href', `/strategies/${firstId}?tab=experiments&evidence_a=${experiment.job_id}`)
-  // And the legacy research workspace stays one click away on this route, behind
-  // the collection's history disclosure.
-  const history = page.locator('details.provenance')
-    .filter({ has: page.locator('summary', { hasText: '历史记录' }) }).first()
-  await expect(history).not.toHaveAttribute('open', '')
-  await history.locator('summary').first().click()
+  // The one history entry leads to the existing read-only classifications.
+  await page.getByRole('link', { name: '历史记录' }).click()
+  const history = page.getByRole('navigation', { name: '历史记录分类' })
   await expect(history.getByRole('link', { name: '旧研究任务' })).toHaveAttribute('href', '/research')
   await page.screenshot({ path: testInfo.outputPath('strategy-workspace.png'), fullPage: true })
 
@@ -631,7 +626,7 @@ test('existing report returns to its persisted strategy without writes', async (
   const returnHref = `/strategies/${strategyId}?evidence_a=${jobId}`
   await page.setViewportSize({ width: 1400, height: 1000 })
   await page.goto(`/backtests/${jobId}`)
-  await expect(page.locator('.page-title .status')).toHaveText('succeeded')
+  await expect(page.locator('.page-title .status')).toHaveText('已完成')
   await expect(association.getByText(strategy.name, { exact: true })).toBeVisible()
   await expect(association.getByText(`冻结 v${frozen}`)).toBeVisible()
   if (other.name === strategy.name) {
@@ -642,6 +637,7 @@ test('existing report returns to its persisted strategy without writes', async (
   }
   await expect(returnLink).toHaveAttribute('href', returnHref)
   // The formal report stays the report: its own evidence and downloads are intact.
+  await page.locator('summary').filter({ hasText: '原始执行字段' }).click()
   await expect(page.getByRole('link', { name: 'Download report.json' })).toBeVisible()
   expect(await appearanceInForce(), 'opening the report must not disturb the appearance').toEqual(['dark', 'compact'])
   await page.screenshot({ path: testInfo.outputPath('report-return-1400.png'), fullPage: true })
@@ -663,10 +659,10 @@ test('existing report returns to its persisted strategy without writes', async (
     await expect(page.locator('ol.message-list li').first()).toContainText(earlierMessages[0].text)
   }
   const contextLabel = page.getByLabel('AI 当前上下文')
-  await expect(contextLabel).toContainText(strategy.name)
+  await expect(page.getByRole('region', { name: 'AI 协作' }).locator('.agent-object')).toContainText(strategy.name)
   await expect(contextLabel).toContainText(`草稿 v${strategy.draft.revision}`)
-  await expect(page.getByLabel('当前策略')).toHaveValue(strategyId)
-  await expect(page.getByLabel('当前策略')).not.toHaveValue(otherStrategyId)
+  await expect(contextLabel.getByRole('link', { name: `草稿 v${strategy.draft.revision}`, exact: true })).toHaveAttribute('href', new RegExp(`/strategies/${strategyId}[?]`))
+  await expect(contextLabel.locator(`a[href*='${otherStrategyId}']`)).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('report-return-strategy-1400.png'), fullPage: true })
 
   // A reload of the report shows the same association, read again from the records.
@@ -686,6 +682,7 @@ test('existing report returns to its persisted strategy without writes', async (
   await page.screenshot({ path: testInfo.outputPath('report-return-420.png'), fullPage: true })
   await returnLink.click()
   await expect(page).toHaveURL(`${origin}${returnHref}`)
+  await page.getByRole('group', { name: '工作区视图' }).getByRole('button', { name: 'AI 协作', exact: true }).click()
   await expect(page.getByRole('region', { name: 'AI 协作' })).toBeVisible()
   expect(await appearanceInForce(), 'the appearance must survive the navigation').toEqual(['dark', 'compact'])
 
@@ -707,6 +704,7 @@ test('existing report returns to its persisted strategy without writes', async (
   await independent.screenshot({ path: testInfo.outputPath('report-return-independent-420.png'), fullPage: true })
   await independent.getByRole('link', { name: '返回此策略继续研究' }).click()
   await expect(independent).toHaveURL(`${origin}${returnHref}`)
+  await independent.getByRole('group', { name: '工作区视图' }).getByRole('button', { name: 'AI 协作', exact: true }).click()
   await expect(independent.getByRole('region', { name: 'AI 协作' })).toBeVisible()
   await independent.close()
 

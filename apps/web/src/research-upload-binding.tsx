@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { SourceLink as Link } from './workspace-navigation'
 import type { ApiAdapter } from './app'
 import { isIntentDraft, UserStrategyRequestError, type UserStrategy } from './user-strategies-api'
 
@@ -15,10 +15,11 @@ export function importTarget(search: string): ImportTarget | null {
 }
 
 /** An uploaded version stays unbound until this exact, revision-bound choice. */
-export function ResearchUploadBinding({ api, target, datasetId }: {
+function BoundResearchUpload({ api, target, datasetId }: {
   api: ApiAdapter; target: ImportTarget | null; datasetId: string
 }) {
   const [strategy, setStrategy] = useState<UserStrategy | null>(null)
+  const [dataset, setDataset] = useState<{ venue?: string; symbol?: string } | null>(null)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -31,11 +32,12 @@ export function ResearchUploadBinding({ api, target, datasetId }: {
   const targetId = target?.id
   useEffect(() => {
     active.current = true
+    void api.listDatasets?.().then(items => { if (active.current) setDataset(items.find(item => item.dataset_id === datasetId) ?? null) }).catch(() => { /* backend rechecks compatibility */ })
     if (targetId && api.getUserStrategy) api.getUserStrategy(targetId)
       .then(value => { if (active.current && value.user_strategy_id === targetId) setStrategy(value) })
       .catch(() => { if (active.current) setError('无法读取目标研究，请返回研究核对。') })
     return () => { active.current = false }
-  }, [api, targetId]) // target is captured by the keyed upload panel.
+  }, [api, targetId, datasetId]) // target is captured by the keyed upload panel.
   const recordPending = (operation: string | null) => {
     setPending(operation)
     if (operation) sessionStorage.setItem(key, operation)
@@ -49,8 +51,9 @@ export function ResearchUploadBinding({ api, target, datasetId }: {
     if (!active.current) return
     recordPending(null); setStrategy(value); setSuccess(true); setError('')
   }
+  const incompatible = strategy && !isIntentDraft(strategy.draft) && dataset?.venue && dataset.symbol && (dataset.venue !== strategy.draft.venue || dataset.symbol !== strategy.draft.symbol)
   const choose = async () => {
-    if (inFlight.current || pending || !target || !api.selectUserStrategyDataset || !strategy) return
+    if (incompatible || inFlight.current || pending || !target || !api.selectUserStrategyDataset || !strategy) return
     inFlight.current = true; setBusy(true); setError('')
     const operation = `csv-${crypto.randomUUID()}`
     try {
@@ -78,11 +81,31 @@ export function ResearchUploadBinding({ api, target, datasetId }: {
     <p>{strategy ? `目标研究：${strategy.name} · 导入时修订 ${target.revision}` : '正在读取目标研究…'}</p>
     {success ? <p role="status">已用于当前研究，草稿修订 {strategy?.draft.revision}。旧预览已失效，尚未运行实验。</p>
       : <><p className="muted">已发布，尚未绑定。后端将校验此版本与整份草稿的兼容性。</p>
+        {strategy && isIntentDraft(strategy.draft) && <p>此研究还只有想法。请返回当前研究，选择支持模板及这个已发布版本；无需重新导入。</p>}
         {strategy && stale && <p role="alert">目标草稿已改变，请返回研究后重新选择此已发布版本。</p>}
-        <button type="button" className="primary" disabled={!strategy || stale || isIntentDraft(strategy.draft) || busy || Boolean(pending) || !api.selectUserStrategyDataset}
+        {incompatible && <p role="alert">标的不兼容：数据为 {dataset?.venue}:{dataset?.symbol}，目标研究使用 {strategy && !isIntentDraft(strategy.draft) ? `${strategy.draft.venue}:${strategy.draft.symbol}` : '未绑定'}。不可绑定。</p>}
+        <button type="button" className="primary" disabled={!!incompatible || !strategy || stale || isIntentDraft(strategy.draft) || busy || Boolean(pending) || !api.selectUserStrategyDataset}
           onClick={() => { void choose() }}>用于当前研究</button></>}
     {pending && <button type="button" disabled={busy} onClick={() => { void reconcile() }}>核对绑定结果</button>}
     {error && <p className="notice error" role="alert">{error}</p>}
     <p><Link to={target.returnTo}>返回当前研究</Link></p>
+  </section>
+}
+
+/** One target picker for both a library dataset and a newly published version. */
+export function ResearchUploadBinding({ api, target, datasetId }: { api: ApiAdapter; target: ImportTarget | null; datasetId: string }) {
+  const [strategies, setStrategies] = useState<UserStrategy[] | null>(null)
+  const [error, setError] = useState('')
+  const [selected, setSelected] = useState('')
+  useEffect(() => {
+    let active = true
+    if (!target && api.listUserStrategies) void api.listUserStrategies().then(items => { if (active) setStrategies(items) }).catch(() => { if (active) setError('研究列表不可读，请返回研究检查。') })
+    return () => { active = false }
+  }, [api, target])
+  const item = strategies?.find(value => value.user_strategy_id === selected)
+  const chosen = target ?? (item ? { id: item.user_strategy_id, revision: item.draft.revision, returnTo: `/strategies/${encodeURIComponent(item.user_strategy_id)}?tab=strategy` } : null)
+  return <section className="dataset-binding-picker">
+    {!target && <><h3>选择研究并绑定</h3><p>只修改目标的可编辑草稿，冻结报告不变。</p><label>目标研究<select value={selected} onChange={e => setSelected(e.target.value)}><option value="">请选择目标研究</option>{strategies?.map(value => <option value={value.user_strategy_id} key={value.user_strategy_id}>{value.name} · 草稿 v{value.draft.revision} · 未指定交易所</option>)}</select></label>{error && <p role="alert">{error}</p>}<Link to="/strategies" state={{ createStrategy: true }}>新建研究</Link></>}
+    {chosen && <BoundResearchUpload key={`${chosen.id}.${chosen.revision}.${datasetId}`} api={api} target={chosen} datasetId={datasetId} />}
   </section>
 }

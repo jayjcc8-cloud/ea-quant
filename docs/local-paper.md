@@ -128,7 +128,7 @@ the capture against its own manifest; `ea paper restore --backup DIR --run-dir N
 first, then materialises a new isolated attempt that reopens through the existing recovery path.
 The source backup is immutable and a live workspace is never overwritten in place.
 
-`ea paper alerts evaluate --run-dir DIR` observes nine signals and updates one durable local alert
+`ea paper alerts evaluate --run-dir DIR --stream PATH` observes nine signals and updates one durable local alert
 stream. Alerts carry `alert_id`, `type`, `severity`, `state` (ACTIVE/RESOLVED), `first_seen`,
 `last_seen`, `run_id`/`account_id`, `reason` and a required `operator_action`. A repeated
 observation updates the existing alert rather than creating another. A signal that cannot be

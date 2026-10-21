@@ -10,10 +10,13 @@ surface must present honestly, never as a working provider.
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
+import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -34,6 +37,7 @@ class RadianSettings:
     """One settings file location, owned by the backend only."""
 
     path: Path
+    _snapshot: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     @staticmethod
     def default_path() -> Path:
@@ -44,6 +48,8 @@ class RadianSettings:
 
     def load(self) -> dict[str, Any]:
         """Return the stored document, or the empty default when absent."""
+        if self._snapshot is not None:
+            return copy.deepcopy(self._snapshot)
         try:
             payload = self.path.read_bytes()
         except FileNotFoundError:
@@ -64,7 +70,45 @@ class RadianSettings:
         _validate(document)
         atomic_private_json(self.path, document)
 
-    def status(self) -> dict[str, Any]:
+    def profile(self, profile_id: str | None = None) -> tuple[str, dict[str, Any]]:
+        document = self.load()
+        identity = profile_id or document.get("default_profile_id") or "legacy"
+        model = (
+            (document.get("model") or {})
+            if identity == "legacy"
+            else (document.get("model_profiles", {}).get(identity))
+        )
+        if not isinstance(model, dict):
+            raise RadianSettingsError("the selected model connection does not exist")
+        return identity, copy.deepcopy(model)
+
+    def profile_ref(self, profile_id: str | None = None) -> dict[str, Any]:
+        identity, model = self.profile(profile_id)
+        # No key or key hash enters the research record. Explicit saves increment
+        # revision; the route digest also detects manual non-secret route edits.
+        safe = {key: model.get(key) for key in ("provider", "model", "base_url", "revision")}
+        version = hashlib.sha256(json.dumps(safe, sort_keys=True).encode()).hexdigest()
+        return {
+            "id": identity,
+            "name": model.get("name") or "原有连接",
+            "revision": model.get("revision", 1),
+            "route_version": version,
+        }
+
+    def snapshot(self, profile_id: str | None = None) -> RadianSettings:
+        # One read fixes both protocol selection and the adapter's request. The
+        # credential stays only in this private in-memory object, never history.
+        document = self.load()
+        source = RadianSettings(self.path, document)
+        _, model = source.profile(profile_id)
+        if not model.get("api_key") and model.get("api_key_env"):
+            model["api_key"] = os.environ.get(model["api_key_env"], "")
+        return RadianSettings(
+            self.path,
+            {"schema": _SCHEMA, "model": model, "research": document.get("research") or {}},
+        )
+
+    def status(self, profile_id: str | None = None, *, _catalog: bool = True) -> dict[str, Any]:
         """Project the model configuration without exposing any secret.
 
         The projection names the provider, the protocol that provider value
@@ -78,8 +122,11 @@ class RadianSettings:
             document = self.load()
         except RadianSettingsError:
             document = {}
-        raw_model = document.get("model")
-        model: dict[str, Any] = raw_model if isinstance(raw_model, dict) else {}
+        source = RadianSettings(self.path, document)
+        try:
+            identity, model = source.profile(profile_id)
+        except RadianSettingsError:
+            identity, model = profile_id or "legacy", {}
         provider = model.get("provider")
         provider = provider if isinstance(provider, str) else None
         endpoint = model.get("base_url")
@@ -112,6 +159,19 @@ class RadianSettings:
             )
         return {
             "schema": "radian.settings-status.v1",
+            "profile_id": identity,
+            "default_profile_id": document.get("default_profile_id") or "legacy",
+            **(
+                {
+                    "profiles": [
+                        {**source.status(item, _catalog=False), **source.profile_ref(item)}
+                        for item in (["legacy"] if document.get("model") else [])
+                        + list(document.get("model_profiles") or {})
+                    ]
+                }
+                if _catalog
+                else {}
+            ),
             "settings_file": str(self.path),
             # Local readiness is not proof of a valid key or a real request.
             "configured": configured,
@@ -140,9 +200,31 @@ def _validate(document: object) -> None:
         return
     if not isinstance(document, dict) or document.get("schema") != _SCHEMA:
         raise RadianSettingsError("settings schema is not supported")
-    model = document.get("model")
-    if model is None:
-        return
+    profiles = document.get("model_profiles", {})
+    if not isinstance(profiles, dict) or len(profiles) > 32:
+        raise RadianSettingsError("model profiles must be a bounded object")
+    for identity, entry in profiles.items():
+        if (
+            not isinstance(identity, str)
+            or identity == "legacy"
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", identity)
+        ):
+            raise RadianSettingsError("model profile identity is invalid")
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("name"), str)
+            or not 1 <= len(entry["name"]) <= 100
+        ):
+            raise RadianSettingsError("model profile name is invalid")
+        if type(entry.get("revision")) is not int or entry["revision"] < 1:
+            raise RadianSettingsError("model profile revision is invalid")
+        _validate({"schema": _SCHEMA, "model": entry})
+    selected = document.get("default_profile_id")
+    if selected is not None and (
+        not isinstance(selected, str) or (selected != "legacy" and selected not in profiles)
+    ):
+        raise RadianSettingsError("default model profile does not exist")
+    model = document.get("model") or {}
     if not isinstance(model, dict):
         raise RadianSettingsError("model settings must be one object")
     for key in ("provider", "model", "base_url", "api_key", "api_key_env"):

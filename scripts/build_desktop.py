@@ -12,6 +12,7 @@ import os
 import platform
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,6 +126,28 @@ def main() -> None:
     )
     shutil.copyfile(OUT / "target/release/quine-core", RUNTIME / "quine-core")
     (RUNTIME / "quine-core").chmod(0o755)
+    built_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip()
+        dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True))
+    except (OSError, subprocess.SubprocessError):
+        revision, dirty = None, None
+    desktop_version = json.loads((ROOT / "apps/desktop/src-tauri/tauri.conf.json").read_text())[
+        "version"
+    ]
+    (RUNTIME / "build-info.json").write_text(
+        json.dumps(
+            {
+                "desktop_version": desktop_version,
+                "build_id": "local-" + built_at,
+                "source_revision": revision,
+                "source_dirty": dirty,
+                "built_at": built_at,
+            }
+        )
+    )
     # Ad-hoc local signatures only. No account, certificate, notarization or OS changes.
     for path in RUNTIME.rglob("*"):
         if path.is_file() and not path.is_symlink():

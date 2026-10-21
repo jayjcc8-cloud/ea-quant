@@ -8,10 +8,14 @@
 //! Nothing here is a scheduling framework: there is one map of live attempts,
 //! each holding at most one supervised child at a time.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -24,7 +28,8 @@ use crate::protocol::{
 };
 use crate::result;
 use crate::store::{
-    QuineError, Store, STATUS_ELIGIBLE, STATUS_STOPPING, STATUS_SUCCEEDED, STATUS_UNKNOWN,
+    QuineError, Store, STATUS_CANCELLED, STATUS_ELIGIBLE, STATUS_FAILED, STATUS_STOPPING,
+    STATUS_SUCCEEDED, STATUS_UNKNOWN,
 };
 use crate::supervise::{ChildGuard, GuardState};
 use crate::util::hex_decode;
@@ -70,6 +75,9 @@ pub struct CoreConfig {
     pub tamper_before_read: bool,
     /// Test-only: narrow injected failures of the running-state boundary.
     pub faults: CoreFaults,
+    /// The desktop's liveness pipe reached EOF. Only a completed quiesce permits
+    /// a clean exit; all other owner loss keeps the existing crash semantics.
+    pub parent_closed: Option<Arc<AtomicBool>>,
 }
 
 impl CoreConfig {
@@ -84,6 +92,7 @@ impl CoreConfig {
             crash_before_commit: false,
             tamper_before_read: false,
             faults: CoreFaults::default(),
+            parent_closed: None,
         }
     }
 }
@@ -127,6 +136,9 @@ struct Run {
     aborted: bool,
     /// Test-only: the spawn-to-running-state window is held open.
     holding: bool,
+    /// No child has been spawned, or the last owned group was proven absent.
+    /// Retained across a failed terminal write; never reconstructed from a PID.
+    stopped: bool,
     phase: Phase,
 }
 
@@ -147,6 +159,8 @@ pub struct Core {
     listener: std::os::unix::net::UnixListener,
     conns: Vec<Conn>,
     runs: HashMap<String, Run>,
+    admitted: HashSet<String>,
+    quiescing: bool,
 }
 
 impl Core {
@@ -165,6 +179,8 @@ impl Core {
             listener,
             conns: Vec::new(),
             runs: HashMap::new(),
+            admitted: HashSet::new(),
+            quiescing: false,
         })
     }
 
@@ -176,6 +192,20 @@ impl Core {
     /// child or on a client.
     pub fn serve(&mut self) -> io::Result<()> {
         loop {
+            if self
+                .config
+                .parent_closed
+                .as_ref()
+                .is_some_and(|closed| closed.load(Ordering::SeqCst))
+            {
+                if self.quiescing && self.drain_status().is_ok_and(|pending| pending == 0) {
+                    return Ok(());
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "desktop_owner_lost",
+                ));
+            }
             self.accept();
             self.pump();
             self.tick();
@@ -240,12 +270,46 @@ impl Core {
             Request::Cancel { params } => self.cancel(&params),
             Request::Query { params } => self.query(&params),
             Request::List { params } => self.list(&params),
+            Request::Quiesce { .. } => self.quiesce(),
+            Request::PrepareRecovery { params } => self.recovery_action(&params, false),
+            Request::ReleaseUnknown { params } => self.recovery_action(&params, true),
+        }
+    }
+
+    fn recovery_action(
+        &self,
+        params: &crate::protocol::RecoveryParams,
+        release: bool,
+    ) -> ReplyEnvelope {
+        let method = if release {
+            "release_unknown"
+        } else {
+            "prepare_recovery"
+        };
+        if self.quiescing {
+            return ReplyEnvelope::err(method, "core_quiescing", "the core is closing".into());
+        }
+        let result = if release {
+            self.store.release_unknown(params, now())
+        } else {
+            self.store.prepare_recovery(params, now())
+        };
+        match result {
+            Ok(experiment) => ReplyEnvelope::ok(method, json!({"experiment":experiment})),
+            Err(error) => ReplyEnvelope::err(method, &error.code, error.message),
         }
     }
 
     // -- confirmed experiment methods ---------------------------------------
 
     fn confirm(&mut self, params: &ConfirmParams) -> ReplyEnvelope {
+        if self.quiescing {
+            return ReplyEnvelope::err(
+                "confirm",
+                "core_quiescing",
+                "the core is closing; no new dispatch is admitted".to_string(),
+            );
+        }
         match self.store.confirm(params, now()) {
             Ok(confirmed) => {
                 let reply = serde_json::to_value(&confirmed).unwrap_or(Value::Null);
@@ -255,6 +319,7 @@ impl Core {
                 // state may begin a run here.
                 if confirmed.experiment.status == STATUS_ELIGIBLE {
                     let key = run_key(&params.strategy_id, &params.intent_id);
+                    self.admitted.insert(key.clone());
                     if !self.runs.contains_key(&key) {
                         if let Err(error) = self.begin_run(&params.strategy_id, &params.intent_id) {
                             self.record_failure(
@@ -307,6 +372,55 @@ impl Core {
         }
     }
 
+    /// Admission closes in the same event owner that dispatches. Repeating the
+    /// request retries durable cancellation, never an experiment. Historical
+    /// unknown records were not admitted here and are neither changed nor freed.
+    fn quiesce(&mut self) -> ReplyEnvelope {
+        self.quiescing = true;
+        let keys: Vec<_> = self.admitted.iter().cloned().collect();
+        for key in keys {
+            let (strategy_id, intent_id) = split_key(&key);
+            let context = match self.store.attempt_current(&strategy_id, &intent_id) {
+                Ok(context) => context,
+                Err(error) => return ReplyEnvelope::err("quiesce", &error.code, error.message),
+            };
+            if is_terminal(&context.status) {
+                continue;
+            }
+            let reply = self.cancel(&CancelParams {
+                strategy_id,
+                intent_id,
+            });
+            if let Some(error) = reply.error {
+                return ReplyEnvelope::err("quiesce", &error.code, error.message);
+            }
+        }
+        match self.drain_status() {
+            Ok(pending) => ReplyEnvelope::ok(
+                "quiesce",
+                json!({"drained": pending == 0, "pending": pending}),
+            ),
+            Err(error) => ReplyEnvelope::err("quiesce", &error.code, error.message),
+        }
+    }
+
+    fn drain_status(&self) -> Result<usize, QuineError> {
+        let mut pending = 0;
+        for key in &self.admitted {
+            let (strategy_id, intent_id) = split_key(key);
+            let context = self.store.attempt_current(&strategy_id, &intent_id)?;
+            let stopped = self
+                .runs
+                .get(key)
+                .map(|run| run.stopped && matches!(run.phase, Phase::Idle))
+                .unwrap_or(true);
+            if !is_terminal(&context.status) || !stopped {
+                pending += 1;
+            }
+        }
+        Ok(pending)
+    }
+
     // -- run lifecycle -------------------------------------------------------
 
     /// Dispatch one eligible attempt durably, then start its frozen-input check.
@@ -333,7 +447,6 @@ impl Core {
             .workspace
             .join("control")
             .join(&dispatched.job_id);
-        std::fs::create_dir_all(&control)?;
         let run = Run {
             job_id: dispatched.job_id.clone(),
             attempt_id: dispatched.attempt_id.clone(),
@@ -343,10 +456,12 @@ impl Core {
             stop: false,
             aborted: false,
             holding: false,
+            stopped: true,
             phase: Phase::Idle,
         };
         let key = run_key(strategy_id, intent_id);
         self.runs.insert(key.clone(), run);
+        std::fs::create_dir_all(&self.runs[&key].control)?;
         self.start_freeze(&key)
     }
 
@@ -383,6 +498,7 @@ impl Core {
             )
         })?;
         if let Some(run) = self.runs.get_mut(key) {
+            run.stopped = false;
             run.phase = Phase::Freeze { guard, dir };
         }
         Ok(())
@@ -402,7 +518,13 @@ impl Core {
             let released = holding && self.release_requested();
             let action = match self.runs.get_mut(&key) {
                 Some(run) => match &mut run.phase {
-                    Phase::Idle => Action::None,
+                    Phase::Idle => {
+                        if (stop || aborted) && run.stopped {
+                            Action::Settle
+                        } else {
+                            Action::None
+                        }
+                    }
                     Phase::Worker { guard } if holding => match guard.poll(stop_requested) {
                         GuardState::Running => {
                             if released {
@@ -414,16 +536,21 @@ impl Core {
                         // The group died inside the held window: the running
                         // state was never recorded for it, so nothing may be
                         // registered from whatever it left behind.
-                        _ => {
+                        GuardState::Stopped => {
+                            run.stopped = true;
                             run.aborted = true;
                             Action::Settle
                         }
+                        GuardState::Unconfirmed | GuardState::Abandoned => Action::Unknown,
                     },
                     Phase::Freeze { guard, .. }
                     | Phase::Worker { guard }
                     | Phase::Validate { guard, .. } => match guard.poll(stop_requested) {
                         GuardState::Running => Action::None,
-                        GuardState::Stopped => Action::Settle,
+                        GuardState::Stopped => {
+                            run.stopped = true;
+                            Action::Settle
+                        }
                         GuardState::Unconfirmed | GuardState::Abandoned => Action::Unknown,
                     },
                     Phase::Committing { ready_at, .. } => {
@@ -628,6 +755,7 @@ impl Core {
         // written, so a failure below can never release the slot while physical
         // exit is unproven.
         if let Some(run) = self.runs.get_mut(key) {
+            run.stopped = false;
             run.phase = Phase::Worker { guard };
             run.data_capture = capture;
         }
@@ -767,6 +895,7 @@ impl Core {
             Ok(guard) => {
                 if let Some(run) = self.runs.get_mut(key) {
                     run.phase = Phase::Validate { guard, dir };
+                    run.stopped = false;
                 }
             }
             Err(error) => self.record_failure_for(
@@ -919,19 +1048,35 @@ impl Core {
 
     /// A cancellation this core accepted, with the whole group proven gone.
     fn settle_cancelled(&mut self, key: &str) {
+        if !self.runs.get(key).is_some_and(|run| run.stopped) {
+            return;
+        }
+        // The captured group has been reaped and proven absent. Drop its OS
+        // handle now, retaining that proof rather than probing a recyclable ID.
+        if let Some(run) = self.runs.get_mut(key) {
+            run.phase = Phase::Idle;
+        }
         let (strategy_id, intent_id) = split_key(key);
         let context = match self.store.attempt_context(&strategy_id, &intent_id) {
             Ok(Some(context)) => context,
             _ => return,
         };
-        if context.status != STATUS_STOPPING {
-            return;
+        if context.status == STATUS_STOPPING {
+            let _ = self
+                .store
+                .settle_cancelled(&strategy_id, &intent_id, context.revision, now());
         }
-        let _ = self
+        // A committed write with a lost receipt is as retryable as a failed
+        // write. Only durable readback clears the pending settlement.
+        if self
             .store
-            .settle_cancelled(&strategy_id, &intent_id, context.revision, now());
-        if let Some(run) = self.runs.get_mut(key) {
-            run.phase = Phase::Idle;
+            .attempt_current(&strategy_id, &intent_id)
+            .is_ok_and(|current| is_terminal(&current.status))
+        {
+            if let Some(run) = self.runs.get_mut(key) {
+                run.stop = false;
+                run.aborted = false;
+            }
         }
     }
 
@@ -939,6 +1084,12 @@ impl Core {
     /// gone. Nothing is registered for it and the slot is never released on an
     /// unproven group or an unreadable record.
     fn settle_aborted(&mut self, key: &str) {
+        if !self.runs.get(key).is_some_and(|run| run.stopped) {
+            return;
+        }
+        if let Some(run) = self.runs.get_mut(key) {
+            run.phase = Phase::Idle;
+        }
         let (strategy_id, intent_id) = split_key(key);
         if self.config.faults.fail_abort_reread {
             // A durable re-read this core cannot perform proves nothing, so the
@@ -948,30 +1099,37 @@ impl Core {
         }
         match self.store.attempt_context(&strategy_id, &intent_id) {
             Ok(Some(context)) => {
-                let _ = self
-                    .store
-                    .mark_unknown(&strategy_id, &intent_id, context.revision);
+                if context.status != STATUS_UNKNOWN
+                    && self
+                        .store
+                        .mark_unknown(&strategy_id, &intent_id, context.revision)
+                        .is_err()
+                {
+                    return;
+                }
             }
             _ => return,
         }
         if let Some(run) = self.runs.get_mut(key) {
-            run.phase = Phase::Idle;
+            run.aborted = false;
         }
     }
 
     /// A group that could not be shown gone keeps the slot and stays unknown.
     fn mark_unknown(&mut self, key: &str) {
+        if self.runs.get(key).is_some_and(|run| run.stop) {
+            // An accepted cancellation remains pending while the group cannot
+            // be proven absent. Keep both its barrier and its live supervisor.
+            return;
+        }
         let (strategy_id, intent_id) = split_key(key);
         if let Ok(Some(context)) = self.store.attempt_context(&strategy_id, &intent_id) {
             let _ = self
                 .store
                 .mark_unknown(&strategy_id, &intent_id, context.revision);
         }
-        let retains = self.runs.get(key).map(|run| run.aborted).unwrap_or(false);
-        if !retains {
-            if let Some(run) = self.runs.get_mut(key) {
-                run.phase = Phase::Idle;
-            }
+        if let Some(run) = self.runs.get_mut(key) {
+            run.aborted = true;
         }
     }
 
@@ -1014,6 +1172,217 @@ impl Core {
     }
 }
 
+fn is_terminal(status: &str) -> bool {
+    matches!(status, STATUS_SUCCEEDED | STATUS_FAILED | STATUS_CANCELLED)
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::*;
+    use crate::protocol::{Budget, FrozenInput};
+    use crate::util::{hex_encode, sha256_hex};
+
+    fn fixture() -> (Core, PathBuf, String) {
+        let root = std::env::temp_dir().join(format!(
+            "qe{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..10]
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let mut core = Core::open(CoreConfig::new(&root, Path::new("/unused"))).unwrap();
+        let bytes = b"{}";
+        let params = ConfirmParams {
+            strategy_id: "s".into(),
+            intent_id: "i".into(),
+            draft_revision: 1,
+            preview_identity: format!("sha256:{}", sha256_hex(bytes)),
+            budget: Budget {
+                max_model_calls: 0,
+                max_backtests: 1,
+            },
+            frozen_input: FrozenInput {
+                canonical_bytes: hex_encode(bytes),
+                sha256: sha256_hex(bytes),
+            },
+        };
+        core.store.confirm(&params, now()).unwrap();
+        let exp = core.store.dispatch("s", "i", "quine-core", now()).unwrap();
+        let key = run_key("s", "i");
+        core.admitted.insert(key.clone());
+        core.runs.insert(
+            key.clone(),
+            Run {
+                job_id: exp.job_id,
+                attempt_id: exp.attempt_id,
+                frozen: json!({}),
+                control: root.join("control"),
+                data_capture: None,
+                stop: false,
+                aborted: false,
+                holding: false,
+                stopped: true,
+                phase: Phase::Idle,
+            },
+        );
+        (core, root, key)
+    }
+
+    #[test]
+    fn failed_terminal_write_retains_stop_proof_and_retries() {
+        let (mut core, root, key) = fixture();
+        let connection = rusqlite::Connection::open(root.join("quine.db")).unwrap();
+        connection.execute_batch("CREATE TRIGGER refuse_settle BEFORE UPDATE ON attempt WHEN NEW.status = 'cancelled' BEGIN SELECT RAISE(FAIL, 'injected disk write failure'); END;").unwrap();
+        assert!(core.quiesce().ok);
+        core.tick();
+        assert_eq!(core.drain_status().unwrap(), 1);
+        assert!(core.runs[&key].stopped && core.runs[&key].stop);
+        assert_eq!(
+            core.store.attempt_current("s", "i").unwrap().status,
+            STATUS_STOPPING
+        );
+        connection
+            .execute_batch("DROP TRIGGER refuse_settle")
+            .unwrap();
+        core.tick();
+        assert_eq!(core.drain_status().unwrap(), 0);
+        assert_eq!(
+            core.store.attempt_current("s", "i").unwrap().status,
+            STATUS_CANCELLED
+        );
+    }
+
+    #[test]
+    fn lost_settlement_receipt_reads_back_without_another_transition() {
+        let (mut core, _, key) = fixture();
+        core.quiesce();
+        let context = core.store.attempt_current("s", "i").unwrap();
+        let committed = core
+            .store
+            .settle_cancelled("s", "i", context.revision, now())
+            .unwrap();
+        // The durable write succeeded but its caller did not observe the reply.
+        core.tick();
+        assert_eq!(core.drain_status().unwrap(), 0);
+        assert!(!core.runs[&key].stop);
+        assert_eq!(
+            core.store.attempt_current("s", "i").unwrap().revision,
+            committed.revision
+        );
+    }
+
+    #[test]
+    fn failed_cancel_closes_admission_and_remains_retryable() {
+        let (mut core, root, _) = fixture();
+        let connection = rusqlite::Connection::open(root.join("quine.db")).unwrap();
+        connection.execute_batch("CREATE TRIGGER refuse_cancel BEFORE INSERT ON barrier BEGIN SELECT RAISE(FAIL, 'injected barrier failure'); END;").unwrap();
+        assert!(!core.quiesce().ok);
+        assert!(core.quiescing);
+        assert_eq!(core.drain_status().unwrap(), 1);
+        connection
+            .execute_batch("DROP TRIGGER refuse_cancel")
+            .unwrap();
+        assert!(core.quiesce().ok);
+        core.tick();
+        assert_eq!(core.drain_status().unwrap(), 0);
+    }
+
+    #[test]
+    fn historical_unknown_is_not_a_drain_target_or_a_release_grant() {
+        let (core, root, _) = fixture();
+        let context = core.store.attempt_current("s", "i").unwrap();
+        core.store.mark_unknown("s", "i", context.revision).unwrap();
+        drop(core);
+        let mut reopened = Core::open(CoreConfig::new(&root, Path::new("/unused"))).unwrap();
+        let before = reopened
+            .store
+            .query(&QueryParams {
+                strategy_id: "s".into(),
+                intent_id: "i".into(),
+            })
+            .unwrap();
+        assert_eq!(reopened.quiesce().result.unwrap()["drained"], true);
+        let after = reopened
+            .store
+            .query(&QueryParams {
+                strategy_id: "s".into(),
+                intent_id: "i".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(before).unwrap(),
+            serde_json::to_value(after).unwrap()
+        );
+        let connection = rusqlite::Connection::open(root.join("quine.db")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT active FROM attempt", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn unproven_group_keeps_supervision_in_every_child_phase() {
+        for phase in 0..3 {
+            let (mut core, _, key) = fixture();
+            let guard = ChildGuard::spawn(
+                &["/bin/sh".into(), "-c".into(), "sleep 2".into()],
+                None,
+                false,
+            )
+            .unwrap();
+            let run = core.runs.get_mut(&key).unwrap();
+            run.stopped = false;
+            run.phase = match phase {
+                0 => Phase::Freeze {
+                    guard,
+                    dir: PathBuf::new(),
+                },
+                1 => Phase::Worker { guard },
+                _ => Phase::Validate {
+                    guard,
+                    dir: PathBuf::new(),
+                },
+            };
+            assert_eq!(core.quiesce().result.unwrap()["drained"], false);
+            // An unconfirmed stop must not discard the live guard or convert
+            // the accepted cancellation into a permanently un-settleable state.
+            core.mark_unknown(&key);
+            assert!(!matches!(core.runs[&key].phase, Phase::Idle));
+            assert_eq!(
+                core.store.attempt_current("s", "i").unwrap().status,
+                STATUS_STOPPING
+            );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while core.drain_status().unwrap() != 0 {
+                core.tick();
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[test]
+    fn quiesce_cancels_before_commit_and_does_not_publish() {
+        let (mut core, root, key) = fixture();
+        core.runs.get_mut(&key).unwrap().phase = Phase::Committing {
+            ready_at: Instant::now(),
+            artifacts: vec![],
+            official: json!({}),
+        };
+        assert_eq!(core.quiesce().result.unwrap()["drained"], false);
+        core.tick();
+        assert_eq!(core.drain_status().unwrap(), 0);
+        assert_eq!(std::fs::read_dir(root.join("official")).unwrap().count(), 0);
+        let before = core.store.attempt_current("s", "i").unwrap().revision;
+        assert_eq!(core.quiesce().result.unwrap()["drained"], true);
+        assert_eq!(
+            core.store.attempt_current("s", "i").unwrap().revision,
+            before
+        );
+    }
+}
+
 fn run_key(strategy_id: &str, intent_id: &str) -> String {
     format!("{strategy_id}\u{0}{intent_id}")
 }
@@ -1050,9 +1419,10 @@ fn decode_capture(
     let path = value.get("path").and_then(Value::as_str).ok_or_else(|| {
         QuineError::new(INPUT_CHANGED, "the input check named no private snapshot")
     })?;
-    let digest = value.get("sha256").and_then(Value::as_str).ok_or_else(|| {
-        QuineError::new(INPUT_CHANGED, "the private snapshot carries no digest")
-    })?;
+    let digest = value
+        .get("sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| QuineError::new(INPUT_CHANGED, "the private snapshot carries no digest"))?;
     if digest.len() != 64
         || !digest
             .bytes()

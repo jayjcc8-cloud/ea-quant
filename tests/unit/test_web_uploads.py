@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -494,3 +495,21 @@ def test_catalog_without_a_registered_root_still_serves_uploads(tmp_path: Any) -
     assert catalog.has(published["dataset_id"]) is True
     with pytest.raises(ValueError):
         catalog.load("research.csv")
+
+
+def test_chinese_source_is_frozen_with_original_byte_and_control_bounds(tmp_path: Path) -> None:
+    store, manifest = _published(
+        tmp_path,
+        _capture(3),
+        source_reference="QUINE 合成教学示例；非真实市场数据",
+        license_reference="作者允许复制、修改和使用",
+    )
+    frozen = store.version_evidence(manifest["dataset_id"])
+    assert frozen["source"]["reference"] == "QUINE 合成教学示例；非真实市场数据"
+    assert frozen["source"]["asserted"] is True
+    for value in ("中" * 101, "hidden\u200btext", "line\nbreak", "\ud800"):
+        with pytest.raises(UploadError) as refused:
+            store.publish(
+                _capture(3), source_reference=value, availability_policy=AVAILABILITY_PROVIDED
+            )
+        assert refused.value.code == "upload_metadata"

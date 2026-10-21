@@ -23,6 +23,7 @@ export const EVIDENCE_B = 'evidence_b'
  */
 export type EvidenceSelection =
   | { kind: 'default' }
+  | { kind: 'draft' }
   | { kind: 'explicit'; a: UserStrategyExperiment; b: UserStrategyExperiment | null }
   | { kind: 'invalid'; note: string }
 
@@ -44,7 +45,7 @@ export function readEvidenceSelection(
   const bParams = params.getAll(EVIDENCE_B)
   // The address this page has always accepted: nothing named, so nothing is
   // claimed — A is the latest frozen run and B is absent.
-  if (!aParams.length && !bParams.length) return { kind: 'default' }
+  if (!aParams.length && !bParams.length) return { kind: params.get('context') === 'draft' ? 'draft' : 'default' }
   const invalid = (note: string): EvidenceSelection => ({ kind: 'invalid', note })
   if (aParams.length > 1 || bParams.length > 1) {
     return invalid('同一个参数在地址里出现了多次，无法确定要解释哪一次运行。')
@@ -95,6 +96,7 @@ export function evidenceAddress(
   b: UserStrategyExperiment | null,
 ): URLSearchParams {
   const next = new URLSearchParams(params)
+  next.delete('context')
   next.delete(EVIDENCE_A)
   next.delete(EVIDENCE_B)
   if (a) next.set(EVIDENCE_A, a.job_id ?? '')

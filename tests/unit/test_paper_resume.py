@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 import yaml
 
+import ea.experiments.audit as audit_module
 from ea.core import AuditRecordKind, RunReference, Sha256Digest
 from ea.core.paper import canonical_paper_terminal_payload
 from ea.core.portfolio import portfolio_snapshot_digest
 from ea.core.risk import risk_state_snapshot_digest
 from ea.experiments.audit import PosixAuditJournal, create_posix_audit_journal
-from ea.experiments.store import CanonicalAttemptManifest, LocalResultStore
+from ea.experiments.store import AuditRunBinding, CanonicalAttemptManifest, LocalResultStore
 from ea.product import load_backtest_scenario
 from ea.product.paper import PaperTradingSession
 from ea.product.paper_run import resume_local_paper
@@ -143,7 +145,9 @@ def test_crash_after_fill_retains_exactly_one_economic_effect_per_order(tmp_path
     assert joint["divergent_orders"] == []
 
 
-def test_terminal_attempt_resumes_without_incomplete_work(tmp_path: Path) -> None:
+def test_terminal_attempt_resumes_without_incomplete_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store, journal, engine, clock, run_dir = _build_attempt(tmp_path, crash_after=None)
     drive(engine, clock)
     status = engine.status()
@@ -164,7 +168,28 @@ def test_terminal_attempt_resumes_without_incomplete_work(tmp_path: Path) -> Non
     )
     journal.close()
     store.close()
-    admission = resume_local_paper(run_dir)
-    assert admission["state"] == "terminal"
-    assert admission["reconciliation_required"] is False
-    assert admission["outbound_intents"] == []
+    reopened: list[PosixAuditJournal] = []
+    original_reopen = audit_module.reopen_posix_audit_journal
+
+    def capture(binding: AuditRunBinding) -> PosixAuditJournal:
+        result = original_reopen(binding)
+        reopened.append(result)
+        return result
+
+    monkeypatch.setattr(audit_module, "reopen_posix_audit_journal", capture)
+    audit_path = run_dir / "audit" / "audit-v1.journal"
+    before = audit_path.read_bytes()
+    for _ in range(3):
+        admission = resume_local_paper(run_dir)
+        assert admission["state"] == "terminal"
+        assert admission["reconciliation_required"] is False
+        assert admission["outbound_intents"] == []
+        # Desktop polls this path. Every read must release both journal handles,
+        # otherwise stopped runs eventually become unreadable at the FD limit.
+        assert reopened
+        for recovered_journal in reopened:
+            for descriptor in (recovered_journal._audit_fd, recovered_journal._journal_fd):
+                with pytest.raises(OSError):
+                    os.fstat(descriptor)
+        reopened.clear()
+    assert audit_path.read_bytes() == before

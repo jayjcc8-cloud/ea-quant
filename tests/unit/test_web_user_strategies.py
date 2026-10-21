@@ -385,7 +385,7 @@ def test_the_store_never_shows_an_unpublished_or_mismatched_record(
 # --- approved model calls -----------------------------------------------------
 
 
-def test_a_call_without_explicit_approval_never_reaches_the_provider(
+def test_a_call_with_zero_or_excess_budget_never_reaches_the_provider(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     strategies, _research, _service, provider = _stack(tmp_path, monkeypatch)
@@ -396,7 +396,8 @@ def test_a_call_without_explicit_approval_never_reaches_the_provider(
             strategy.user_strategy_id,
             call_id="call-1",
             base_revision=1,
-            text="Ask without approving anything",
+            text="Ask with zero approved calls",
+            approved_budget={"max_model_calls": 0, "max_backtests": 0},
         )
     # An approval larger than the workspace's own budget is not an approval either.
     with pytest.raises(UserStrategyBudgetError):
@@ -1509,8 +1510,16 @@ def _contracts(service: WebService) -> dict[str, dict[str, Any]]:
 def _branches(call: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """The proposal-tool branches the provider actually received, keyed by path."""
     tools = cast(list[Any], call["tools"])
-    assert [tool.name for tool in tools] == ["describe_data", "experiment_status", "propose_change"]
-    schema = cast(dict[str, Any], tools[2].parameters)
+    assert [tool.name for tool in tools] == [
+        "discover_resources",
+        "inspect_research_input",
+        "read_experiments",
+        "describe_data",
+        "experiment_status",
+        "propose_change",
+    ]
+    proposal = next(tool for tool in tools if tool.name == "propose_change")
+    schema = cast(dict[str, Any], proposal.parameters)
     properties = cast(dict[str, Any], schema["properties"])
     array = cast(dict[str, Any], properties["items"])
     # The tool's one property is the array of proposed fields, and the alternatives
@@ -3486,7 +3495,7 @@ def test_an_intent_is_saved_and_reopened_with_no_scenario_catalog(
     assert strategies.get(created.user_strategy_id).changes == ()
 
 
-def test_an_unbound_clarification_is_plain_text_with_no_tools_and_its_own_history(
+def test_an_unbound_clarification_has_only_read_tools_and_its_own_history(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Exactly one approved call, told only this intent's own facts and turns."""
@@ -3512,10 +3521,12 @@ def test_an_unbound_clarification_is_plain_text_with_no_tools_and_its_own_histor
     assert answered.proposals == ()
 
     call = provider.calls[-1]
-    # A clarification offers no tool and asks for no capability: there is nothing
-    # for this turn to call, and nothing it could change.
-    assert not call.get("tools")
-    assert not call.get("required_capabilities")
+    # An unbound intent may inspect actual resources, but cannot propose, bind or run.
+    assert [tool.name for tool in call["tools"]] == [
+        "discover_resources",
+        "inspect_research_input",
+    ]
+    assert call["required_capabilities"] == ("tool_use",)
     messages = cast(list[Any], call["messages"])
     texts = [message.text for message in messages]
     joined = "\n".join(texts)
@@ -3604,9 +3615,15 @@ def test_an_unbound_clarification_replays_and_its_approval_is_per_request(
     strategy = _new_intent(strategies)
     strategy_id = strategy.user_strategy_id
 
-    # No approval is no call, exactly as on a bound draft.
+    # An explicit zero budget is refused, exactly as on a bound draft.
     with pytest.raises(UserStrategyBudgetError):
-        strategies.send_message(strategy_id, call_id="call-1", base_revision=1, text="No approval")
+        strategies.send_message(
+            strategy_id,
+            call_id="call-1",
+            base_revision=1,
+            text="No approval",
+            approved_budget={"max_model_calls": 0, "max_backtests": 0},
+        )
     with pytest.raises(UserStrategyBudgetError):
         strategies.send_message(
             strategy_id,
@@ -4160,7 +4177,7 @@ def test_one_intent_binds_proposes_applies_and_runs_the_existing_experiment_path
     strategy_id = strategy.user_strategy_id
     assert [item.user_strategy_id for item in strategies.list()] == [strategy_id]
 
-    # 1. Clarification while unbound: one approved call, plain text, no tools.
+    # 1. Clarification while unbound: one approved call with only read tools.
     provider.responses.append(_response([], text="Which registered scenario should this use?"))
     clarified = strategies.send_message(
         strategy_id,
@@ -4170,7 +4187,10 @@ def test_one_intent_binds_proposes_applies_and_runs_the_existing_experiment_path
         approved_budget=dict(CALL_BUDGET),
     )
     assert clarified.draft.document() == INTENT_DRAFT
-    assert not provider.calls[-1].get("tools")
+    assert [tool.name for tool in provider.calls[-1]["tools"]] == [
+        "discover_resources",
+        "inspect_research_input",
+    ]
 
     # 2. The user picks one exact scenario; the host validates it and advances once.
     bound = strategies.bind_scenario(

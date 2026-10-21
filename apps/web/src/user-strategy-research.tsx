@@ -1,3 +1,4 @@
+import { SourceLink as Link } from './workspace-navigation'
 /**
  * QUINE: the frozen runs one strategy's conversation may be grounded in.
  *
@@ -26,7 +27,7 @@
  * way to clear it, rather than answered from the latest run.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Link, useLocation, useSearchParams } from 'react-router-dom'
+import { useLocation, useSearchParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, BacktestReport } from './app'
 import { exactDelta } from './decimal'
 import { evidenceAddress, readEvidenceSelection, selectableRuns, selectedRuns } from './evidence-selection'
@@ -77,19 +78,24 @@ type RunState =
  * flight — and a report whose run id is not the job's own engine run is reported
  * as unavailable rather than shown as a result.
  */
-export function useRunRead(api: ApiAdapter, jobId: string | null): RunState | null {
-  const [loaded, setLoaded] = useState<{ key: string; state: RunState } | null>(null)
+export function useRunRead(api: ApiAdapter, jobId: string | null, refreshKey = ''): RunState | null {
+  // An observed turn may invalidate this one read. It never grants readiness:
+  // the job and report are still read and checked below, including after failure.
+  const key = JSON.stringify([jobId, refreshKey])
+  const [loaded, setLoaded] = useState<{ key: string; api: ApiAdapter; state: RunState } | null>(null)
 
   useEffect(() => {
     if (!jobId) return
     let active = true
+    let timer: ReturnType<typeof setTimeout> | undefined
     const load = async () => {
       const job = await api.getBacktest(jobId)
       if (!active) return
       if (job.job_id !== jobId) throw new Error('读取到的任务与所选实验不一致')
+      if (job.status === 'accepted' || job.status === 'running' || job.status === 'stopping') timer = setTimeout(() => {void load().catch(fail)}, 4000)
       if (job.status !== 'succeeded' || !job.report_ready) {
         setLoaded({
-          key: jobId,
+          key, api,
           state: {
             kind: 'unavailable',
             note: job.status === 'succeeded'
@@ -103,7 +109,7 @@ export function useRunRead(api: ApiAdapter, jobId: string | null): RunState | nu
       if (!active) return
       if (!job.engine_run_id || report.run_id !== job.engine_run_id) {
         setLoaded({
-          key: jobId,
+          key, api,
           state: {
             kind: 'unavailable',
             note: '报告的身份与该运行的 engine run id 不一致，因此这里不显示任何结果。',
@@ -111,16 +117,17 @@ export function useRunRead(api: ApiAdapter, jobId: string | null): RunState | nu
         })
         return
       }
-      setLoaded({ key: jobId, state: { kind: 'ready', job, report } })
+      setLoaded({ key, api, state: { kind: 'ready', job, report } })
     }
-    load().catch(error => {
-      if (active) setLoaded({ key: jobId, state: { kind: 'unavailable', note: reason(error) } })
-    })
-    return () => { active = false }
-  }, [api, jobId])
+    const fail = (error: unknown) => {
+      if (active) setLoaded({ key, api, state: { kind: 'unavailable', note: reason(error) } })
+    }
+    void load().catch(fail)
+    return () => { active = false; clearTimeout(timer) }
+  }, [api, jobId, key])
 
   if (!jobId) return null
-  return loaded && loaded.key === jobId ? loaded.state : { kind: 'loading' }
+  return loaded && loaded.key === key && loaded.api === api ? loaded.state : { kind: 'loading' }
 }
 
 /**

@@ -331,7 +331,7 @@ describe('core-owned experiments', () => {
     await openExperimentTab(user)
 
     const panel = await screen.findByRole('region', { name: '实验' })
-    expect(within(panel).getByText(/结果未知/)).toBeTruthy()
+    expect(within(panel).getByText('实验 li-1 来自修订 1 — 结果未知')).toBeTruthy()
     expect(within(panel).getByText(/the core could not prove how this run ended/)).toBeTruthy()
     expect(within(panel).queryByRole('link', { name: '查看这次实验报告' })).toBeNull()
   }, 20_000)
@@ -407,6 +407,7 @@ describe('one explicit dataset selection', () => {
     }
     detail(selecting)
 
+    await user.click(await screen.findByRole('button', { name: '编辑草稿' }))
     const panel = await screen.findByRole('region', { name: '选择数据集' })
     const picker = await within(panel).findByLabelText('数据集')
     const options = within(picker).getAllByRole('option').map(option => option.textContent ?? '')
@@ -447,6 +448,7 @@ describe('one explicit dataset selection', () => {
     }
     detail(failing)
 
+    await user.click(await screen.findByRole('button', { name: '编辑草稿' }))
     const panel = await screen.findByRole('region', { name: '选择数据集' })
     await user.selectOptions(await within(panel).findByLabelText('数据集'), 'registered.csv')
     await user.click(within(panel).getByRole('button', { name: '选择这个数据集' }))
@@ -466,6 +468,7 @@ describe('one explicit dataset selection', () => {
       selectUserStrategyDataset: async (id, input) => { attempts.push({ id, ...input }); return pending.promise },
     })
 
+    await user.click(await screen.findByRole('button', { name: '编辑草稿' }))
     const panel = await screen.findByRole('region', { name: '选择数据集' })
     await user.selectOptions(await within(panel).findByLabelText('数据集'), 'registered.csv')
     const choose = () => within(panel).getByRole('button', { name: '选择这个数据集' }) as HTMLButtonElement
@@ -508,6 +511,7 @@ describe('one explicit dataset selection', () => {
     }
     detail(unreachable)
 
+    await user.click(await screen.findByRole('button', { name: '编辑草稿' }))
     const panel = await screen.findByRole('region', { name: '选择数据集' })
     await user.selectOptions(await within(panel).findByLabelText('数据集'), 'registered.csv')
     await user.click(within(panel).getByRole('button', { name: '选择这个数据集' }))
@@ -523,6 +527,7 @@ describe('one explicit dataset selection', () => {
     // still sends nothing by itself.
     cleanup()
     detail(unreachable)
+    await user.click(await screen.findByRole('button', { name: '编辑草稿' }))
     const reloaded = await screen.findByRole('region', { name: '选择数据集' })
     expect(await within(reloaded).findByText(/不会自动重发/)).toBeTruthy()
     expect((within(reloaded).getByRole('button', { name: '选择这个数据集' }) as HTMLButtonElement).disabled).toBe(true)
@@ -546,6 +551,7 @@ describe('one explicit dataset selection', () => {
     }
     detail(refusing)
 
+    await user.click(await screen.findByRole('button', { name: '编辑草稿' }))
     const panel = await screen.findByRole('region', { name: '选择数据集' })
     await user.selectOptions(await within(panel).findByLabelText('数据集'), 'registered.csv')
     const choose = () => within(panel).getByRole('button', { name: '选择这个数据集' }) as HTMLButtonElement

@@ -16,10 +16,11 @@ import { useEffect, useState } from 'react'
 import { BrowserRouter, Link } from 'react-router-dom'
 import { EvidenceSection } from './user-strategies'
 import { StrategyEvidenceResearch } from './user-strategy-research'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App, type ApiAdapter, type BacktestJob, type ScenarioSummary } from './app'
 import {
   UserStrategyRequestError,
+  userStrategiesApi,
   isIntentDraft,
   type UserStrategy,
   type UserStrategyChange,
@@ -292,6 +293,7 @@ function scripted(script: Script = {}) {
       configured: true, provider: 'fixture', model: 'fixture-model', base_url: null, api_key_env: null,
     }),
     listScenarios: async () => [scenario],
+    listDatasets: async () => [],
     validateScenario: async () => { throw new Error('unused') },
     createBacktest: async () => { throw new Error('unused') },
     createBatch: async () => { throw new Error('unused') },
@@ -437,6 +439,7 @@ function collapsedAncestor(node: Element): HTMLDetailsElement | null {
 
 afterEach(() => {
   cleanup()
+  sessionStorage.clear()
   asked.length = 0
   created.length = 0
   boundCalls.length = 0
@@ -463,9 +466,10 @@ describe('user strategy workspace', () => {
     // The AI column is present before anything is selected, and it says what it
     // will hold rather than pretending to hold a conversation.
     const emptyChat = screen.getByRole('region', { name: 'AI 协作' })
-    expect(within(emptyChat).getByText(/先创建或选择一条策略/)).toBeTruthy()
+    expect(within(emptyChat).getByText(/选择或新建研究，继续它自己的对话。/)).toBeTruthy()
 
-    const form = screen.getByRole('region', { name: '新建策略' })
+    await user.click(screen.getAllByRole('button', { name: '新建研究' })[0])
+    const form = screen.getByRole('region', { name: '新建研究' })
     // The entry point asks for the idea alone. No scenario is chosen here, so a
     // workspace with an empty catalog can still save, and no criterion is stated:
     // both belong to the one explicit binding, on the strategy itself.
@@ -502,14 +506,15 @@ describe('user strategy workspace', () => {
     expect(within(draft).getByText('尚未绑定：没有策略、标的、资金、数据来源或注册参数')).toBeTruthy()
     expect(draft.textContent).not.toMatch(/USD|XNAS|bounded-long/)
     // The form gives way to the strategy that is now open, with one obvious way back.
-    await waitFor(() => expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull())
-    expect(screen.getByRole('link', { name: '新建策略' }).getAttribute('href')).toBe('/strategies')
+    await waitFor(() => expect(screen.queryByRole('region', { name: '新建研究' })).toBeNull())
+    expect(screen.getByRole('link', { name: '返回研究列表' }).getAttribute('href')).toBe('/strategies')
     expect(ids).toEqual(['us-1'])
 
     // One click on that entry point opens the create form here, with the fields a
     // save needs, and creates nothing: saving is still an explicit submit of its own.
-    await user.click(screen.getByRole('link', { name: '新建策略' }))
-    const reopened = await screen.findByRole('region', { name: '新建策略' })
+    await user.click(screen.getByRole('link', { name: '返回研究列表' }))
+    await user.click((await screen.findAllByRole('button', { name: '新建研究' }))[0])
+    const reopened = await screen.findByRole('region', { name: '新建研究' })
     expect(within(reopened).getByLabelText('策略名称')).toBeTruthy()
     expect(within(reopened).getByLabelText('意图')).toBeTruthy()
     expect(within(reopened).getByRole('button', { name: '保存想法' })).toBeTruthy()
@@ -575,11 +580,10 @@ describe('user strategy workspace', () => {
 
     // The conversation is available, and it is honest about what it can do.
     const chat = screen.getByRole('region', { name: 'AI 协作' })
-    expect(chat.textContent).toMatch(/这次对话只能澄清这个想法/)
-    expect(within(chat).getByText(/澄清当前想法/)).toBeTruthy()
+    expect(chat.textContent).toMatch(/Agent 可以查找支持的策略与真实数据、核查输入/)
+    expect(within(chat).getByPlaceholderText(/输入 \/ 更改配置/)).toBeTruthy()
     await user.type(within(chat).getByLabelText('消息'), 'What is missing from this idea?')
-    await user.click(within(chat).getByLabelText('批准一次模型调用'))
-    await user.click(within(chat).getByRole('button', { name: '询问模型' }))
+    await user.click(within(chat).getByRole('button', { name: '发送消息' }))
 
     await waitFor(() => expect(calls.ask).toBe(1))
     // One approved call against the intent's own revision, and it proposes nothing.
@@ -640,7 +644,7 @@ describe('user strategy workspace', () => {
     expect(within(revisions).getByText('绑定的场景：bounded-long.yaml')).toBeTruthy()
   })
 
-  it('asks the model only after an explicit approval and labels the answer as inference', async () => {
+  it('sends only on an explicit action and labels the answer as inference', async () => {
     const user = userEvent.setup()
     const { api, calls } = scripted({
       ask: async () => strategy({
@@ -653,14 +657,11 @@ describe('user strategy workspace', () => {
 
     const chat = screen.getByRole('region', { name: 'AI 协作' })
     await user.type(within(chat).getByLabelText('消息'), 'What does my draft do?')
-    await user.click(within(chat).getByRole('button', { name: '询问模型' }))
-
-    expect((within(chat).getByRole('button', { name: '询问模型' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((within(chat).getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(false)
     expect(calls.ask).toBe(0)
     expect(asked).toEqual([])
 
-    await user.click(within(chat).getByLabelText('批准一次模型调用'))
-    await user.click(within(chat).getByRole('button', { name: '询问模型' }))
+    await user.click(within(chat).getByRole('button', { name: '发送消息' }))
 
     expect(calls.ask).toBe(1)
     expect(asked).toHaveLength(1)
@@ -672,7 +673,7 @@ describe('user strategy workspace', () => {
     expect(within(chat).getByText('模型推断 — 不是正式证据。')).toBeTruthy()
     expect(within(chat).getByText('输入 11 tokens · 输出 7 tokens')).toBeTruthy()
     // Approval is one call, not a price: nothing here is written as money.
-    expect(within(chat).getByText(/一次模型调用 · 不应用修改，不启动实验/)).toBeTruthy()
+    expect(calls.launch).toBe(0)
     expect(chat.textContent).not.toMatch(/\$\s?\d/)
     expect(screen.queryByRole('region', { name: '建议修改' })).toBeNull()
   })
@@ -692,10 +693,10 @@ describe('user strategy workspace', () => {
     expect(await screen.findByRole('heading', { name: 'Bold entry' })).toBeTruthy()
 
     // The open strategy owns the page; the create form is offered as a link instead.
-    expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull()
-    expect(screen.getByRole('link', { name: '新建策略' }).getAttribute('href')).toBe('/strategies')
+    expect(screen.queryByRole('region', { name: '新建研究' })).toBeNull()
+    expect(screen.getByRole('link', { name: '返回研究列表' }).getAttribute('href')).toBe('/strategies')
 
-    const panel = await screen.findByRole('region', { name: '建议修改' })
+    let panel = await screen.findByRole('region', { name: '建议修改' })
     // The reviewed change names its base revision, its proposal and its proposer.
     expect(within(panel).getByText(/针对草稿修订 1 · 提案 prop-1/)).toBeTruthy()
     // Both proposed fields are shown, each with its own before → after, its own
@@ -725,19 +726,19 @@ describe('user strategy workspace', () => {
     // Asking the model is not applying, and a recorded non-answer stays honest.
     const chat = screen.getByRole('region', { name: 'AI 协作' })
     await user.type(within(chat).getByLabelText('消息'), 'Why this change?')
-    await user.click(within(chat).getByLabelText('批准一次模型调用'))
-    await user.click(within(chat).getByRole('button', { name: '询问模型' }))
+    await user.click(within(chat).getByRole('button', { name: '发送消息' }))
     await waitFor(() => expect(calls.ask).toBe(1))
     expect(calls.apply).toBe(0)
     expect(await within(chat).findByText('未配置')).toBeTruthy()
     expect(within(chat).getByText('No model provider is configured in this workspace.')).toBeTruthy()
     // A workspace with no provider says how to get one, and says that asking again
     // is a new call with a new approval rather than a silent retry.
-    expect(within(chat).getByRole('link', { name: '设置' }).getAttribute('href')).toBe('/settings')
-    expect(chat.textContent).toMatch(/那是一次新的调用，需要新的批准/)
+    expect(within(chat).getByRole('link', { name: '设置' }).getAttribute('href')).toBe('/resources/models')
+    expect(chat.textContent).toMatch(/发送一条新消息继续/)
     // An unmeasured call is never reported as a zero-cost one.
     expect(within(chat).getByText('这次调用没有上报 token 用量，因此不会按零计费')).toBeTruthy()
 
+    panel = screen.getByRole('region', { name: '建议修改' })
     await user.click(within(panel).getByLabelText('parameters.entry_delay_bars'))
     await user.click(within(panel).getByRole('button', { name: '应用所选' }))
 
@@ -749,6 +750,7 @@ describe('user strategy workspace', () => {
     expect(calls.preview).toBe(0)
     expect(calls.launch).toBe(0)
 
+    panel = screen.getByRole('region', { name: '建议修改' })
     // A refused apply is reported with the host's own message, never shown as applied.
     await user.click(within(panel).getByRole('button', { name: '应用所选' }))
     const refusal = await screen.findByRole('alert')
@@ -889,8 +891,7 @@ describe('user strategy workspace', () => {
 
     const chat = screen.getByRole('region', { name: 'AI 协作' })
     await user.type(within(chat).getByLabelText('消息'), 'Explain this draft')
-    await user.click(within(chat).getByLabelText('批准一次模型调用'))
-    await user.click(within(chat).getByRole('button', { name: '询问模型' }))
+    await user.click(within(chat).getByRole('button', { name: '发送消息' }))
 
     await waitFor(() => expect(calls.ask).toBe(1))
     expect([...new Set(ids)]).toEqual(['us-2'])
@@ -900,9 +901,9 @@ describe('user strategy workspace', () => {
     expect(asked[0].callId).toMatch(/^turn-[A-Za-z0-9]{8,64}$/)
     // The AI column names the strategy it belongs to and can only switch to a real
     // strategy of this workspace.
-    const context = within(chat).getByLabelText('当前策略') as HTMLSelectElement
-    expect(context.value).toBe('us-2')
-    expect([...context.options].map(option => option.value)).toEqual(['us-1', 'us-2'])
+    await user.clear(within(chat).getByLabelText('消息'))
+    await user.type(within(chat).getByLabelText('消息'), '/research ')
+    expect(within(chat).getAllByRole('option').map(option=>option.textContent)).toEqual(['Bold entry','Quiet entry'])
   })
 
   it('gives every strategy its own checkout of the panels it is open in', async () => {
@@ -922,7 +923,10 @@ describe('user strategy workspace', () => {
     expect(await screen.findByText('4 条记录 · aaaaaaaa')).toBeTruthy()
     expect(calls.preview).toBe(1)
 
-    await user.selectOptions(screen.getByLabelText('当前策略'), 'us-2')
+    await user.clear(within(chat).getByLabelText('消息'))
+    await user.clear(within(chat).getByLabelText('消息'))
+    await user.type(within(chat).getByLabelText('消息'), '/research ')
+    await user.click(within(chat).getByRole('option',{name:'Quiet entry'}))
 
     expect(await screen.findByRole('heading', { name: 'Quiet entry' })).toBeTruthy()
     const draft = screen.getByRole('region', { name: '草稿' })
@@ -949,7 +953,7 @@ describe('user strategy workspace', () => {
     detail(api, 'us-1')
 
     // The first strategy's own read has not answered yet; navigation does not wait.
-    await user.click(screen.getByRole('link', { name: '所有研究' }))
+    await user.click(screen.getByRole('link', { name: '返回研究列表' }))
     await user.click(await screen.findByRole('link', { name: 'Quiet entry' }))
     expect(await screen.findByRole('heading', { name: 'Quiet entry' })).toBeTruthy()
 
@@ -959,7 +963,7 @@ describe('user strategy workspace', () => {
     await waitFor(() => expect(screen.getByText('v3 草稿')).toBeTruthy())
     expect(screen.getByRole('heading', { name: 'Quiet entry' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'Bold entry' })).toBeNull()
-    expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '新建研究' })).toBeNull()
   })
 
   it('treats an unresolved call as unresolved and points at Settings, not a re-send', async () => {
@@ -970,12 +974,12 @@ describe('user strategy workspace', () => {
     await screen.findByRole('heading', { name: 'Bold entry' })
     const chat = screen.getByRole('region', { name: 'AI 协作' })
     await waitFor(() => expect(within(chat).getByText('结果未知')).toBeTruthy())
-    expect(chat.textContent).toMatch(/不会被重发，也不会被退还/)
-    expect(within(chat).getByRole('link', { name: '设置' }).getAttribute('href')).toBe('/settings')
+    expect(chat.textContent).toMatch(/结果与用量尚未确认，不会自动重发/)
+    expect(within(chat).getByRole('link', { name: '设置' }).getAttribute('href')).toBe('/resources/models')
     expect(within(chat).getByText('这次调用没有上报 token 用量，因此不会按零计费')).toBeTruthy()
     // Nothing here re-sends it: an answer would need a new, explicitly approved call.
     expect(calls.ask).toBe(0)
-    expect(within(chat).getByRole('button', { name: '询问模型' })).toBeTruthy()
+    expect(within(chat).getByRole('button', { name: '发送消息' })).toBeTruthy()
   })
 
   it('previews the admitted input without starting a run and links the run only after a confirmation', async () => {
@@ -1288,6 +1292,7 @@ describe('user strategy workspace', () => {
     // answer arrives: that answer belongs to the panel that was left.
     await user.click(screen.getByRole('link', { name: '返回研究列表' }))
     await user.click(await screen.findByRole('link', { name: 'Bold entry' }))
+    await user.click(await screen.findByRole('tab', { name: '策略' }))
     expect(await screen.findByRole('region', { name: '草稿' })).toBeTruthy()
 
     await act(async () => {
@@ -1398,21 +1403,21 @@ describe('user strategy workspace', () => {
 
     // A workspace with something to select opens no form.
     expect(await screen.findByRole('link', { name: 'Bold entry' })).toBeTruthy()
-    expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '新建研究' })).toBeNull()
 
-    await user.click(screen.getByRole('button', { name: '新建策略' }))
-    const form = await screen.findByRole('region', { name: '新建策略' })
+    await user.click(screen.getAllByRole('button', { name: '新建研究' })[0])
+    const form = await screen.findByRole('region', { name: '新建研究' })
     await user.type(within(form).getByLabelText('意图'), 'A quieter entry')
 
     // Opening a strategy is not a reason to keep the creation form over it.
     await user.click(screen.getByRole('link', { name: 'Bold entry' }))
     expect(await screen.findByRole('heading', { name: 'Bold entry' })).toBeTruthy()
-    expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '新建研究' })).toBeNull()
     expect(calls.create).toBe(0)
 
     // Coming back to the list offers the same half-written idea again.
     await user.click(screen.getByRole('link', { name: '返回研究列表' }))
-    const back = await screen.findByRole('region', { name: '新建策略' })
+    const back = await screen.findByRole('region', { name: '新建研究' })
     expect((within(back).getByLabelText('意图') as HTMLTextAreaElement).value).toBe('A quieter entry')
     expect(calls.create).toBe(0)
   })
@@ -1429,17 +1434,17 @@ describe('user strategy workspace', () => {
     expect((await screen.findByText('正在读取策略…')).getAttribute('role')).toBe('status')
     expect(screen.queryByText('还没有策略。')).toBeNull()
     expect(screen.queryByText('0 个策略')).toBeNull()
-    expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '新建研究' })).toBeNull()
 
     listed.resolve([strategy()])
     expect(await screen.findByRole('link', { name: 'Bold entry' })).toBeTruthy()
-    expect(screen.getByText('1 个策略')).toBeTruthy()
+    expect(screen.getByText('1 项研究')).toBeTruthy()
 
     await user.click(screen.getByRole('link', { name: 'Bold entry' }))
     // The selected strategy has not answered yet: the AI column says that rather
     // than asking for a strategy that is already selected.
     expect(await screen.findByText('正在读取这条策略的对话…')).toBeTruthy()
-    expect(screen.queryByText(/先创建或选择一条策略/)).toBeNull()
+    expect(screen.queryByText(/选择或新建研究，继续它自己的对话。/)).toBeNull()
 
     read.resolve(strategy())
     expect(await screen.findByRole('region', { name: '草稿' })).toBeTruthy()
@@ -1457,7 +1462,7 @@ describe('user strategy workspace', () => {
     const listFailure = await screen.findByRole('alert')
     expect(listFailure.textContent).toContain('the service refused the list')
     expect(screen.queryByText('还没有策略。')).toBeNull()
-    expect(screen.queryByRole('region', { name: '新建策略' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '新建研究' })).toBeNull()
 
     cleanup()
     const missing = scripted({
@@ -1469,17 +1474,18 @@ describe('user strategy workspace', () => {
     const detailFailure = await screen.findByRole('alert')
     expect(detailFailure.textContent).toContain('no such strategy here')
     expect(await screen.findByText('这条策略没有被读到，因此这里没有对话。')).toBeTruthy()
-    expect(screen.queryByText(/先创建或选择一条策略/)).toBeNull()
+    expect(screen.queryByText(/选择或新建研究，继续它自己的对话。/)).toBeNull()
 
     // A selected route whose strategy could not be read is not a dead end: its
     // header offers creation as a way to the collection route, where the form is,
     // and following it really opens that form.
-    expect(screen.getByRole('link', { name: '新建策略' }).getAttribute('href')).toBe('/strategies')
-    await user.click(screen.getByRole('link', { name: '新建策略' }))
-    expect(await screen.findByRole('region', { name: '新建策略' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: '返回研究列表' }).getAttribute('href')).toBe('/strategies')
+    await user.click(screen.getByRole('link', { name: '返回研究列表' }))
+    await user.click((await screen.findAllByRole('button', { name: '新建研究' }))[0])
+    expect(await screen.findByRole('region', { name: '新建研究' })).toBeTruthy()
   })
 
-  it('scrolls the history on its own and keeps the composer, approval and last call outside it', async () => {
+  it('keeps all turns in the feed and the composer and approval outside it', async () => {
     const { api } = scripted({
       current: () => strategy({
         // An earlier call that was observed: its messages are the earlier
@@ -1512,17 +1518,13 @@ describe('user strategy workspace', () => {
 
     // Every earlier message is still here, inside one named, keyboard-scrollable
     // region that the current turn's own status, usage and cost stay out of.
-    const history = within(chat).getByRole('group', { name: '对话记录' })
-    expect(within(history).getAllByRole('listitem')).toHaveLength(4)
+    const history = within(chat).getByRole('group', { name: '对话与操作记录' })
+    expect(within(history).getByText('What does my draft do?')).toBeTruthy()
     expect(history.getAttribute('tabindex')).toBe('0')
 
     const outside = [
       within(chat).getByLabelText('消息'),
-      within(chat).getByLabelText('批准一次模型调用'),
-      within(chat).getByRole('button', { name: '询问模型' }),
-      within(chat).getByText('未配置'),
-      within(chat).getByText('这次调用没有上报 token 用量，因此不会按零计费'),
-      within(chat).getByText('成本不可用：这个工作区没有价格来源。'),
+      within(chat).getByRole('button', { name: '发送消息' }),
     ]
     for (const control of outside) expect(history.contains(control)).toBe(false)
 
@@ -1622,7 +1624,6 @@ describe('user strategy workspace', () => {
   })
 
   it('answers the latest call alone and keeps an earlier answer out of its turn', async () => {
-    const user = userEvent.setup()
     const { api, calls } = scripted({
       current: () => strategy({
         calls: [
@@ -1665,8 +1666,7 @@ describe('user strategy workspace', () => {
 
     // It is still readable as history: the reader opens that disclosure, and the
     // region inside it is the one bounded, keyboard-scrollable surface.
-    await user.click(within(chat).getByText(/更早的对话/))
-    const history = within(chat).getByRole('group', { name: '对话记录' })
+    const history = within(chat).getByRole('group', { name: '对话与操作记录' })
     expect(within(history).getByText('An older answer about the draft.')).toBeTruthy()
     expect(within(history).getByText('What does my draft do?')).toBeTruthy()
     expect(history.getAttribute('tabindex')).toBe('0')
@@ -1727,6 +1727,69 @@ describe('user strategy workspace', () => {
     const fallback = within(await screen.findByRole('navigation', { name: '策略列表' }))
     expect(await fallback.findByText(/运行状态不可读/)).toBeTruthy()
     expect(fallback.getByRole('link', { name: '打开运行' }).getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
+  })
+
+  it('keeps a frozen unknown owner run visible and explains the workspace hold without redispatch', async () => {
+    const user = userEvent.setup()
+    const frozen = strategy({ experiments: [createdExperiment({
+      owner: 'quine', status: 'unknown', frozen_sha256: 'b'.repeat(64),
+      attempt_id: 'attempt-unknown', report_ready: false, slot_held: true, core_revision: 3,
+      recovery: {status: 'unavailable', preparation_id: null, prepared_at: null, released_at: null},
+    })] })
+    const { api, calls } = scripted({ strategies: [frozen], current: () => frozen })
+    detail(api)
+    const next = await screen.findByRole('region', { name: '下一步' })
+    expect(next.textContent).toContain('结果未知')
+    expect(next.textContent).not.toContain('本草稿尚未冻结为实验')
+    expect(within(next).queryByRole('button', { name: '去预览这个草稿' })).toBeNull()
+
+    const panel = await openSection(user, '实验')
+    const evidence = screen.getByRole('region', { name: '证据' })
+    expect(evidence.textContent).toContain('已有冻结的实验，但还没有可读取的正式报告')
+    expect(evidence.textContent).not.toContain('还没有冻结运行')
+    expect(panel.textContent).toContain('仍占用本工作区唯一的运行名额')
+    expect(panel.textContent).toContain('其他研究也暂时不能启动新实验')
+    expect(panel.textContent).toContain('重新打开应用不会自动释放该名额')
+    expect(panel.textContent).toContain('缺少可验证的运行归属或停止证据，暂不能释放')
+    expect(within(panel).queryByRole('button', {name: /恢复准备|释放运行名额/})).toBeNull()
+    expect(within(panel).getByRole('link', { name: '查看脱敏诊断与备份说明' }).getAttribute('href'))
+      .toBe('/settings?section=about')
+    expect(within(panel).queryByRole('button', { name: '停止这次运行' })).toBeNull()
+    expect(calls.launch).toBe(0)
+    expect(calls.preview).toBe(0)
+    expect(calls.ask).toBe(0)
+  })
+
+  it('does not assert an occupied slot when a completed core run is temporarily unreadable', async () => {
+    const user = userEvent.setup()
+    // A previously completed record retains its frozen identity when the API
+    // cannot reach the core; unknown here is not proof of an active reservation.
+    const unreadable = strategy({ experiments: [createdExperiment({
+      owner: 'quine', status: 'unknown', frozen_sha256: 'c'.repeat(64),
+      attempt_id: 'completed-attempt', report_ready: false,
+      message: 'the core that owns this experiment could not be reached, so its state cannot be read here; nothing was re-sent and no cached result is served',
+    })] })
+    const { api, calls } = scripted({ strategies: [unreadable], current: () => unreadable })
+    detail(api)
+    const panel = await openSection(user, '实验')
+    expect(panel.textContent).not.toContain('这条未知运行仍占用')
+    expect(panel.textContent).toContain('不能仅凭“结果未知”判断运行名额是否占用')
+    expect(panel.textContent).toContain('若核心确认是中断后保留的未知运行')
+    expect(panel.textContent).toContain('若只是核心暂时不可达，请恢复连接后重新读取状态')
+    expect(screen.getByRole('region', { name: '证据' }).textContent).toContain('已有冻结的实验')
+    expect(calls.launch).toBe(0)
+    expect(calls.ask).toBe(0)
+  })
+
+  it('does not infer a core workspace hold from an older unknown dispatch alone', async () => {
+    const user = userEvent.setup()
+    const uncertain = strategy({ experiments: [createdExperiment({ status: 'unknown', job_id: null })] })
+    const { api, calls } = scripted({ strategies: [uncertain], current: () => uncertain })
+    detail(api)
+    const panel = await openSection(user, '实验')
+    expect(panel.textContent).not.toContain('仍占用本工作区唯一的运行名额')
+    expect(screen.getByRole('region', { name: '证据' }).textContent).not.toContain('已有冻结的实验')
+    expect(calls.launch).toBe(0)
   })
 
   it('opens the experiment tab from the next step, and runs nothing', async () => {
@@ -1796,8 +1859,7 @@ describe('maturity round 1', () => {
     })
   }
 
-  it('puts the composer before the turn it answers and the closed proposal beside it', async () => {
-    const user = userEvent.setup()
+  it('keeps the fixed composer after the continuous turns and their decisions', async () => {
     // The latest answer is the longest thing on the page: the reader must still meet
     // the composer before having to scroll or tab past all of it.
     const LONG_ANSWER = Array.from({ length: 160 }, (_, index) => `第${index}句`).join(' ')
@@ -1833,14 +1895,13 @@ describe('maturity round 1', () => {
     expect(within(answer).getByText(LONG_ANSWER)).toBeTruthy()
 
     // So does the earlier conversation, behind its own disclosure.
-    await user.click(within(chat).getByText(/更早的对话/))
     expect(within(chat).getByText('An earlier answer.')).toBeTruthy()
     expect(within(chat).getByText('An earlier question.')).toBeTruthy()
 
     // Nothing ran on its own: no approval is set and no call was sent.
     expect(calls.ask).toBe(0)
     expect(asked).toEqual([])
-    expect((within(chat).getByLabelText('批准一次模型调用') as HTMLInputElement).checked).toBe(false)
+    expect(within(chat).queryByLabelText('批准一次模型调用')).toBeNull()
     expect((within(chat).getByLabelText('消息') as HTMLTextAreaElement).value).toBe('')
   })
 
@@ -1927,6 +1988,7 @@ describe('maturity round 1', () => {
     const succeeded = scripted({ strategies: [frozen], current: () => frozen })
     succeeded.api.getBacktest = async () => succeededJob
     detail(succeeded.api)
+    await userEvent.setup().click(await screen.findByRole('tab', { name: '策略' }))
     const strip = await screen.findByRole('region', { name: '下一步' })
     expect(await within(strip).findByRole('link', { name: '成功 · 报告可读' })).toBeTruthy()
     // The dispatch-only record is never repeated as if it were the run's outcome.
@@ -1938,6 +2000,7 @@ describe('maturity round 1', () => {
     const failed = scripted({ strategies: [frozen], current: () => frozen })
     failed.api.getBacktest = async () => failedJob
     detail(failed.api)
+    await userEvent.setup().click(await screen.findByRole('tab', { name: '策略' }))
     const failedStrip = await screen.findByRole('region', { name: '下一步' })
     expect(await within(failedStrip).findByRole('link', { name: '失败' })).toBeTruthy()
     expect(failedStrip.textContent).not.toMatch(/成功/)
@@ -1948,6 +2011,7 @@ describe('maturity round 1', () => {
     const unreadable = scripted({ strategies: [frozen], current: () => frozen })
     unreadable.api.getBacktest = async () => { throw new Error('offline') }
     detail(unreadable.api)
+    await userEvent.setup().click(await screen.findByRole('tab', { name: '策略' }))
     const unreadableStrip = await screen.findByRole('region', { name: '下一步' })
     expect(await within(unreadableStrip).findByText(/运行状态不可读/)).toBeTruthy()
     expect(within(unreadableStrip).getByRole('link', { name: '打开运行' }).getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
@@ -1963,6 +2027,7 @@ describe('maturity round 1', () => {
     detailRead.api.getBacktest = async () => runJob
     detail(detailRead.api)
     await screen.findByRole('heading', { name: 'Bold entry' })
+    await userEvent.setup().click(await screen.findByRole('tab', { name: '策略' }))
     const strip = await screen.findByRole('region', { name: '下一步' })
     expect(within(strip).queryByText('当前草稿')).toBeNull()
     expect(within(strip).queryByText('v1 草稿')).toBeNull()
@@ -1976,9 +2041,10 @@ describe('maturity round 1', () => {
     listed.api.getBacktest = async () => runJob
     window.history.pushState({}, '', '/strategies')
     render(<App api={listed.api} />)
-    const continuation = await screen.findByRole('region', { name: '继续最近的策略' })
-    expect(continuation.textContent).toMatch(/最近冻结 v1/)
-    expect(continuation.textContent).not.toMatch(/运行已创建/)
+    const list = await screen.findByRole('navigation', { name: '策略列表' })
+    expect(list.textContent).toMatch(/冻结 v1/)
+    expect(list.textContent).not.toMatch(/运行已创建/)
+    expect(screen.queryByRole('region', { name: '继续最近的策略' })).toBeNull()
   })
 })
 
@@ -2226,7 +2292,7 @@ describe('shared evidence selection', () => {
     mounted.rerender(<ExplicitReportEntry api={api} />)
     expect(reads).toBe(1)
     await user.click(screen.getByRole('link', { name: '打开原实验报告' }))
-    expect(await within(card).findByText('20.25 USD')).toBeTruthy()
+    expect(await within(card).findByText('20.25 USD', { selector: '.report-key-results dd' })).toBeTruthy()
     expect(within(card).queryByText(/当前的状态是 running/)).toBeNull()
     expect(within(card).getByText(OLD_JOB)).toBeTruthy()
     expect(reads).toBe(2)
@@ -2252,7 +2318,7 @@ describe('shared evidence selection', () => {
     await act(async () => { late.resolve(REPORTS[OLD_JOB]); await late.promise })
     expect(within(card).getByText('12.5 USD')).toBeTruthy()
     expect(within(card).getByText(NEW_JOB)).toBeTruthy()
-    expect(within(card).queryByText('20.25 USD')).toBeNull()
+    expect(within(card).queryByText('20.25 USD', { selector: '.report-key-results dd' })).toBeNull()
     expect(within(card).queryByText(OLD_JOB)).toBeNull()
     expect(calls.ask).toBe(0)
     expect(calls.launch).toBe(0)
@@ -2268,9 +2334,9 @@ describe('shared evidence selection', () => {
 
     // The card is the older run's own report: its figures and its job, never the
     // latest run's.
-    expect(await within(card).findByText('20.25 USD')).toBeTruthy()
-    expect(within(card).getByText('10020.25 USD', { selector: '.evidence-metrics dd' })).toBeTruthy()
-    expect(within(card).queryByText('5.75 USD')).toBeNull()
+    expect(await within(card).findByText('20.25 USD', { selector: '.report-key-results dd' })).toBeTruthy()
+    expect(within(card).getByText('10020.25 USD', { selector: '.report-key-results dd' })).toBeTruthy()
+    expect(within(card).queryByText('5.75 USD', { selector: '.report-key-results dd' })).toBeNull()
     expect(within(card).getByText(OLD_JOB)).toBeTruthy()
     // The card keeps its convenient selector, and that selector is A — the same
     // choice the research panel below calls A, named as such on the card.
@@ -2292,7 +2358,7 @@ describe('shared evidence selection', () => {
     openedAt(api, `?evidence_a=${OLD_JOB}`)
     let card = await screen.findByRole('region', { name: '证据' })
     let research = await screen.findByRole('region', { name: '证据对比' })
-    expect(await within(card).findByText('20.25 USD')).toBeTruthy()
+    expect(await within(card).findByText('20.25 USD', { selector: '.report-key-results dd' })).toBeTruthy()
     expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1')
 
     // A fresh load over the same address reads the same run: nothing here is
@@ -2301,7 +2367,7 @@ describe('shared evidence selection', () => {
     render(<EvidenceViews api={api} />)
     card = await screen.findByRole('region', { name: '证据' })
     research = await screen.findByRole('region', { name: '证据对比' })
-    expect(await within(card).findByText('20.25 USD')).toBeTruthy()
+    expect(await within(card).findByText('20.25 USD', { selector: '.report-key-results dd' })).toBeTruthy()
     expect((within(card).getByRole('combobox') as HTMLSelectElement).value).toBe('li-1')
     expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1')
 
@@ -2316,7 +2382,7 @@ describe('shared evidence selection', () => {
     window.history.pushState({ key: 'shared-older' }, '', `/strategies/us-1?evidence_a=${OLD_JOB}`)
     window.dispatchEvent(new PopStateEvent('popstate'))
     await waitFor(() => expect((within(card).getByRole('combobox') as HTMLSelectElement).value).toBe('li-1'))
-    await waitFor(() => expect(within(card).getByText('20.25 USD')).toBeTruthy())
+    await waitFor(() => expect(within(card).getByText('20.25 USD', { selector: '.report-key-results dd' })).toBeTruthy())
     expect(within(card).queryByText('12.5 USD')).toBeNull()
     expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-1')
   })
@@ -2329,14 +2395,14 @@ describe('shared evidence selection', () => {
     openedAt(api, `?evidence_a=${OLD_JOB}&view=x`)
     const card = await screen.findByRole('region', { name: '证据' })
     const research = await screen.findByRole('region', { name: '证据对比' })
-    await within(card).findByText('20.25 USD')
+    await within(card).findByText('20.25 USD', { selector: '.report-key-results dd' })
 
     // Choosing on the card is choosing A: the address says so, and the panel below is
     // grounded in the run that was chosen.
     await user.selectOptions(within(card).getByRole('combobox'), 'li-3')
     await waitFor(() => expect(address().get('evidence_a')).toBe(LAST_JOB))
     await waitFor(() => expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-3'))
-    await waitFor(() => expect(within(card).getByText('5.75 USD')).toBeTruthy())
+    await waitFor(() => expect(within(card).getByText('5.75 USD', { selector: '.report-key-results dd' })).toBeTruthy())
     expect(address().get('view')).toBe('x')
 
     // And the other way round: the chooser is the same choice, not a second copy of it.
@@ -2358,7 +2424,7 @@ describe('shared evidence selection', () => {
     openedAt(api, `?evidence_a=${OLD_JOB}&evidence_b=${LAST_JOB}`)
     const card = await screen.findByRole('region', { name: '证据' })
     const research = await screen.findByRole('region', { name: '证据对比' })
-    await within(card).findByText('20.25 USD')
+    await within(card).findByText('20.25 USD', { selector: '.report-key-results dd' })
     expect((within(research).getByLabelText('运行 B') as HTMLSelectElement).value).toBe('li-3')
     expect(within(research).getByRole('link', { name: '独立比较链接' }).getAttribute('href'))
       .toBe(`/backtests/compare/${OLD_JOB}/${LAST_JOB}`)
@@ -2412,7 +2478,7 @@ describe('shared evidence selection', () => {
     await user.click(within(research).getByRole('button', { name: '清除无效的证据选择' }))
     await waitFor(() => expect(address().get('evidence_a')).toBeNull())
     await waitFor(() => expect((within(research).getByLabelText('运行 A') as HTMLSelectElement).value).toBe('li-3'))
-    await waitFor(() => expect(within(card).getByText('5.75 USD')).toBeTruthy())
+    await waitFor(() => expect(within(card).getByText('5.75 USD', { selector: '.report-key-results dd' })).toBeTruthy())
     expect(within(card).getByText(LAST_JOB)).toBeTruthy()
   })
 
@@ -2435,4 +2501,110 @@ describe('shared evidence selection', () => {
     expect((within(research).getByLabelText('批准一次模型调用') as HTMLInputElement).disabled).toBe(true)
     expect((within(research).getByRole('button', { name: '解释所选证据' }) as HTMLButtonElement).disabled).toBe(true)
   })
+})
+
+it('a built-in template requires an explicitly selected compatible published dataset before binding', async () => {
+  const user = userEvent.setup()
+  const { api, calls } = scripted({ strategies: [intent()], current: () => intent() })
+  const template = { ...scenario, scenario_id: 'template:bounded-long.yaml', template_assumptions: { instrument: { symbol: 'AAPL' }, risk: { max_order_quantity: '5' }, execution: { policy: 'phase1.next-bar-close.v1' } } }
+  api.listScenarios = async () => [template]
+  api.listDatasets = async () => [
+    { dataset_id: 'my.csv', valid: true, venue: 'XNAS', symbol: 'AAPL', record_count: 6 },
+    { dataset_id: 'wrong.csv', valid: true, venue: 'OTHER', symbol: 'OTHER', record_count: 6 },
+  ]
+  let received: unknown
+  api.bindUserStrategyScenario = async (_id, input) => { received = input; return strategy() }
+  detail(api)
+  const panel = await screen.findByRole('region', { name: '绑定场景' })
+  await user.selectOptions(within(panel).getByLabelText('场景'), template.scenario_id)
+  await user.click(within(panel).getByLabelText('我确认把选中的这个场景绑定到这条策略'))
+  expect((within(panel).getByRole('button', { name: '绑定场景' }) as HTMLButtonElement).disabled).toBe(true)
+  expect(within(panel).queryByRole('option', { name: /wrong.csv/ })).toBeNull()
+  await user.selectOptions(within(panel).getByLabelText('研究数据版本'), 'my.csv')
+  expect((within(panel).getByLabelText('我确认把选中的这个场景绑定到这条策略') as HTMLInputElement).checked).toBe(false)
+  await user.click(within(panel).getByLabelText('我确认把选中的这个场景绑定到这条策略'))
+  await user.click(within(panel).getByRole('button', { name: '绑定场景' }))
+  expect(received).toMatchObject({ scenario_id: template.scenario_id, dataset_id: 'my.csv', base_revision: 1 })
+  expect(calls.ask).toBe(0)
+  expect(calls.launch).toBe(0)
+})
+
+describe('agent panel continuity', () => {
+  it('keeps earlier turns visible before the current turn with each change beside its own call', async () => {
+    const first = { ...unconfigured, call_id: 'older-call' }
+    const second = { ...unconfigured, call_id: 'newer-call' }
+    const value = strategy({
+      calls: [first, second],
+      messages: [
+        { message_id: 'older-q', role: 'user', kind: 'message', text: 'Earlier question', base_revision: 1, at: first.reserved_at, call_id: first.call_id, proposal_id: null },
+        { message_id: 'newer-q', role: 'user', kind: 'message', text: 'Current question', base_revision: 1, at: second.reserved_at, call_id: second.call_id, proposal_id: null },
+      ],
+      proposals: [
+        proposal({ proposal_id: 'older-change', call_id: first.call_id, status: 'rejected' }),
+        proposal({ proposal_id: 'newer-change', call_id: second.call_id }),
+      ],
+    })
+    const { api, calls } = scripted({ current: () => value })
+    detail(api)
+    await screen.findByLabelText('消息')
+    const feed = screen.getByRole('group', { name: '对话与操作记录' })
+    const older = within(feed).getByText('Earlier question')
+    const newer = within(feed).getByText('Current question')
+    expect(older.compareDocumentPosition(newer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(older.closest('details')).toBeNull()
+    const olderTurn = older.closest('section')!
+    const newerTurn = screen.getByRole('region', { name: '当前一轮' })
+    expect(within(olderTurn).getByRole('region', { name: '建议修改' }).textContent).toContain('older-change')
+    expect(within(newerTurn).getByRole('region', { name: '建议修改' }).textContent).toContain('newer-change')
+    expect(feed.contains(screen.getByLabelText('消息'))).toBe(false)
+    expect(calls.ask).toBe(0)
+  })
+})
+
+
+it('links a recorded call to its exact frozen evidence and opens the work view', async () => {
+  const user = userEvent.setup()
+  const ownRun = createdExperiment()
+  const value = strategy({ experiments: [ownRun], calls: [{ ...unconfigured, evidence: [{
+    job_id: 'job-1', launch_intent_id: 'li-1', draft_revision: 1, criterion: CRITERION,
+    run_id: 'run-1', report_sha256: null, input_sha256: preview.input_sha256, record_count: 4,
+    parameters: { target_quantity: '2' }, assumptions: {}, facts: [], reading: { outcome: null, inference: null }, limitations: [],
+  }] }] })
+  const { api, calls } = scripted({ current: () => value })
+  detail(api)
+  await screen.findByLabelText('消息')
+  await user.click(screen.getByRole('button', { name: 'AI 协作' }))
+  const link = screen.getByRole('link', { name: '查看冻结实验 · job-1', hidden: true })
+  expect(link.getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
+  await user.click(screen.getByText('这次调用所依据的冻结证据（1）'))
+  await user.click(link)
+  expect(window.location.search).toBe('?tab=experiments&evidence_a=job-1')
+  expect(screen.getByRole('group', { name: '工作区视图' }).parentElement?.getAttribute('data-workspace-view')).toBe('work')
+  expect(calls.ask).toBe(0)
+  expect(calls.launch).toBe(0)
+})
+
+
+it('releases only on an explicit core-bound action and keeps the unknown visible', async () => {
+  const user = userEvent.setup()
+  const old = createdExperiment({ owner:'quine', status:'unknown', attempt_id:'attempt-unknown',
+    slot_held:true, core_revision:4, recovery:{status:'ready', preparation_id:'prep-1',prepared_at:1,released_at:null} })
+  const saved = strategy({experiments:[old]})
+  const {api, calls} = scripted({strategies:[saved],current:()=>saved})
+  const release = vi.spyOn(userStrategiesApi,'recoverExperiment').mockResolvedValue(strategy({experiments:[{
+    ...old, slot_held:false, core_revision:5,
+    recovery:{status:'released',preparation_id:'prep-1',prepared_at:1,released_at:2},
+  }]}))
+  try {
+    detail(api)
+    const panel=await openSection(user,'实验')
+    expect(release).not.toHaveBeenCalled()
+    await user.click(within(panel).getByRole('button',{name:'保留未知结果并释放运行名额'}))
+    expect(release).toHaveBeenCalledExactlyOnceWith('us-1',old.launch_intent_id,{
+      action:'release',attempt_id:'attempt-unknown',expected_revision:4,preparation_id:'prep-1',
+    })
+    await waitFor(()=>expect(panel.textContent).toContain('结果仍未知；核心已验证旧计算停止并释放运行名额'))
+    expect(within(panel).queryByRole('button',{name:'保留未知结果并释放运行名额'})).toBeNull()
+    expect(calls.launch).toBe(0); expect(calls.ask).toBe(0)
+  } finally { release.mockRestore() }
 })

@@ -9,15 +9,18 @@
  * a stream that belongs to a strategy the reader has left can never write into the
  * strategy they are looking at now.
  */
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { App, type ApiAdapter } from './app'
+import { App, type ApiAdapter, type BacktestJob, type BacktestReport } from './app'
+import { UserStrategyRequestError } from './user-strategies-api'
 import type {
   UserStrategy,
   UserStrategyConversation,
   UserStrategyConversationEvent,
+  UserStrategyConversationPending,
+  UserStrategyExperiment,
   UserStrategyPreview,
   UserStrategyResumeRequest,
 } from './user-strategies-api'
@@ -105,7 +108,7 @@ const conversation = (overrides: Partial<UserStrategyConversation> = {}): UserSt
   pending: null,
   preview: null,
   open_proposals: [],
-  budget: { max_model_calls: 10, reserved_model_calls: 1, remaining_model_calls: 9, max_backtests: 5 },
+  budget: { max_model_calls_per_turn: 4, reserved_model_calls: 1, max_backtests: 5 },
   ...overrides,
 })
 
@@ -140,7 +143,7 @@ function queue() {
 }
 
 const asked: UserStrategyResumeRequest[] = []
-const sent: { call_id: string; text: string; approved: { max_model_calls: number; max_backtests: number } }[] = []
+const sent: { call_id: string; text: string; approved: { max_model_calls: number; max_backtests: number } | undefined }[] = []
 const launched: string[] = []
 const signals: AbortSignal[] = []
 
@@ -222,8 +225,7 @@ async function chat(): Promise<HTMLElement> {
 async function ask(user: ReturnType<typeof userEvent.setup>, text: string) {
   const panel = await chat()
   await user.type(within(panel).getByLabelText('消息'), text)
-  await user.click(within(panel).getByLabelText(/批准本轮最多/))
-  await user.click(within(panel).getByRole('button', { name: '询问模型' }))
+  await user.click(within(panel).getByRole('button', { name: '发送消息' }))
   return panel
 }
 
@@ -236,6 +238,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  sessionStorage.clear()
   window.history.pushState({}, '', '/backtests')
 })
 
@@ -303,10 +306,37 @@ describe('the streamed conversation panel', () => {
     stream.push({ kind: 'done', strategy: answered })
     stream.end()
     // The canonical record is what remains, and the partial live view is gone.
-    await waitFor(() => expect(screen.getByText('这是最终回答。', { selector: '.answer-scroll p' })).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('这是最终回答。', { selector: '.turn-answer p' })).toBeTruthy())
     await waitFor(() => expect(screen.queryByText(/正在生成，尚未完成/)).toBeNull())
-    expect(sent[0].approved).toEqual({ max_model_calls: 4, max_backtests: 0 })
+    expect(sent[0].approved).toBeUndefined()
     expect(sent[0].call_id.startsWith('turn-')).toBe(true)
+  })
+
+  it('keeps a disconnected new turn unknown when the previous turn completed and reread fails', async () => {
+    const user = userEvent.setup()
+    let disconnected = false
+    const api = scripted({
+      strategies: [strategy()],
+      conversation: () => {
+        if (disconnected) throw new UserStrategyRequestError('request_failed', '服务已关闭')
+        return conversation({ task: { turn_id: 'previous', limit: 1, used: 1, remaining: 0,
+          status: 'stopped', stop_reason: 'completed' } })
+      },
+      send: async function* () {
+        yield { kind: 'text_delta', text: '已经收到的部分回答' }
+        disconnected = true
+        throw new UserStrategyRequestError('request_failed', '连接已中断')
+      },
+    })
+    mount(api)
+    const panel = await ask(user, '请检查这次输入')
+    await waitFor(() => expect(within(panel).getByText(/草稿 v1 · 响应未确认/)).toBeTruthy())
+    expect(within(panel).getByText('已经收到的部分回答')).toBeTruthy()
+    expect(within(panel).queryByText(/草稿 v1 · 已完成/)).toBeNull()
+    expect(within(panel).queryByText('生成中')).toBeNull()
+    expect(within(panel).queryByText(/什么都没有改变/)).toBeNull()
+    expect(within(panel).getByRole('button', { name: '发送消息' }).hasAttribute('disabled')).toBe(true)
+    expect(sent).toHaveLength(1)
   })
 
   it('resumes an applied proposal to a separate confirmation and starts nothing', async () => {
@@ -468,6 +498,7 @@ describe('the streamed conversation panel', () => {
         },
       ],
     })
+    multi.calls[0].tool_results = [{tool: 'discover_resources', tool_id: 'read-catalog', status: 'done', text: '{"ok":true,"datasets":[]}' }]
     const api = scripted({
       strategies: [multi],
       conversation: () => conversation(),
@@ -477,9 +508,11 @@ describe('the streamed conversation panel', () => {
 
     const panel = await chat()
     // The turn that made two calls shows both, and the answer of its second call.
-    expect(within(panel).getByText(/本轮共 2 次模型调用/)).toBeTruthy()
+    expect(within(panel).getByText('已观测')).toBeTruthy()
     expect(within(panel).getByText('本轮的回答')).toBeTruthy()
     expect(within(panel).getByText('本轮读取数据后的说明')).toBeTruthy()
+    expect(within(panel).getByText('✓ 发现策略与数据 · 已完成')).toBeTruthy()
+    expect(within(panel).getByText('{"ok":true,"datasets":[]}')).toBeTruthy()
     // A reload after a later provider failure must show that failure, even though
     // the root call of the same turn succeeded.
     cleanup()
@@ -490,29 +523,31 @@ describe('the streamed conversation panel', () => {
     expect(within(reopened).getByText('最后一次模型调用的结果未确认')).toBeTruthy()
     expect(within(reopened).getByText('本轮读取数据后的说明')).toBeTruthy()
     // The earlier conversation is still there, one disclosure away.
-    expect(within(reopened).getByText('更早的对话（2）')).toBeTruthy()
+    expect(within(reopened).getByText('更早的问题')).toBeTruthy()
+    expect(within(reopened).getByText('更早的回答')).toBeTruthy()
   })
 
-  it('disables the product send button when the workspace has no call left', async () => {
+  it('allows a new bounded turn after more than 200 recorded calls', async () => {
     const user = userEvent.setup()
+    const stream = queue()
     const api = scripted({
       strategies: [strategy()],
       conversation: () => conversation({
-        budget: { max_model_calls: 10, reserved_model_calls: 10, remaining_model_calls: 0, max_backtests: 5 },
+        budget: { max_model_calls_per_turn: 4, reserved_model_calls: 220, max_backtests: 5 },
       }),
-      send: () => queue().source(),
+      send: () => stream.source(),
     })
     mount(api)
-
     const panel = await chat()
-    await user.type(within(panel).getByLabelText('消息'), '还能问吗？')
-    await user.click(within(panel).getByLabelText(/批准本轮最多 0 次模型调用/))
-
-    // The bound is the workspace's own remaining grant, and there is none: the
-    // button is disabled and the panel says why rather than promising a call.
-    expect((within(panel).getByRole('button', { name: '询问模型' }) as HTMLButtonElement).disabled).toBe(true)
-    expect(within(panel).getByText(/剩余的模型调用额度为 0/)).toBeTruthy()
-    expect(sent).toEqual([])
+    await user.type(within(panel).getByLabelText('消息'), '继续研究')
+    expect(within(panel).queryByText('工作区累计预留 220 次模型调用')).toBeNull()
+    const send = within(panel).getByRole('button', { name: '发送消息' }) as HTMLButtonElement
+    expect(send.disabled).toBe(false)
+    await user.click(send)
+    expect(sent).toHaveLength(1)
+    expect(sent[0].approved).toBeUndefined()
+    stream.push({ kind: 'done', strategy: strategy() })
+    stream.end()
   })
 
   it('aborts a stream when the reader leaves, so another strategy is never written to', async () => {
@@ -532,8 +567,8 @@ describe('the streamed conversation panel', () => {
 
     // The reader switches strategies. The turn's own stream is cancelled, and the
     // events that were already on their way cannot reach the new strategy.
-    const panel = await chat()
-    await user.selectOptions(within(panel).getByLabelText('当前策略'), 'us-2')
+    await chat()
+    await act(async()=>{window.history.pushState({},'', '/strategies/us-2');window.dispatchEvent(new PopStateEvent('popstate'))})
 
     await waitFor(() => expect(signals[0].aborted).toBe(true))
     stream.push({ kind: 'text_delta', text: '这段回答不应该出现在第二条策略里' })
@@ -564,7 +599,7 @@ describe('the streamed conversation panel', () => {
 
     const card = await screen.findByRole('region', { name: '实验观察' })
     expect(within(card).getByText(/job-1/)).toBeTruthy()
-    expect(screen.getByText(/运行完成后可在这里继续追问/)).toBeTruthy()
+    expect((screen.getByRole('button',{name:'发送消息'}) as HTMLButtonElement).disabled).toBe(true)
     // The polite reader asks again, one query at a time, and never a second launch.
     await waitFor(() => expect(asked.length).toBeGreaterThanOrEqual(1), { timeout: 9000 })
     expect(asked.every(item => item.action === 'observe' && item.turn_id === 'turn-1')).toBe(true)
@@ -572,4 +607,228 @@ describe('the streamed conversation panel', () => {
     stream.push({ kind: 'state', job_id: 'job-1', run_status: 'running' })
     stream.end()
   })
+})
+
+
+describe('completed conversation experiment evidence', () => {
+  it.each(['succeeded', 'failed'] as const)('rereads only its completed job without reload (%s)', async status => {
+    const user = userEvent.setup()
+    const stream = queue()
+    const experiment: UserStrategyExperiment = {
+      launch_intent_id: INTENT, request_id: 'request-1', payload_sha256: 'a'.repeat(64),
+      payload: { draft_revision: 1, scenario_id: 'bounded-long.yaml', parameters: { target_quantity: '2' } },
+      task_id: 'task-1', job_id: 'job-1', status: 'created', created_at: '2026-10-06T10:02:00Z',
+    }
+    const value = strategy({ experiments: [experiment] })
+    let pending: UserStrategyConversationPending | null = {
+      phase: 'awaiting_confirmation', turn_id: 'turn-1', proposal_id: 'prop-1', base_revision: 1,
+      launch_intent_id: INTENT, preview_identity: PREVIEW_IDENTITY, job_id: null, at: '2026-10-06T10:02:00Z',
+    }
+    let terminal = false
+    const reads: string[] = []
+    const reports: string[] = []
+    const api = scripted({ strategies: [value], conversation: () => conversation({ pending, preview }), resume: () => stream.source() })
+    api.getBacktest = async id => {
+      reads.push(id)
+      return { job_id: id, status: terminal ? status : 'running', report_ready: terminal && status === 'succeeded', engine_run_id: `run-${id}` } as BacktestJob
+    }
+    api.getReport = async id => { reports.push(id); return { run_id: `run-${id}` } as BacktestReport }
+    mount(api)
+    const panel = await chat()
+    await within(panel).findByText(/所选证据尚未就绪/)
+    // Existing runs open the experiment tab. The frozen status strip belongs to
+    // the strategy overview, so reach it through the same visible tab as a user.
+    expect(screen.getByRole('tab', { name: '实验' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.queryByRole('region', { name: '下一步' })).toBeNull()
+    await user.click(screen.getByRole('tab', { name: '策略' }))
+    const strip = screen.getByRole('region', { name: '下一步' })
+    await within(strip).findByRole('link', { name: '运行中' })
+    const frozen = JSON.stringify(experiment)
+    await user.click(within(panel).getByRole('button', { name: '确认并运行一次回测' }))
+    const before = reads.length
+    terminal = true
+    // Neither an unrelated job event nor an interrupt finishes this frozen intent.
+    await act(async () => { stream.push({ kind: 'state', job_id: 'foreign-job', verified: true }) })
+    expect(reads).toHaveLength(before)
+    pending = null
+    await act(async () => {
+      stream.push({ kind: 'done', strategy: value })
+      stream.end()
+    })
+    await waitFor(() => expect(reads.length).toBeGreaterThan(before))
+    expect(reads.every(id => id === 'job-1')).toBe(true)
+    await within(strip).findByRole('link', { name: status === 'succeeded' ? '成功 · 报告可读' : '失败' })
+    expect(strip.textContent).toContain('v1')
+    expect(strip.querySelector('time')?.getAttribute('datetime')).toBe(experiment.created_at)
+    expect(JSON.stringify(experiment)).toBe(frozen)
+    if (status === 'succeeded') {
+      await waitFor(() => expect(within(panel).queryByText(/所选证据尚未就绪/)).toBeNull())
+      expect(reports).toEqual(['job-1'])
+      await user.type(within(panel).getByLabelText('消息'), '解读已完成实验')
+      expect((within(panel).getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(false)
+    } else {
+      expect(within(panel).getByText(/所选证据尚未就绪/)).toBeTruthy()
+      expect(reports).toEqual([])
+    }
+    expect(sent).toEqual([])
+    expect(launched).toEqual([])
+  })
+})
+
+
+it('keeps the saved turn and applied proposal mounted during a resumed explanation', async () => {
+  const user = userEvent.setup()
+  const stream = queue()
+  const saved = strategy({
+    calls: [{ call_id: 'turn-1', turn_id: 'turn-1', base_revision: 1, status: 'observed',
+      route: { provider: 'fixture', model: 'fixture', endpoint: null }, approved_budget: { max_model_calls: 4, max_backtests: 0 },
+      reserved_at: '2026-10-06T10:01:00Z', message: null, model: 'fixture', input_tokens: null, output_tokens: null, usage_available: false }],
+    messages: [
+      { message_id: 'u1', role: 'user', kind: 'message', text: '原始问题', base_revision: 1, at: '2026-10-06T10:01:00Z', call_id: 'turn-1', proposal_id: null },
+      { message_id: 'm1', role: 'model', kind: 'message', text: '已保存的提案解释', base_revision: 1, at: '2026-10-06T10:01:01Z', call_id: 'turn-1', proposal_id: null },
+    ],
+    proposals: [{ proposal_id: 'prop-1', call_id: 'turn-1', base_revision: 1, status: 'applied', created_at: '2026-10-06T10:01:01Z',
+      items: [{ path: 'parameters.target_quantity', before: '2', after: '3', reason: 'fixture', evidence: [], proposer: 'model' }],
+      applied_paths: ['parameters.target_quantity'], stale_paths: [] }],
+  })
+  const pending: UserStrategyConversationPending = { phase: 'awaiting_confirmation', turn_id: 'turn-1', proposal_id: 'prop-1', base_revision: 1,
+    launch_intent_id: INTENT, preview_identity: PREVIEW_IDENTITY, job_id: null, at: '2026-10-06T10:02:00Z' }
+  const api = scripted({ strategies: [saved], conversation: () => conversation({ pending, preview }), resume: () => stream.source() })
+  mount(api)
+  const answer = await screen.findByText('已保存的提案解释')
+  const proposal = screen.getByRole('region', { name: '建议修改' })
+  await user.click(await screen.findByRole('button', { name: '确认并运行一次回测' }))
+  await act(async () => { stream.push({ kind: 'text_delta', text: '这是实验后的续写' }) })
+  expect(await screen.findByText('这是实验后的续写')).toBeTruthy()
+  expect(screen.getByText('已保存的提案解释')).toBe(answer)
+  expect(screen.getByRole('region', { name: '建议修改' })).toBe(proposal)
+  expect(screen.getAllByText('原始问题')).toHaveLength(1)
+  stream.end()
+})
+
+
+it('keeps a departed research late terminal job read out of the current frozen strip', async () => {
+  const user = userEvent.setup()
+  const stream = queue()
+  const first: UserStrategyExperiment = {
+    launch_intent_id: INTENT, request_id: 'request-1', payload_sha256: 'a'.repeat(64),
+    payload: { draft_revision: 1, scenario_id: 'bounded-long.yaml', parameters: { target_quantity: '2' } },
+    task_id: 'task-1', job_id: 'job-1', status: 'created', created_at: '2026-10-06T10:02:00Z',
+  }
+  const second: UserStrategyExperiment = { ...first, launch_intent_id: 'int-2', job_id: 'job-2', payload: { ...first.payload, draft_revision: 7 } }
+  const value = strategy({ experiments: [first] })
+  const other = strategy({ user_strategy_id: 'us-2', name: 'Second idea', experiments: [second] })
+  let pending: UserStrategyConversationPending | null = {
+    phase: 'awaiting_confirmation', turn_id: 'turn-1', proposal_id: 'prop-1', base_revision: 1,
+    launch_intent_id: INTENT, preview_identity: PREVIEW_IDENTITY, job_id: null, at: '2026-10-06T10:02:00Z',
+  }
+  const late: ((value: BacktestJob) => void)[] = []
+  let terminal = false
+  const api = scripted({ strategies: [value, other], conversation: () => conversation({ pending, preview }), resume: () => stream.source() })
+  api.getBacktest = async id => {
+    if (id === 'job-1' && terminal) return new Promise<BacktestJob>(resolve => { late.push(resolve) })
+    return { job_id: id, status: id === 'job-2' ? 'failed' : 'running', report_ready: false } as BacktestJob
+  }
+  mount(api)
+  const panel = await chat()
+  await user.click(screen.getByRole('tab', { name: '策略' }))
+  await within(screen.getByRole('region', { name: '下一步' })).findByRole('link', { name: '运行中' })
+  await user.click(within(panel).getByRole('button', { name: '确认并运行一次回测' }))
+  terminal = true
+  pending = null
+  await act(async () => { stream.push({ kind: 'done', strategy: value }); stream.end() })
+  await waitFor(() => expect(late).toHaveLength(2)) // AI report precondition and the frozen strip.
+  await act(async()=>{window.history.pushState({},'', '/strategies/us-2');window.dispatchEvent(new PopStateEvent('popstate'))})
+  await user.click(await screen.findByRole('tab', { name: '策略' }))
+  const strip = await screen.findByRole('region', { name: '下一步' })
+  const ownLink = await within(strip).findByRole('link', { name: '失败' })
+  await act(async () => {
+    for (const resolve of late) resolve({ job_id: 'job-1', status: 'succeeded', report_ready: true, engine_run_id: 'run-1' } as BacktestJob)
+  })
+  expect(within(strip).queryByRole('link', { name: /成功/ })).toBeNull()
+  expect(ownLink.getAttribute('href')).toContain('/strategies/us-2?tab=experiments&evidence_a=job-2')
+  expect(strip.textContent).toContain('v7')
+  expect(sent).toEqual([])
+  expect(launched).toEqual([])
+})
+
+it.each(['done', 'failed'] as const)('keeps a tool-only %s receipt visible on completion and reload', async status => {
+  const common: UserStrategy['calls'][number] = {
+    call_id: 'tool-only', turn_id: 'tool-only', base_revision: 1, status: 'observed',
+    route: {provider: 'fixture', model: 'fixture', endpoint: null},
+    approved_budget: {max_model_calls: 4, max_backtests: 0}, reserved_at: '2026-10-13T13:00:00Z',
+    message: null, model: 'fixture', input_tokens: null, output_tokens: null, usage_available: false,
+  }
+  const receipt = {tool: 'discover_resources', tool_id: 'catalog-1', status,
+    text: status === 'done' ? '{"ok":true,"datasets":[]}' : '{"ok":false,"error":"catalog unavailable"}'}
+  const saved = strategy({
+    calls: [{...common, tool_results: [receipt]}, {...common, call_id: 'after-tool'}],
+    messages: [
+      {message_id: 'question', role: 'user', kind: 'message', text: 'Find the actual datasets.',
+        base_revision: 1, at: common.reserved_at, call_id: common.call_id, proposal_id: null},
+      {message_id: 'answer', role: 'model', kind: 'message', text: 'Catalog read complete.',
+        base_revision: 1, at: common.reserved_at, call_id: 'after-tool', proposal_id: null},
+    ],
+  })
+  const api = scripted({strategies: [saved], conversation: () => conversation()})
+  for (let reload = 0; reload < 2; reload++) {
+    mount(api)
+    const panel = await chat()
+    const label = status === 'done' ? '✓ 发现策略与数据 · 已完成' : '! 发现策略与数据 · 失败'
+    const step = within(panel).getByText(label)
+    const answer = within(panel).getByText('Catalog read complete.')
+    expect(within(panel).getAllByText(label)).toHaveLength(1)
+    expect(within(panel).getByText(receipt.text)).toBeTruthy()
+    expect(step.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    cleanup()
+  }
+})
+
+it('continues a persisted legacy pause without a numeric authorization form', async () => {
+  const user = userEvent.setup()
+  const stream = queue()
+  const state = conversation({task:{turn_id:'task-1',limit:6,used:6,remaining:0,status:'awaiting_budget',stop_reason:'budget_exhausted'},pending:{phase:'awaiting_budget',turn_id:'task-1',proposal_id:null,base_revision:1,launch_intent_id:null,preview_identity:null,job_id:null,at:'2026-10-13T13:00:00Z'}})
+  const api = scripted({strategies:[strategy()],conversation:()=>state,resume:()=>stream.source()})
+  mount(api)
+  const panel = await chat()
+  expect(within(panel).queryByLabelText('任务总请求上限')).toBeNull()
+  expect(within(panel).queryByLabelText('追加后的总请求上限')).toBeNull()
+  await user.click(await within(panel).findByRole('button',{name:'授权继续（最多再 24 次请求）'}))
+  expect(within(panel).getByText('发送新消息即授权最多 24 次模型请求；费用取决于模型用量。')).toBeTruthy()
+  expect(within(panel).getByText('当前任务累计授权 6 次，已用 6 次，剩余 0 次。')).toBeTruthy()
+  expect(asked[0]).toMatchObject({turn_id:'task-1',action:'continue'})
+  expect(asked[0].grant_id).toBeTruthy()
+  expect(asked[0].total_model_calls).toBeUndefined()
+  stream.push({kind:'done',strategy:strategy()});stream.end()
+})
+
+it('keeps cancellation available during automatic observation after reload', async () => {
+  const stream = queue()
+  const pending: UserStrategyConversationPending = {phase:'awaiting_observation', turn_id:'turn-1',proposal_id:'prop-1',base_revision:2,launch_intent_id:INTENT,preview_identity:PREVIEW_IDENTITY,job_id:'job-1',at:'2026-10-13T13:00:00Z'}
+  const api = scripted({strategies:[strategy()], conversation:()=>conversation({pending, task:{turn_id:'turn-1',limit:8,used:1,remaining:7,status:'awaiting_decision',stop_reason:'decision_required'}}),resume:()=>stream.source()})
+  mount(api)
+  const panel = await chat()
+  await waitFor(()=>expect(asked.length).toBeGreaterThanOrEqual(1),{timeout:9000})
+  expect(within(panel).getByRole('button',{name:'停止生成'})).toBeTruthy()
+  stream.push({kind:'interrupt',waiting:{kind:'observation',turn_id:'turn-1',job_id:'job-1',status:'running'},strategy:strategy()})
+  stream.end()
+})
+
+it('sends with Enter without a numeric form and keeps Shift+Enter as a newline', async () => {
+  const user = userEvent.setup()
+  const stream = queue()
+  const api = scripted({strategies:[strategy()],conversation:()=>conversation(),send:()=>stream.source()})
+  mount(api)
+  const panel = await chat()
+  expect(within(panel).queryByLabelText('任务总请求上限')).toBeNull()
+  expect(within(panel).queryByRole('button',{name:'询问模型'})).toBeNull()
+  const input = within(panel).getByLabelText('消息')
+  await user.type(input,'检查输入{Shift>}{Enter}{/Shift}再解释')
+  expect(sent).toHaveLength(0)
+  await user.keyboard('{Enter}')
+  await waitFor(()=>expect(sent).toHaveLength(1))
+  expect(sent[0].text).toBe('检查输入\n再解释')
+  expect(sent[0].approved).toBeUndefined()
+  expect(within(panel).getByRole('button',{name:'停止生成'})).toBeTruthy()
+  stream.end()
 })

@@ -257,3 +257,29 @@ def test_replaced_request_directory_cannot_become_a_new_owner(tmp_path: Path) ->
         manager.requests.rmdir()
         original.rename(manager.requests)
         manager.close()
+
+
+def test_invalid_workspace_save_does_not_stop_paper(tmp_path: Path) -> None:
+    from unittest.mock import Mock
+
+    from unit.test_desktop_settings import context
+    from unit.test_web_radian import _settings
+
+    desktop = context(tmp_path)
+    paper = Mock()
+    target = tmp_path / "next"
+    target.mkdir()
+    settings = _settings(tmp_path, desktop_settings=desktop, desktop_paper=paper)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        before = desktop.status()["next_workspace"]
+        bodies: tuple[dict[str, object], ...] = (
+            {"next_workspace": "relative-test-path"},
+            {"next_workspace": str(target), "theme": "dark"},
+            {"next_workspace": []},
+        )
+        for body in bodies:
+            response = client.post("/api/desktop/settings", headers=WRITE_HEADERS, json=body)
+            assert response.status_code == 409
+            assert response.json()["error"]["code"] == "settings_not_saved"
+            assert desktop.status()["next_workspace"] == before
+            paper.shutdown.assert_not_called()

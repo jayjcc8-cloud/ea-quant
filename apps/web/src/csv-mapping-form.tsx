@@ -23,6 +23,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import { AVAILABILITY_SIMULATED, TIME_FORMAT_IDS } from './research-api'
 
 /** The strict Phase 1 OHLCV destinations, in the decoder's own order. */
+const FIELD_LABELS: Record<string, string> = { schema_version: '格式版本', venue: '交易所', symbol: '标的', interval_start: '开始时间', interval_end: '结束时间', adjustment: '复权方式', open: '开盘价', high: '最高价', low: '最低价', close: '收盘价', volume: '成交量', source: '来源', source_sequence: '来源序号', revision: '修订号', available_at: '可用时间' }
 const STRICT_DESTINATIONS: readonly string[] = [
   'schema_version',
   'venue',
@@ -159,7 +160,7 @@ function readHeader(content: string): HeaderReading {
   if (unnamed >= 0) {
     return {
       ok: false,
-      problem: `Column ${unnamed + 1} of the header has no name. An unnamed column is never given a name here, so no destination can be pointed at a column of this file.`,
+      problem: `Column ${unnamed + 1} of the header has no name. An unnamed column is never given a name here, so no destination can be pointed at 选择文件中的列.`,
     }
   }
   const seen = new Set<string>()
@@ -394,20 +395,16 @@ export function GuidedMappingFields({ content, policy, disabled, state, onChange
   const waiting = undeclared(state, policy)
 
   return <fieldset className="guided-mapping">
-    <legend>Guided mapping · choose each destination from your own file</legend>
+    <legend>表单映射 · 逐项选择来源列</legend>
     <p className="muted">
-      Every one of the strict profile’s fifteen destinations is a choice you make here. The column list is this
-      file’s own header row and nothing else — no data row is read and no value is inferred — and each timestamp
-      form is one of {TIME_FORMAT_IDS.length} exact forms this host accepts. A choice you make stays as you made
-      it, even when the file no longer has that column: the host then refuses the declaration rather than
-      re-pointing it for you.
+      请为每个字段选择文件中的列，或为允许的元数据明确填写常量。时间格式支持 {TIME_FORMAT_IDS.length} 种。更换文件后保留原选择，不会自动猜测新映射；请检查是否仍对应正确列。
     </p>
     {!header.ok && <p className="notice error" role="alert">{header.problem}</p>}
     {header.ok && header.notices.map(notice => <p key={notice} className="notice error" role="alert">{notice}</p>)}
     <p className="muted">
       {header.ok
-        ? `This file’s header row, read as names only: ${names.join(' · ')}`
-        : 'No column can be chosen from this header, so no destination is offered a column.'}
+        ? `文件列名： ${names.join(' · ')}`
+        : '无法从表头读取列名，请先修正 CSV 表头。'}
     </p>
     <div className="parameter-grid">
       {STRICT_DESTINATIONS.map(field => {
@@ -415,12 +412,12 @@ export function GuidedMappingFields({ content, policy, disabled, state, onChange
           // Not a destination the user declares under this policy, and not an
           // editable value the panel would then ignore: the policy derives it.
           return <div key={field}>
-            <label htmlFor={`guided-${field}`}>{field}</label>
+            <label htmlFor={`guided-${field}`}>{field}</label><small>{FIELD_LABELS[field]}</small>
             <select id={`guided-${field}`} disabled defaultValue="derived">
-              <option value="derived">Derived by the policy (interval end + the latency you state)</option>
+              <option value="derived">由策略计算：K 线结束 + 声明延迟</option>
             </select>
             <small id={`guided-hint-${field}`}>
-              Not declared here: the simulated policy computes this instant itself.
+              模拟策略计算此时间，不需重复声明。
             </small>
           </div>
         }
@@ -430,7 +427,7 @@ export function GuidedMappingFields({ content, policy, disabled, state, onChange
         const mayBeConstant = CONSTANT_DESTINATIONS.includes(field)
         const selectValue = header.ok ? (choice ? (choice.kind === 'constant' ? CONSTANT_OPTION : held) : '') : ''
         return <div key={field}>
-          <label htmlFor={`guided-${field}`}>{field}</label>
+          <label htmlFor={`guided-${field}`}>{field}</label><small>{FIELD_LABELS[field]}</small>
           <select
             id={`guided-${field}`}
             value={selectValue}
@@ -443,16 +440,16 @@ export function GuidedMappingFields({ content, policy, disabled, state, onChange
                 : raw ? { kind: 'column', value: raw } : null)
             }}
           >
-            <option value="">Not declared…</option>
-            {stale && <option value={held}>{held} (not in this file)</option>}
+            <option value="">请选择来源列…</option>
+            {stale && <option value={held}>{held} （当前文件无此列）</option>}
             {names.map(name => <option key={name} value={name}>{name}</option>)}
-            {mayBeConstant && <option value={CONSTANT_OPTION}>Constant value (metadata only)…</option>}
+            {mayBeConstant && <option value={CONSTANT_OPTION}>填写常量（仅元数据）…</option>}
           </select>
           <small id={`guided-hint-${field}`}>
-            {mayBeConstant ? 'a column of this file, or one constant you state' : 'a column of this file'}
+            {mayBeConstant ? '选择文件列或明确填写常量' : '选择文件中的列'}
           </small>
           {choice?.kind === 'constant' && <div>
-            <label htmlFor={`guided-constant-${field}`}>{`${field} constant value`}</label>
+            <label htmlFor={`guided-constant-${field}`}>{`${field} 常量`}</label>
             <input
               id={`guided-constant-${field}`}
               maxLength={120}
@@ -466,44 +463,44 @@ export function GuidedMappingFields({ content, policy, disabled, state, onChange
     </div>
     <div className="parameter-grid">
       <div>
-        <label htmlFor="guided-timezone">Time zone</label>
+        <label htmlFor="guided-timezone">时区</label>
         <input
           id="guided-timezone"
           maxLength={64}
-          placeholder="IANA zone, e.g. UTC or Asia/Shanghai"
+          placeholder="明确填写 IANA 时区，例如 UTC 或 Asia/Shanghai"
           value={state.timezone}
           disabled={disabled}
           onChange={event => setZone(event.target.value)}
         />
-        <small>The zone these timestamps are stated in. It is never guessed from the values.</small>
+        <small>填写时间戳所用时区，不根据数值猜测。</small>
       </div>
       {TIMESTAMP_DESTINATIONS.filter(field => field !== 'available_at' || !simulated).map(field =>
         state.choices[field]?.value || state.formats[field]
           ? <div key={field}>
-            <label htmlFor={`guided-format-${field}`}>{`${field} time format`}</label>
+            <label htmlFor={`guided-format-${field}`}>{`${field} 时间格式`}</label>
             <select
               id={`guided-format-${field}`}
               value={state.formats[field] ?? ''}
               disabled={disabled}
               onChange={event => setFormat(field, event.target.value)}
             >
-              <option value="">Not stated…</option>
+              <option value="">请选择精确格式…</option>
               {TIME_FORMAT_IDS.map(id => <option key={id} value={id}>{id}</option>)}
             </select>
-            <small>The exact form this file’s {field} values are written in.</small>
+            <small>{field} 列必须与所选格式完全一致。</small>
           </div>
           : null,
       )}
     </div>
     <p className="muted">
       {simulated
-        ? 'The simulated policy derives availability from each bar’s end and the latency you state, so available_at is not a choice here and no availability column or form is declared.'
-        : 'Availability is taken from the source itself under the provided-in-capture policy, so available_at is a column and a form you choose, like every other destination.'}
+        ? '模拟策略用 K 线结束时间加声明延迟计算可用时间，无需映射 available_at。'
+        : '文件提供可用时间时，请为 available_at 选择来源列及精确时间格式。'}
     </p>
     <p className="muted" aria-live="polite">
       {waiting.length === 0
-        ? 'Every destination is declared. Preview it: the host decides whether the declaration and this file agree.'
-        : `Still to declare: ${waiting.join(', ')}. A declaration that does not state every destination is the host’s to refuse, and this panel sends exactly the declaration you see.`}
+        ? '字段已声明。请检查数据，由后端完整验证文件与声明是否一致。'
+        : `尚未声明： ${waiting.join(', ')}。缺少声明将无法通过检查。`}
     </p>
   </fieldset>
 }

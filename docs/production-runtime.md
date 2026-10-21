@@ -1,5 +1,11 @@
 # Production Runtime Profile V1 (PPV-02)
 
+Historical compatibility documentation. This Linux/server profile, `build_distribution.py`,
+`production_runtime.py` and `deploy/*` are outside new QUINE product releases under
+[ADR 0050](adr/0050-desktop-only-product-delivery.md). The procedures below are retained for
+existing authorized installations and internal compatibility checks; they are not QUINE startup
+instructions. No existing service is uninstalled, and Mac Paper tools/drills remain available.
+
 This profile runs the existing **offline research Web service**, not a trading daemon. Linux
 with systemd is the canonical single-server target. It adds no feed, broker, Paper/Live,
 readiness, monitoring, backups or runtime recovery semantics. Deployment to a real server
@@ -132,9 +138,16 @@ and reopen a known completed report. Neither selection change copies or rewrites
 
 Rollback is **application rollback, not state downgrade**. Before activation, establish that the
 previous runtime can still read the state the new runtime will write, using release-specific
-reader/writer evidence and an isolated acceptance run. For PPV-02 versus PPV-01, EA package bytes
-are unchanged and the acceptance harness asserts that fact before testing both installed versions
-against the same completed job. The launcher is retained during this application rollback.
+reader/writer evidence and an isolated acceptance run. The original PPV-02/PPV-01 pair had identical
+EA package bytes. The historical acceptance now keeps that same old baseline and tests both
+installed readers against completed `bounded-long.yaml` jobs written by **each** pinned release.
+It verifies job success, report identity, exact API/download bytes, and unchanged persistent files
+through restart, activation and rollback. New writes must also preserve all old files.
+
+This establishes compatibility only for that exercised historical job/report path in a new isolated
+workspace. It does **not** authorize rollback of arbitrary new research/plugin/dataset formats,
+active jobs or migrated state. Those need their own release-specific reader/writer evidence; unknown
+compatibility still leaves a real service stopped. The launcher is retained during rollback.
 
 If activation fails, stop the unit first. Only with established state compatibility, restore the
 previous TOML and `current`, check using the previous interpreter, then start and reopen the known

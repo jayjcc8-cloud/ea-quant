@@ -45,7 +45,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ea.web.app import WebSettings, create_app
-from ea.web.quine import QuineBridge, QuineClient, QuineHoldouts, QuineJobReader, QuineUnavailable
+from ea.web.quine import (
+    QuineBridge,
+    QuineClient,
+    QuineError,
+    QuineHoldouts,
+    QuineJobReader,
+    QuineUnavailable,
+)
 from ea.web.research import ResearchOrchestrator, ResearchStore
 from ea.web.service import ReportUnavailableError, WebService
 from ea.web.settings import RadianSettings
@@ -71,7 +78,7 @@ CRATE = ROOT / "crates" / "quine-core"
 #: One private bound local socket needs a short path (``SUN_LEN`` is 104 bytes on
 #: macOS), so each core gets a short directory of its own under ``.local`` instead
 #: of the deeper ``--basetemp`` tree. It is removed when the test that made it ends.
-CORE_ROOT = ROOT / ".local" / "quine-integration"
+CORE_ROOT = ROOT / ".local" / "qit"
 SHORT_WORKSPACES: list[Path] = []
 SCENARIO = "bounded-long.yaml"
 RUN_BUDGET = {"max_model_calls": 0, "max_backtests": 1}
@@ -606,6 +613,46 @@ def test_core_loss_mid_run_reads_as_unknown_and_restart_stays_unknown(tmp_path: 
     )
     assert len(replay.experiments) == 1
     assert stack.service.list_jobs() == []
+
+    # Real system witness: opening the application again is the same OS boot.
+    assert row["slot_held"] is True
+    assert row["recovery"]["status"] == "prepare_required"
+    original = dict(row)
+    prepared = stack.strategies.recover_unknown_experiment(
+        identity,
+        launch_intent_id="li-1",
+        action="prepare",
+        attempt_id=row["attempt_id"],
+        expected_revision=row["core_revision"],
+        preparation_id="same-boot-proof",
+    )
+    prepared_row = _row(prepared, "li-1")
+    assert prepared_row["recovery"]["status"] == "restart_required"
+    with pytest.raises(QuineError) as refused:
+        stack.strategies.recover_unknown_experiment(
+            identity,
+            launch_intent_id="li-1",
+            action="release",
+            attempt_id=row["attempt_id"],
+            expected_revision=prepared_row["core_revision"],
+            preparation_id="same-boot-proof",
+        )
+    assert refused.value.code == "restart_required"
+    retained = _row(stack.strategies.reconcile(identity), "li-1")
+    assert retained["payload"] == original["payload"]
+    assert retained["status"] == "unknown" and retained["slot_held"] is True
+    assert len(stack.strategies.get(identity).experiments) == 1
+    # A cached disposition must not survive a lost connection as release authority.
+    cached = {**retained, "slot_held": False, "recovery": {"status": "released"}}
+    unreadable = stack.strategies._quine_unreachable(cached)
+    assert unreadable["slot_held"] is None and unreadable["recovery"] is None
+    mismatched = stack.bridge.projection(
+        {"input_sha256": "different"},
+        stack.bridge.query(identity, "li-1")[0],
+        None,
+        receipt_observed=True,
+    )
+    assert mismatched["slot_held"] is None and mismatched["recovery"] is None
 
 
 def test_restart_rebuilds_a_wiped_projection_from_the_core(tmp_path: Path) -> None:
@@ -1858,3 +1905,33 @@ def test_conversation_closes_the_loop_through_the_real_rust_owner(
     )
     assert stack.strategies.get(identity).messages[-1]["text"].endswith("limitations next.")
     assert len(provider.calls) == 6
+
+
+def test_template_and_uploaded_csv_run_through_the_real_core(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The application template keeps its identity through the desktop owner."""
+    core = Core(tmp_path)
+    _STARTED.append(core)
+    stack = _stack(tmp_path, core.socket)
+    counts = _no_python_owner(monkeypatch)
+    dataset_id, _content = _publish_upload(stack.service, 8)
+    strategy = stack.strategies.create(name="Template CSV", intent="Explicit local input")
+    bound = stack.strategies.bind_scenario(
+        strategy.user_strategy_id,
+        operation_id="bind-template",
+        base_revision=1,
+        scenario_id="template:bounded-long.yaml",
+        dataset_id=dataset_id,
+    )
+    assert bound.draft.revision == 2
+    launched = _launch(stack.strategies, strategy.user_strategy_id)
+    assert _row(launched, "li-1")["owner"] == "quine"
+    settled = _wait(stack.strategies, strategy.user_strategy_id)
+    assert settled["status"] == "created", settled
+    assert settled["report_ready"] is True
+    assert counts == {"children": 0, "owners": 0}
+    report = json.loads(stack.service.report(settled["job_id"]))
+    assert report["run_id"] == settled["attempt_id"]
+    assert report["completion"]["terminal_outcome"] == "success"
+    assert stack.service.list_jobs() == []

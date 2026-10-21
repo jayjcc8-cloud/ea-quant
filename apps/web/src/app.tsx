@@ -1,26 +1,34 @@
+import { PlatformContext, platformNames, savedPlatform, type PlatformId } from './platform-context'
+import { LiveWorkspace } from './live-workspace'
+import { PlatformWorkspace } from './platform-workspace'
+import { SourceLink as Link, WorkspaceNavigation } from './workspace-navigation'
 import type { DraftContract, SaveDraftRequest } from './user-strategies-api'
 import type { DesktopStatus } from './desktop-settings'
 import { EventValidation } from './events'
 import { CandidateCreate, CandidateDetail, CandidateHistory, type Candidate } from './candidates'
-import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
-import { ResearchTaskDetailRoute, ResearchTasks, ResearchSettings, DataWorkspace, ExtensionWorkspace } from './research'
-import { StrategiesWorkspace } from './user-strategies'
+import { type TradeAnalytics } from './trade-analytics'
+import { ResearchTaskDetailRoute, ResearchTasks, ResearchSettings } from './research'
+import { FrozenReportFacts, FrozenReportMetrics, FrozenReportDetails, ReportTrades } from './frozen-report'
+import { ResearchSplitLayout } from './agent-panel-layout'
+import { WorkspaceChrome } from './agent-panel-view'
+import { StrategiesWorkspace, ReportAssistant } from './user-strategies'
 import { PaperWorkspace } from './paper-workspace'
-import { ResourcesPage } from './resources'
+import { ResourceWorkspace, ResourceRedirect } from './resource-workspace'
+import { experimentRecordsForJob, frozenRevisionText, type StrategyAssociationRecord } from './research-association'
+import { StrategyAssociation } from './research-association-panel'
 import {
   userStrategiesApi,
   type ApprovedBudget as UserStrategyApprovedBudget,
   type UserStrategy,
   type UserStrategyConversation,
   type UserStrategyConversationEvent,
-  type UserStrategyExperimentPayload,
   type UserStrategyPreview,
   type UserStrategyResumeRequest,
 } from './user-strategies-api'
 import { radianApi } from './radian-api'
 import { researchApi, type AvailabilityPolicy, type DeclarationBody, type DeclarationCatalog, type DeclarationVerdict, type DatasetEntry, type LocalStrategyCapability, type LocalStrategyRegisterRequest, type LocalStrategySlot, type ModelConfigurationStatus, type PluginBinding, type PluginCatalog, type PluginSelection, type RecipeResolution, type ResearchTask, type UploadDeclaration, type UploadPreviewResponse, type UploadPublishRequest, type UploadVersion } from './research-api'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom'
+import { BrowserRouter, Navigate, NavLink, Route, Routes, useNavigate, useParams, useLocation, useSearchParams } from 'react-router-dom'
 import { compareCanonicalDecimal, exactDelta } from './decimal'
 import { EquityCurve, pathPercent, type EquityPath } from './equity-path'
 // The user-strategy workspace's own stylesheet, imported where the routes that
@@ -89,6 +97,7 @@ export type InputSnapshot = {
   }
 }
 export type ScenarioSummary = {
+  template_assumptions?: { instrument: Record<string, string>; risk: Record<string, string>; execution: Record<string, unknown> }
   scenario_id: string; name: string; valid: boolean; input_identity?: InputIdentity
   summary?: { data?: ReplayData; commission?: Commission | null; slippage?: Slippage | null; latency?: Latency | null; strategy_id: string; venue: string; symbol: string; initial_cash: string; parameters?: ParameterMap; record_count: number; [key: string]: unknown }
   strategy_parameters?: StrategyParameterContract[]
@@ -254,6 +263,7 @@ export type ApiAdapter = {
     criterion?: { field: string; expectation: string } | null
   }): Promise<UserStrategy>
   getUserStrategy?(userStrategyId: string): Promise<UserStrategy>
+  selectUserStrategyModelProfile?(id: string, profileId: string | null): Promise<UserStrategy>
   userStrategyDraftContract?(id: string): Promise<DraftContract>
   saveUserStrategyDraft?(id: string, input: SaveDraftRequest): Promise<UserStrategy>
   bindUserStrategyScenario?(
@@ -262,6 +272,7 @@ export type ApiAdapter = {
       operation_id: string
       base_revision: number
       scenario_id: string
+      dataset_id?: string
       criterion?: { field: string; expectation: string } | null
     },
   ): Promise<UserStrategy>
@@ -294,7 +305,8 @@ export type ApiAdapter = {
       call_id: string
       base_revision: number
       text: string
-      approved_budget: UserStrategyApprovedBudget
+      task_budget?: number
+      approved_budget?: UserStrategyApprovedBudget
       evidence_job_ids?: string[]
     },
     signal?: AbortSignal,
@@ -376,7 +388,7 @@ const browserApi: ApiAdapter = {
   createHoldout(request) { return apiRequest('/api/holdouts', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify(request) }) },
   getHoldout(id) { return apiRequest(`/api/holdouts/${encodeURIComponent(id)}`) },
   async listHoldouts() { return (await apiRequest<{ holdouts: ChronologicalHoldout[] }>('/api/holdouts')).holdouts },
-  async listScenarios(includeLocal = false) { return (await apiRequest<{ scenarios: ScenarioSummary[] }>(includeLocal ? '/api/scenarios?include_local=true' : '/api/scenarios')).scenarios },
+  async listScenarios(includeLocal = false) { return (await apiRequest<{ scenarios: ScenarioSummary[] }>(includeLocal ? '/api/scenarios?include_local=true&include_templates=true' : '/api/scenarios')).scenarios },
   validateScenario(scenarioId, parameters, dataset) {
     return apiRequest(`/api/scenarios/${encodeURIComponent(scenarioId)}/validate`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-EA-Web-Request': '1' }, body: JSON.stringify({ parameters, ...dataset }),
@@ -430,6 +442,8 @@ const browserApi: ApiAdapter = {
   listUserStrategies: () => userStrategiesApi.list(),
   createUserStrategy: input => userStrategiesApi.create(input),
   getUserStrategy: userStrategyId => userStrategiesApi.get(userStrategyId),
+  selectUserStrategyModelProfile: (id, profileId) =>
+    userStrategiesApi.selectModelProfile(id, profileId),
   bindUserStrategyScenario: (userStrategyId, input) =>
     userStrategiesApi.bindScenario(userStrategyId, input),
   userStrategyDraftContract: id => userStrategiesApi.draftContract(id),
@@ -542,37 +556,58 @@ function NavIcon({ name }: { name: keyof typeof NAV_ICONS }) {
 }
 
 function Shell({ api }: { api: ApiAdapter }) {
-  return <div className="app-shell">
-    <aside className="sidebar">
-      <Link className="brand" to="/strategies"><QuineMark /><span>QUINE</span></Link>
-      <p className="workspace">本地 AI 量化研究</p>
-      {/* Every link is a real route. Capabilities this workspace does not serve —
-          external accounts, live or paper connectivity — are stated as unavailable
-          in the footer instead of being offered as navigation. */}
-      <nav aria-label="主导航">
-        <NavLink to="/strategies"><NavIcon name="strategies" />研究</NavLink>
-        <NavLink to="/runs"><NavIcon name="runs" />运行</NavLink>
-        <NavLink to="/data"><NavIcon name="data" />数据</NavLink>
+  const location = useLocation()
+  const [platform, setPlatform] = useState<PlatformId | null>(savedPlatform)
+  const [sidebar, setSidebar] = useState(false)
+  // Retain each collection's filters when selecting a primary area directly.
+  // Detail return still belongs to SourceLink; this never restores confirmations.
+  const [primaryPages, setPrimaryPages] = useState<Record<string, string>>({})
+  const primaryAddress = location.pathname + location.search + location.hash
+  if (['/strategies', '/runs', '/live', '/backtests'].includes(location.pathname) && primaryPages[location.pathname] !== primaryAddress) {
+    setPrimaryPages({ ...primaryPages, [location.pathname]: primaryAddress })
+  }
+  const management = /^\/(resources|settings|platform|data|extensions|events)(\/|$)/.test(location.pathname)
+  const split = /^\/(strategies|runs|live)(\/|$)/.test(location.pathname) || /^\/backtests\/[^/]+$/.test(location.pathname)
+  const chrome = <><div className="workspace-commandbar"><button className="sidebar-toggle" aria-label="切换侧栏" aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}>☰</button>{!management && <nav aria-label="主导航" className="business-navigation">
+    <NavLink to={primaryPages['/strategies'] ?? '/strategies'} className={() => /^\/(strategies|research|candidates|holdouts)(\/|$)/.test(location.pathname) ? 'active' : undefined}>研究</NavLink><NavLink to={primaryPages['/runs'] ?? '/runs'}>模拟运行</NavLink><NavLink to={primaryPages['/live'] ?? '/live'}>实盘运行</NavLink><NavLink to={primaryPages['/backtests'] ?? '/backtests'}>回测记录</NavLink>
+  </nav>}</div><WorkspaceNavigation /></>
+  const select = (id: PlatformId | null) => {
+    setPlatform(id)
+    try { if (id) sessionStorage.setItem('quine.platform-filter', id); else sessionStorage.removeItem('quine.platform-filter') } catch { /* scope remains in this window */ }
+  }
+  return <PlatformContext value={{ platform, select }}><div className="app-shell" data-sidebar-open={sidebar} data-management={management}>
+    <aside className="sidebar" aria-label="工作区侧栏">
+      <Link className="brand" aria-label="QUINE" to="/strategies"><QuineMark /><span>QUINE</span></Link>
+
+      <nav className="platform-navigation" aria-label="交易所筛选">
+        {(Object.keys(platformNames) as PlatformId[]).map(id => <button key={id} type="button" aria-label={`${platformNames[id]} 未接入`} aria-pressed={platform === id} onClick={() => select(id)}><span aria-hidden="true" className={`exchange-icon ${id}`}>{id === 'binance' ? <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="m12 1 4 4-4 4-4-4Zm-7 7 4 4-4 4-4-4Zm14 0 4 4-4 4-4-4Zm-7 7 4 4-4 4-4-4Zm0-6 3 3-3 3-3-3Z"/></svg> : <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M1 1h7v7H1Zm15 0h7v7h-7ZM8.5 8.5h7v7h-7ZM1 16h7v7H1Zm15 0h7v7h-7Z"/></svg>}</span><span>{platformNames[id]}</span><small>未接入</small></button>)}
       </nav>
+
       <div className="sidebar-bottom">
-        <NavLink className="nav-settings" to="/extensions"><NavIcon name="extensions" />扩展</NavLink>
-        <NavLink className="nav-settings" to="/settings"><NavIcon name="settings" />设置</NavLink>
-        <div className="sidebar-footer"><span className="status-dot" />仅本地回环 · 未连接实盘</div>
+        <Link className={`nav-settings${location.pathname.startsWith('/resources') ? ' active' : ''}`} to="/resources/data"><NavIcon name="data" />资源</Link>
+        <Link className={`nav-settings${location.pathname.startsWith('/platform') ? ' active' : ''}`} to="/platform"><NavIcon name="extensions" />交易所配置</Link>
+        <Link className={`nav-settings${location.pathname === '/settings' ? ' active' : ''}`} to="/settings"><NavIcon name="settings" />设置</Link>
+        <div className="sidebar-footer">未接入 · 本地工作区</div>
       </div>
     </aside>
-    <main><header className="topbar"><span>本地量化工作台</span><span>研究与本地模拟 · 无真实资金</span></header><div className="content">
+    <main><WorkspaceChrome value={chrome}>{!split && <header className="shell-chrome">{chrome}</header>}<div className="content">
       <Routes>
         <Route path="/strategies" element={<StrategiesWorkspace api={api} />} />
         <Route path="/strategies/:userStrategyId" element={<StrategiesWorkspace api={api} />} />
         <Route path="/runs" element={<PaperWorkspace />} />
+        <Route path="/live" element={<LiveWorkspace />} />
         <Route path="/backtests" element={<Backtests api={api} />} />
         <Route path="/backtests/compare/:leftId/:rightId" element={<CompareBacktestsRoute api={api} />} />
         <Route path="/backtests/:jobId" element={<BacktestDetailRoute api={api} />} />
+        <Route path="/platform" element={<PlatformWorkspace />} />
+        <Route path="/platform/:platformId" element={<PlatformWorkspace />} />
         <Route path="/settings" element={<ResearchSettings api={api} />} />
         <Route path="/research" element={<ResearchTasks api={api} />} />
-        <Route path="/data" element={<DataWorkspace api={api} />} />
-        <Route path="/extensions" element={<><ExtensionWorkspace api={api} /><ResourcesPage api={api} /></>} />
-        <Route path="/resources" element={<ResourcesPage api={api} />} />
+        <Route path="/research/new" element={<ResearchTasks api={api} />} />
+        <Route path="/data" element={<ResourceRedirect section="data" />} />
+        <Route path="/extensions" element={<ResourceRedirect section="extensions" />} />
+        <Route path="/resources" element={<ResourceRedirect section="data" />} />
+        <Route path="/resources/:section" element={<ResourceWorkspace api={api} />} />
         <Route path="/events" element={<EventValidation />} />
         <Route path="/research/:taskId" element={<ResearchTaskDetailRoute api={api} />} />
         <Route path="/candidates" element={<CandidateHistory api={api} />} />
@@ -584,8 +619,8 @@ function Shell({ api }: { api: ApiAdapter }) {
         <Route path="/batches/:batchId" element={<BatchDetailRoute api={api} />} />
         <Route path="*" element={<Navigate replace to="/strategies" />} />
       </Routes>
-    </div></main>
-  </div>
+    </div></WorkspaceChrome></main>
+  </div></PlatformContext>
 }
 
 type BatchConfiguration = ParameterMap
@@ -870,7 +905,13 @@ function Backtests({ api }: { api: ApiAdapter }) {
   }
 
   return <>
-    <PageTitle title="Offline Backtests" subtitle="Run, replay, and compare real installed-engine attempts." />
+    <PageTitle title="回测记录" subtitle="查看已保存的运行、报告与研究证据。" />
+    <nav id="history-records" className="history-record-links" aria-label="历史记录分类">
+      <span aria-current="page">独立回测</span>
+      <Link to="/research">旧研究任务</Link>
+      <Link to="/holdouts">留出记录</Link>
+      <Link to="/candidates">候选记录</Link>
+    </nav>
     {disconnected && <section className="notice error">Local service is unreachable</section>}
     <div className="backtest-grid">
       <section className="panel control-panel">
@@ -921,7 +962,15 @@ function Backtests({ api }: { api: ApiAdapter }) {
 
 function BacktestDetailRoute({ api }: { api: ApiAdapter }) {
   const { jobId = '' } = useParams()
-  return <BacktestDetail key={jobId} api={api} jobId={jobId} />
+  return <ReportWorkspace key={jobId} api={api} jobId={jobId} />
+}
+function ReportWorkspace({ api, jobId }: { api: ApiAdapter; jobId: string }) {
+  const [sources, setSources] = useState<UserStrategy[] | null>(null)
+  const onRead = useCallback((items: UserStrategy[]) => setSources(items), [])
+  const changed = useCallback((next: UserStrategy) => setSources(items => items?.map(item => item.user_strategy_id === next.user_strategy_id ? next : item) ?? null), [])
+  const associations = sources ? experimentRecordsForJob(sources, jobId) : []
+  const frozenRevision = associations.length === 1 ? associations[0].revision : null
+  return <ResearchSplitLayout key={jobId} storageKey={`report.${jobId}`}><div className="strategy-column"><BacktestDetail api={api} jobId={jobId} onResearchRead={onRead} frozenRevision={frozenRevision} /></div><aside className="strategy-ai"><ReportAssistant api={api} jobId={jobId} sources={sources} changed={changed} /></aside></ResearchSplitLayout>
 }
 
 type ComparedRun = { analytics?: TradeAnalytics | null; job: BacktestJob; report: BacktestReport | null; path?: EquityPath | null }
@@ -1153,120 +1202,6 @@ function CompareBacktests({ api, leftId, rightId }: { api: ApiAdapter; leftId: s
   </div>
 }
 
-type StrategyAssociationRecord = { userStrategyId: string; name: string; revision: number | null }
-
-/**
- * One frozen record's revision, printed only when the record really carries a
- * positive whole revision. A payload that is missing, empty or nonsensical is
- * named unknown; this page never invents a revision to fill the gap.
- */
-function frozenRevision(payload: UserStrategyExperimentPayload | undefined): number | null {
-  const revision = payload?.draft_revision
-  return typeof revision === 'number' && Number.isInteger(revision) && revision > 0 ? revision : null
-}
-
-const frozenRevisionText = (revision: number | null) =>
-  revision === null ? '冻结修订未知' : `冻结 v${revision}`
-
-/**
- * Every frozen record in the saved strategies whose own experiment names this
- * exact job. This is the one association rule: the record's persisted `job_id`,
- * never the report's strategy id, engine implementation, symbol, name, or a
- * "first/latest/current" choice. Both the report page and the comparison page
- * read it here, so neither can drift into a different rule.
- */
-function experimentRecordsForJob(strategies: UserStrategy[], jobId: string): StrategyAssociationRecord[] {
-  return strategies.flatMap(strategy => strategy.experiments
-    .filter(experiment => experiment.job_id === jobId)
-    .map(experiment => ({
-      userStrategyId: strategy.user_strategy_id,
-      name: strategy.name,
-      revision: frozenRevision(experiment.payload),
-    })))
-}
-
-/**
- * The way back from one formal report to the persisted strategy whose frozen run
- * it is. The association is read on its own and matched only by the job each
- * experiment recorded: never the report's own strategy id, engine implementation,
- * symbol, name, or a "first/latest/current" choice. One exact record offers the
- * return link; no record, an unavailable strategy API or a refused read says so
- * honestly and falls back to the strategy list; several records are a conflict
- * this page refuses to resolve silently. The caller keys the component on the job
- * id and on the explicit refresh, and its read is generation-guarded, so a route
- * change, a refresh or a late answer can never put another job's strategy on this
- * page.
- */
-function StrategyAssociation({ api, jobId }: { api: ApiAdapter; jobId: string }) {
-  type Association =
-    | { kind: 'reading' }
-    | { kind: 'none'; note: string }
-    | { kind: 'one'; record: StrategyAssociationRecord }
-    | { kind: 'several'; count: number; records: StrategyAssociationRecord[] }
-  // The first render of every mount reads; the caller keys this component on the
-  // job and on the explicit refresh, so a new job or a new refresh starts here in
-  // the reading state without the effect having to write it synchronously.
-  const [association, setAssociation] = useState<Association>({ kind: 'reading' })
-  const generation = useRef(0)
-
-  useEffect(() => {
-    const read = ++generation.current
-    const list = api.listUserStrategies
-    if (!list) {
-      // The optional read settles asynchronously, so a workspace that unmounts or
-      // swaps its api never writes this page from a stale answer.
-      void Promise.resolve().then(() => {
-        if (generation.current === read) setAssociation({ kind: 'none', note: '这个工作区不提供已保存的用户策略。' })
-      })
-      return () => { generation.current += 1 }
-    }
-    list().then(strategies => {
-      if (generation.current !== read) return
-      const records = experimentRecordsForJob(strategies, jobId)
-      if (records.length === 1) setAssociation({ kind: 'one', record: records[0] })
-      else if (records.length === 0) setAssociation({ kind: 'none', note: '没有已保存的用户策略冻结了这个运行。' })
-      else setAssociation({ kind: 'several', count: records.length, records })
-    }).catch(error => {
-      if (generation.current !== read) return
-      setAssociation({
-        kind: 'none',
-        note: `${error instanceof Error ? error.message : '策略关联读取失败。'} · 这次关联读取失败了，正式报告不受影响。`,
-      })
-    })
-    return () => { generation.current += 1 }
-  }, [api, jobId])
-
-  // One candidate per distinct user strategy, named with its own id so two
-  // strategies that share a name stay told apart. No revision is printed here:
-  // records that disagree about the frozen revision are exactly the case this
-  // page refuses to resolve, so it names the strategies and picks no revision.
-  const candidates = association.kind === 'several'
-    ? association.records.filter((record, index) =>
-        association.records.findIndex(item => item.userStrategyId === record.userStrategyId) === index)
-    : []
-
-  return <section className="panel association-panel" aria-label="策略关联">
-    <header><h2>策略关联</h2><span>只读 · 不启动任何运行</span></header>
-    {association.kind === 'reading' && <p className="muted">正在读取冻结了这个运行的已保存策略……</p>}
-    {association.kind === 'none' && <>
-      <p className="muted">{association.note}</p>
-      <p><Link to="/strategies">打开策略列表</Link></p>
-    </>}
-    {association.kind === 'one' && <>
-      <p><strong>{association.record.name}</strong> · <span>{frozenRevisionText(association.record.revision)}</span></p>
-      {/* The way back names the frozen run this report is about, so the strategy
-          opens on that run instead of resetting the evidence to the latest one. */}
-      <p><Link to={`/strategies/${encodeURIComponent(association.record.userStrategyId)}?evidence_a=${encodeURIComponent(jobId)}`}>返回此策略继续研究</Link></p>
-    </>}
-    {association.kind === 'several' && <>
-      <p className="notice error">{`这个运行匹配到 ${association.count} 条冻结记录，无法确定唯一的来源策略，因此这里不替你选择，也不显示任何冻结修订：请自己打开要继续的那一个。`}</p>
-      <ul className="association-candidates">{candidates.map(candidate => <li key={candidate.userStrategyId}>
-        <Link to={`/strategies/${encodeURIComponent(candidate.userStrategyId)}`}>{`${candidate.name} · ${candidate.userStrategyId}`}</Link>
-      </li>)}</ul>
-    </>}
-  </section>
-}
-
 /**
  * The read-only association of a two-run comparison with one saved strategy.
  *
@@ -1340,7 +1275,9 @@ function StrategyComparisonAssociation({ api, leftJobId, rightJobId }: { api: Ap
   </section>
 }
 
-function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
+function BacktestDetail({ api, jobId, onResearchRead, frozenRevision }: { api: ApiAdapter; jobId: string; onResearchRead?: (items: UserStrategy[]) => void; frozenRevision?: number | null }) {
+  const [reportParams, setReportParams] = useSearchParams()
+  const reportView = reportParams.get('report') ?? 'overview'
   const [job, setJob] = useState<BacktestJob | null>(null)
   const [report, setReport] = useState<BacktestReport | null>(null)
   const [analytics, setAnalytics] = useState<TradeAnalytics | null>(null)
@@ -1439,24 +1376,35 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
   // own unchanged record, so the control disappears with the state.
   const stoppable = job.status === 'accepted' || job.status === 'running' || job.status === 'stopping'
   return <div className="report-page">
-    <PageTitle title="正式报告" subtitle={`${job.scenario_id} · 离线回测正式报告`} status={job.status} />
+    <header className="page-title report-title"><div><h1>正式报告</h1><p>{job.scenario_id} · 离线回测</p></div><div className="report-title-actions"><span className={`status status-${job.status}`}>{{succeeded:"已完成",failed:"失败",interrupted:"已中断",stopped:"已停止",stopping:"正在停止",running:"运行中",accepted:"已接受"}[job.status]}</span><button onClick={() => { setAssociationRefresh(value => value + 1); void refresh() }}>刷新</button>{api.stopBacktest && stoppable && <button className="danger stop-run" disabled={stopping} onClick={() => void stop()}>停止运行</button>}</div></header>
     {disconnected && <section className="notice error">Local service is unreachable · loaded job status may be historical</section>}
     {error && <section className="notice error">{error}</section>}
     {job.message && <section className="notice error"><strong>{job.error_code}</strong> · {job.message}</section>}
-    <div className="result-toolbar"><Link to="/backtests">回测列表</Link><button onClick={() => { setAssociationRefresh(value => value + 1); void refresh() }}>刷新</button>{api.stopBacktest && stoppable && <button className="danger stop-run" disabled={stopping} onClick={() => void stop()}>停止运行</button>}</div>
     {/* Keyed on the job and on the explicit refresh: another route — or a refresh —
         mounts a fresh association that starts out reading, instead of carrying this
         job's strategy across. The read below is independent of the report's own
         load, and the explicit refresh re-reads it without touching the report. */}
-    <StrategyAssociation key={`${jobId}:${associationRefresh}`} api={api} jobId={jobId} />
-    {economics ? <>
-      <section className="metrics">
-        <Metric label="期末权益" value={amount(economics.equity)} />
-        <Metric label="净盈亏" value={amount(economics.net_pnl)} />
-        <Metric label="总收益率" value={percent(economics.total_return.value)} />
-        <Metric label="手续费" value={amount(economics.fees)} />
-      </section>
-      <section className="panel result-limits" aria-label="本结果不展示什么">
+    <StrategyAssociation key={`${jobId}:${associationRefresh}`} api={api} jobId={jobId} onRead={onResearchRead} compact />
+    {economics && report && <FrozenReportFacts job={job} report={report} revision={frozenRevision} />}
+    {economics && report ? <FrozenReportMetrics report={report} path={path} /> : <section className="panel"><p className="muted">{
+      job.status === 'failed' || job.status === 'interrupted' || job.status === 'stopped'
+        ? 'No success report is available.'
+        : job.status === 'succeeded'
+          ? error ? 'No current verified report is available.' : 'Loading the formal report.'
+          : job.status === 'stopping'
+            ? 'This run is stopping. No result of it will be published, and its staged files are never served as a report.'
+            : 'The installed engine is running in its own worker process. This page will refresh automatically.'
+    }</p></section>}
+    {/* The technical identity is outside the report branch on purpose: the job and
+        engine a page is about are known from the route and the job record, so they
+        stay readable while the report is still loading or has failed. The fields
+        that only a report can supply stay named unavailable until one arrives. */}
+
+    {economics && <>
+      {path ? <EquityCurve analysis={path} /> : <section className="panel">{pathUnavailable(job)}</section>}
+      {report && <FrozenReportDetails job={job} report={report} path={path} />}
+      <nav className="report-tabs" aria-label="报告视图">{[['overview','概览'],['complete','完整交易'],['orders','订单与成交']].map(([key,name]) => <button key={key} aria-pressed={reportView === key} onClick={() => { const next = new URLSearchParams(reportParams); next.set('report',key); setReportParams(next) }}>{name}</button>)}</nav>
+      <div hidden={reportView !== 'overview'}>      <section className="panel result-limits" aria-label="本结果不展示什么">
         <header><h2>本结果不展示什么</h2><span>一次确定性运行</span></header>
         <dl className="summary-list">
           <div><dt>本次运行记录数</dt><dd>{job.input_identity.record_count} 条记录{job.input_identity.record_count <= 6 ? ' · 小样本：仅用于流程验证，不作稳健性结论' : ''}</dd></div>
@@ -1474,33 +1422,14 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
             <div><dt>Statistical claims</dt><dd>None are made here: no Sharpe ratio, no confidence interval and no significance test exists for this run.</dd></div>
           </dl>
         </details>
-      </section>
-    </> : <section className="panel"><p className="muted">{
-      job.status === 'failed' || job.status === 'interrupted' || job.status === 'stopped'
-        ? 'No success report is available.'
-        : job.status === 'succeeded'
-          ? error ? 'No current verified report is available.' : 'Loading the formal report.'
-          : job.status === 'stopping'
-            ? 'This run is stopping. No result of it will be published, and its staged files are never served as a report.'
-            : 'The installed engine is running in its own worker process. This page will refresh automatically.'
-    }</p></section>}
-    {/* The technical identity is outside the report branch on purpose: the job and
-        engine a page is about are known from the route and the job record, so they
-        stay readable while the report is still loading or has failed. The fields
-        that only a report can supply stay named unavailable until one arrives. */}
-    <details className="disclosure"><summary>技术身份</summary>
-      <section className="panel identity-panel"><dl className="summary-list">
-        <div><dt>Web job</dt><dd>{job.job_id}</dd></div><div><dt>Engine run_id</dt><dd>{job.engine_run_id ?? 'not available'}</dd></div><div><dt>Strategy</dt><dd>{strategy ?? 'not available'}</dd></div><div><dt>Instrument</dt><dd>{instrument ? `${instrument.venue}:${instrument.symbol}` : 'not available'}</dd></div>
-        {job.input_snapshot?.research_input && <><div><dt>Dataset</dt><dd>{job.input_snapshot.research_input.dataset_id}</dd></div><div><dt>Source SHA-256</dt><dd>{job.input_snapshot.research_input.source_sha256}</dd></div></>}
-      </dl></section>
-    </details>
-    {economics && <>
-      {path ? <EquityCurve analysis={path} /> : <section className="panel">{pathUnavailable(job)}</section>}
-      <section className="panel report-economics" aria-label="执行与经济事实">
+      </section></div>
+      {report && reportView === 'complete' && <ReportTrades report={report} analytics={analytics} view="complete" />}
+      {report && reportView === 'orders' && <ReportTrades report={report} analytics={analytics} view="orders" />}
+      <details className="provenance"><summary>原始执行字段</summary><section className="panel report-economics" aria-label="执行与经济事实">
         <header><h2>执行与经济事实</h2><span>正式报告只读字段</span></header>
         <dl className="summary-list">
           <div><dt>Initial cash</dt><dd>{amount(economics.initial_funding)}</dd></div>
-          <div><dt>Ending cash</dt><dd>{amount(economics.ending_cash[0] ?? { amount: '0' })}</dd></div>
+          <div><dt>Ending cash</dt><dd>{amount(economics.ending_cash[0])}</dd></div>
           <div><dt>Position quantity</dt><dd>{economics.ending_positions[0]?.quantity ?? '0'}</dd></div>
         </dl>
         <div className="backtest-grid">
@@ -1514,12 +1443,17 @@ function BacktestDetail({ api, jobId }: { api: ApiAdapter; jobId: string }) {
           </dl></section>
           <section className="panel"><header><h2>Artifacts</h2><span>Read-only downloads</span></header><div className="downloads"><a href={api.artifactUrl(jobId, 'report.json')}>Download report.json</a><a href={api.artifactUrl(jobId, 'summary.txt')}>Download summary.txt</a>{path && <a href={api.artifactUrl(jobId, 'equity-path.json')}>Download equity-path.json</a>}</div><p className="muted">Net P&amp;L may include open-position valuation; it is not presented as realized profit.</p></section>
         </div>
-      </section>
+      </section></details>
     </>}
+    <details className="disclosure"><summary>技术身份</summary>
+      <section className="panel identity-panel"><dl className="summary-list">
+        <div><dt>Web job</dt><dd>{job.job_id}</dd></div><div><dt>Engine run_id</dt><dd>{job.engine_run_id ?? 'not available'}</dd></div><div><dt>Strategy</dt><dd>{strategy ?? 'not available'}</dd></div><div><dt>Instrument</dt><dd>{instrument ? `${instrument.venue}:${instrument.symbol}` : 'not available'}</dd></div>
+        {job.input_snapshot?.research_input && <><div><dt>Dataset</dt><dd>{job.input_snapshot.research_input.dataset_id}</dd></div><div><dt>Source SHA-256</dt><dd>{job.input_snapshot.research_input.source_sha256}</dd></div></>}
+      </dl></section>
+    </details>
     {job.input_snapshot && <p><span>{commissionLabel(job.input_snapshot.scenario.execution?.commission)}</span> · <span>{slippageLabel(job.input_snapshot.scenario.execution?.slippage)}</span> · <span>{latencyLabel(job.input_snapshot.scenario.execution?.latency)}</span></p>}
     {job.schema === 'ea.local-web-job.v5' && <p>Round trip limit: {String(job.input_snapshot?.scenario.strategy.max_round_trips)}</p>}
     {report && job.strategy_descriptor?.research_visible && <p><Link to={`/holdouts/new/${job.job_id}`}>Evaluate chronological holdout</Link></p>}
-    {report && <TradeAnalyticsPanel analytics={analytics} />}
     {report && api.createCandidate && <CandidateCreate api={api} jobId={jobId} />}
   </div>
 }
@@ -1609,7 +1543,7 @@ function HoldoutCreator({ api, jobId }: { api: ApiAdapter; jobId: string }) {
   }
   return <><PageTitle title="New Chronological Holdout" subtitle="Chronological holdout evaluation using parameters frozen from your selected source." />
     {error && <p className="notice error">{error}</p>}
-    {source && <><FrozenParameters job={source.job} /><HoldoutEvidence role="IS" {...source} /></>}
+    {source && <><StrategyAssociation key={source.job.job_id} api={api} jobId={source.job.job_id} /><FrozenParameters job={source.job} /><HoldoutEvidence role="IS" {...source} /></>}
     <section className="panel"><label htmlFor="holdout-scenario">Holdout scenario</label>
       <select id="holdout-scenario" value={selected} onChange={event => setSelected(event.target.value)}><option value="">Select a compatible later registered scenario</option>{candidates.map(item => <option key={(item.input_identity?.dataset_id ? `${item.scenario_id}|${item.input_identity.dataset_id}` : item.scenario_id)} value={(item.input_identity?.dataset_id ? `${item.scenario_id}|${item.input_identity.dataset_id}` : item.scenario_id)}>{item.name}</option>)}</select>
       {source && candidates.length === 0 && <p>No compatible later registered scenario with valid frozen parameters is available.</p>}
@@ -1643,13 +1577,9 @@ function HoldoutDetail({ api, validationId }: { api: ApiAdapter; validationId: s
   }, [api, validationId])
   return <><PageTitle title="Chronological Holdout" subtitle={`Chronological holdout evaluation · ${validationId}`} />
     <p><Link to="/holdouts">Saved evaluations</Link></p>{error && <p className="notice error">{error}</p>}
-    {runs[0] && <FrozenParameters job={runs[0].job} />}
+    {runs[0] && <><StrategyAssociation key={runs[0].job.job_id} api={api} jobId={runs[0].job.job_id} /><FrozenParameters job={runs[0].job} /></>}
     <div className="backtest-grid">{runs.map((run, index) => <HoldoutEvidence key={run.job.job_id} role={index === 0 ? 'IS' : 'OOS'} {...run} />)}</div>
   </>
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return <article className="metric-card"><span>{label}</span><strong>{value}</strong></article>
 }
 
 export function App({ api = browserApi }: { readonly api?: ApiAdapter }) {

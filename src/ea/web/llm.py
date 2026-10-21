@@ -327,7 +327,7 @@ class _Provider:
 
     def _config(self) -> dict[str, Any]:
         try:
-            model = self._settings.load().get("model") or {}
+            model = self._settings.profile()[1]
         except RadianSettingsError as error:
             raise ModelNotConfigured("settings are unreadable") from error
         if not isinstance(model, dict) or model.get("provider") != self.provider:
@@ -974,8 +974,10 @@ class DeepSeekProvider(OpenAIChatCompletionsCompatibleProvider):
 
 def create_model_port(settings: RadianSettings) -> StreamingModelPort:
     try:
-        provider = (settings.load().get("model") or {}).get("provider")
+        settings = settings.snapshot()
+        provider = settings.profile()[1].get("provider")
     except RadianSettingsError:
+        settings = RadianSettings(settings.path, {"schema": "radian.settings.v1"})
         provider = None
     if provider == "deepseek":
         return DeepSeekProvider(settings)

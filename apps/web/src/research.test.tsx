@@ -179,10 +179,10 @@ describe('research workspace', () => {
   it('lists persisted tasks and drafts only on an explicit submit', async () => {
     const user = userEvent.setup()
     const { api, calls } = scripted({ tasks: [task()] })
-    window.history.pushState({}, '', '/research')
+    window.history.pushState({}, '', '/research/new')
     render(<App api={api} />)
 
-    expect(await screen.findByRole('heading', { name: 'Research Workspace' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '旧版独立任务' })).toBeTruthy()
     expect(await screen.findByText('Test a two-unit entry on AAPL')).toBeTruthy()
     expect(screen.getByText(/bounded-long-v1 · XNAS:AAPL/)).toBeTruthy()
     expect(calls.create).toBe(0)
@@ -197,7 +197,7 @@ describe('research workspace', () => {
   it('refuses a duplicate submit while the first draft is still in flight', async () => {
     const user = userEvent.setup()
     const { api, calls } = scripted({ create: () => new Promise<ResearchTask>(() => {}) })
-    window.history.pushState({}, '', '/research')
+    window.history.pushState({}, '', '/research/new')
     render(<App api={api} />)
 
     const idea = await screen.findByLabelText('Research idea')
@@ -215,7 +215,7 @@ describe('research workspace', () => {
     const { api, calls } = scripted({
       create: () => { throw new ResearchRequestError('research_task_exists', 'an active research task already exists for this idea') },
     })
-    window.history.pushState({}, '', '/research')
+    window.history.pushState({}, '', '/research/new')
     render(<App api={api} />)
 
     await user.type(await screen.findByLabelText('Research idea'), 'Test a delayed entry')

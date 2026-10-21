@@ -304,7 +304,7 @@ describe('research recovery', () => {
     // not a task id and the idea is empty. It is ignored whole: no banner, an
     // empty form, and the same string in the query is no source either.
     cleanup()
-    window.history.pushState({ usr: { recovery: { task_id: 7, idea: '' } }, key: 'malformed', idx: 0 }, '', '/research?recovery=%7B%22task_id%22%3A%22task-1%22%7D')
+    window.history.pushState({ usr: { recovery: { task_id: 7, idea: '' } }, key: 'malformed', idx: 0 }, '', '/research/new?recovery=%7B%22task_id%22%3A%22task-1%22%7D')
     render(<App api={api} />)
     const empty = (await screen.findByLabelText('Research idea')) as HTMLTextAreaElement
     expect(empty.value).toBe('')
@@ -375,7 +375,7 @@ describe('research recovery', () => {
     // Navigating away and back is the same: the dispatch is never re-offered and
     // the refused preparation survives the round trip.
     await user.click(screen.getByRole('link', { name: /research workspace/i }))
-    await screen.findByLabelText('Research idea')
+    await screen.findByRole('heading', { name: '历史研究任务' })
     await user.click(await screen.findByRole('link', { name: /open task/i }))
     await screen.findByText(/nothing is re-submitted automatically/i)
     expect(screen.getByRole('button', { name: /prepare a new experiment/i }).hasAttribute('disabled')).toBe(true)

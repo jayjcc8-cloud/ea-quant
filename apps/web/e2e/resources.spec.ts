@@ -291,7 +291,7 @@ test('资源中心 repeats the real workspace, composes only on the explicit act
 
     await page.emulateMedia({ colorScheme: 'light' })
     await page.setViewportSize({ width: 1400, height: 1000 })
-    await page.goto('/resources')
+    await page.goto('/resources/diagnostics')
     await expect(page.getByRole('heading', { name: '资源中心' })).toBeVisible()
 
     // What the page is: a read of the workspace with one compatibility check. It
@@ -647,7 +647,7 @@ test('资源中心 在明暗两种主题与 1400/420 宽度下都不横向溢出
   try {
     await page.emulateMedia({ colorScheme: 'light' })
     await page.setViewportSize({ width: 1400, height: 1000 })
-    await page.goto('/resources')
+    await page.goto('/resources/diagnostics')
     await expect(page.getByRole('heading', { name: '资源中心' })).toBeVisible()
 
     for (const [theme, width] of [
@@ -723,7 +723,7 @@ test('资源中心 的紧凑密度来自既有的外观设置，两个浏览器�
     const seen = watchApi(page)
     const pageErrors: string[] = []
     page.on('pageerror', (error) => { pageErrors.push(String(error)) })
-    await page.goto('/resources')
+    await page.goto('/resources/diagnostics')
     await expect(page.getByRole('heading', { name: '资源中心' })).toBeVisible()
     const applied = await page.evaluate(() => document.documentElement.dataset.density ?? null)
     const panel = await page.getByRole('region', { name: '组合选择' }).boundingBox()

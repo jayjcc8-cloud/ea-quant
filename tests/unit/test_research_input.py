@@ -389,6 +389,8 @@ def test_engine_entry_rejects_representation_change_after_web_check(
         """
 def hook(*, scenario, control, request, worker):
     path = scenario.data_path
+    # Deliberately bypass the read-only capture in this adversarial hook.
+    path.chmod(0o600)
     path.write_bytes(path.read_bytes().replace(b"\\n", b"\\r\\n"))
 """,
     )

@@ -9,7 +9,7 @@
 //! pair and the one active slot atomically. The slot stays held for the whole
 //! admitted run until a proven terminal state; dispatch, running, stopping and
 //! unknown exit states all keep it, so an unproven run can never be re-dispatched
-//! and never frees room for a second run.
+//! and never frees room for a second run without an explicit, proven disposition.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -21,8 +21,9 @@ use uuid::Uuid;
 
 use crate::protocol::{
     Barrier, Budget, CancelParams, CancelResult, ConfirmParams, ConfirmResult, Experiment,
-    ListParams, ListResult, QueryParams, QueryResult, ResultSubmission,
+    ListParams, ListResult, QueryParams, QueryResult, RecoveryParams, ResultSubmission,
 };
+use crate::recovery::{self, Preparation, RecoveryContext, Release};
 use crate::util::{hex_decode, hex_encode, sha256_hex};
 
 pub const STATUS_ELIGIBLE: &str = "eligible";
@@ -165,6 +166,7 @@ fn lock_path_for(path: &Path) -> PathBuf {
 
 pub struct Store {
     conn: Mutex<Connection>,
+    recovery_context: Option<RecoveryContext>,
     //: Held open for the whole Store lifetime: closing it releases the OS lock.
     _lock: File,
 }
@@ -326,7 +328,14 @@ impl Store {
         writer.write_all(owner.as_bytes())?;
         writer.flush()?;
 
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version > 1 {
+            return Err(QuineError::new(
+                CODE_INVALID_STATE,
+                "this database needs a newer core",
+            ));
+        }
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA foreign_keys=ON;
@@ -381,7 +390,13 @@ impl Store {
                PRIMARY KEY (strategy_id, intent_id)
              );",
         )?;
+        if version == 0 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(include_str!("recovery_schema.sql"))?;
+            tx.commit()?;
+        }
         Ok(Store {
+            recovery_context: RecoveryContext::read(path),
             conn: Mutex::new(conn),
             _lock: lock_file,
         })
@@ -475,11 +490,11 @@ impl Store {
                     "this launch intent is already bound to a different confirmation",
                 ));
             }
-            let experiment =
-                Self::experiment_for(&transaction, &params.strategy_id, &params.intent_id)?
-                    .ok_or_else(|| {
-                        QuineError::new(CODE_INTERNAL, "confirmed experiment lost its attempt")
-                    })?;
+            let experiment = self
+                .experiment_for(&transaction, &params.strategy_id, &params.intent_id)?
+                .ok_or_else(|| {
+                    QuineError::new(CODE_INTERNAL, "confirmed experiment lost its attempt")
+                })?;
             transaction.commit()?;
             return Ok(ConfirmResult {
                 experiment,
@@ -558,11 +573,11 @@ impl Store {
             }
             return Err(error.into());
         }
-        let experiment =
-            Self::experiment_for(&transaction, &params.strategy_id, &params.intent_id)?
-                .ok_or_else(|| {
-                    QuineError::new(CODE_INTERNAL, "confirmed experiment lost its attempt")
-                })?;
+        let experiment = self
+            .experiment_for(&transaction, &params.strategy_id, &params.intent_id)?
+            .ok_or_else(|| {
+                QuineError::new(CODE_INTERNAL, "confirmed experiment lost its attempt")
+            })?;
         transaction.commit()?;
         Ok(ConfirmResult {
             experiment,
@@ -575,6 +590,15 @@ impl Store {
         let receipt = cancel_receipt_for(&params.strategy_id, &params.intent_id);
         let mut conn = self.lock()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let released: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attempt WHERE strategy_id=?1 AND intent_id=?2 AND release_json IS NOT NULL)",
+            params![params.strategy_id,params.intent_id], |row|row.get(0))?;
+        if released {
+            return Err(QuineError::new(
+                CODE_LATE_CANCEL_REFUSED,
+                "the unknown outcome is retained; its slot was already released",
+            ));
+        }
         let status: Option<String> = transaction
             .query_row(
                 "SELECT a.status FROM attempt a
@@ -633,7 +657,7 @@ impl Store {
             }
         }
         let experiment =
-            Self::experiment_for(&transaction, &params.strategy_id, &params.intent_id)?;
+            self.experiment_for(&transaction, &params.strategy_id, &params.intent_id)?;
         transaction.commit()?;
         Ok(CancelResult {
             strategy_id: params.strategy_id.clone(),
@@ -646,7 +670,7 @@ impl Store {
     pub fn query(&self, params: &QueryParams) -> Result<QueryResult, QuineError> {
         validate_ids(&params.strategy_id, &params.intent_id)?;
         let conn = self.lock()?;
-        let experiment = Self::experiment_for(&conn, &params.strategy_id, &params.intent_id)?;
+        let experiment = self.experiment_for(&conn, &params.strategy_id, &params.intent_id)?;
         let barrier: Option<Barrier> = conn
             .query_row(
                 "SELECT strategy_id, intent_id, cancel_receipt, created_at
@@ -679,7 +703,7 @@ impl Store {
         let mut experiments = Vec::new();
         for row in rows {
             let (strategy_id, intent_id) = row?;
-            if let Some(experiment) = Self::experiment_for(&conn, &strategy_id, &intent_id)? {
+            if let Some(experiment) = self.experiment_for(&conn, &strategy_id, &intent_id)? {
                 experiments.push(experiment);
             }
         }
@@ -731,8 +755,29 @@ impl Store {
                 "no confirmed experiment matches this identity",
             )
         })?;
+        let released: bool = transaction.query_row(
+            "SELECT release_json IS NOT NULL FROM attempt WHERE strategy_id=?1 AND intent_id=?2",
+            params![strategy_id, intent_id],
+            |row| row.get(0),
+        )?;
+        if released {
+            return Err(QuineError::new(
+                CODE_INVALID_STATE,
+                "a released unknown can never dispatch again",
+            ));
+        }
         match status.as_str() {
             STATUS_ELIGIBLE => {
+                transaction.execute(
+                    "UPDATE attempt SET origin_json=?1 WHERE strategy_id=?2 AND intent_id=?3",
+                    params![
+                        self.recovery_context
+                            .as_ref()
+                            .map(|c| serde_json::to_string(c).expect("origin serializes")),
+                        strategy_id,
+                        intent_id
+                    ],
+                )?;
                 transaction.execute(
                     "UPDATE attempt SET status = ?1, active = 1, revision = revision + 1,
                        dispatch_owner = ?2, dispatched_at = ?3
@@ -763,8 +808,9 @@ impl Store {
                 ));
             }
         }
-        let experiment =
-            Self::experiment_for(&transaction, strategy_id, intent_id)?.ok_or_else(|| {
+        let experiment = self
+            .experiment_for(&transaction, strategy_id, intent_id)?
+            .ok_or_else(|| {
                 QuineError::new(CODE_INTERNAL, "dispatched experiment lost its attempt")
             })?;
         transaction.commit()?;
@@ -848,8 +894,9 @@ impl Store {
              WHERE strategy_id = ?2 AND intent_id = ?3",
             params![to, strategy_id, intent_id],
         )?;
-        let experiment =
-            Self::experiment_for(&transaction, strategy_id, intent_id)?.ok_or_else(|| {
+        let experiment = self
+            .experiment_for(&transaction, strategy_id, intent_id)?
+            .ok_or_else(|| {
                 QuineError::new(CODE_INTERNAL, "advanced experiment lost its attempt")
             })?;
         transaction.commit()?;
@@ -983,7 +1030,8 @@ impl Store {
                     "the result was committed under a different fence",
                 ));
             }
-            let experiment = Self::experiment_for(&transaction, strategy_id, intent_id)?
+            let experiment = self
+                .experiment_for(&transaction, strategy_id, intent_id)?
                 .ok_or_else(|| {
                     QuineError::new(CODE_INTERNAL, "committed experiment lost its attempt")
                 })?;
@@ -1034,8 +1082,9 @@ impl Store {
                 intent_id
             ],
         )?;
-        let experiment =
-            Self::experiment_for(&transaction, strategy_id, intent_id)?.ok_or_else(|| {
+        let experiment = self
+            .experiment_for(&transaction, strategy_id, intent_id)?
+            .ok_or_else(|| {
                 QuineError::new(CODE_INTERNAL, "committed experiment lost its attempt")
             })?;
         transaction.commit()?;
@@ -1064,6 +1113,178 @@ impl Store {
         transaction.commit()?;
         let _ = now;
         Ok(changed)
+    }
+
+    /// Preparation is a durable, explicit action, never an inferred stop.
+    pub fn prepare_recovery(
+        &self,
+        params: &RecoveryParams,
+        now: i64,
+    ) -> Result<Experiment, QuineError> {
+        self.recover(params, now, false)
+    }
+    /// Only a different trusted boot of the original machine releases the slot.
+    pub fn release_unknown(
+        &self,
+        params: &RecoveryParams,
+        now: i64,
+    ) -> Result<Experiment, QuineError> {
+        self.recover(params, now, true)
+    }
+    fn recover(
+        &self,
+        params: &RecoveryParams,
+        now: i64,
+        release: bool,
+    ) -> Result<Experiment, QuineError> {
+        validate_ids(&params.strategy_id, &params.intent_id)?;
+        if !is_safe_id(&params.preparation_id)
+            || !is_safe_id(&params.attempt_id)
+            || params.expected_revision < 1
+        {
+            return Err(QuineError::new(
+                CODE_INVALID_REQUEST,
+                "recovery needs an attempt, revision and preparation identity",
+            ));
+        }
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let old = self
+            .experiment_for(&tx, &params.strategy_id, &params.intent_id)?
+            .ok_or_else(|| QuineError::new(CODE_NOT_FOUND, "no such experiment"))?;
+        if old.attempt_id != params.attempt_id || old.status != STATUS_UNKNOWN {
+            return Err(QuineError::new(
+                CODE_INVALID_STATE,
+                "only this exact unknown attempt can be recovered",
+            ));
+        }
+        let (origin, preparation, released) =
+            Self::recovery_records(&tx, &params.strategy_id, &params.intent_id)?;
+        if let Some(receipt) = released {
+            if release
+                && receipt.preparation_id == params.preparation_id
+                && receipt.base_revision == params.expected_revision
+            {
+                return Ok(old);
+            }
+            return Err(QuineError::new(
+                CODE_INVALID_STATE,
+                "this unknown attempt was already released",
+            ));
+        }
+        let context = self.recovery_context.as_ref().ok_or_else(|| {
+            QuineError::new(
+                "recovery_unavailable",
+                "trusted local host evidence is unavailable",
+            )
+        })?;
+        if !origin.as_ref().is_some_and(|o| context.same_origin(o)) {
+            return Err(QuineError::new(
+                "recovery_unavailable",
+                "the original execution machine and workspace cannot be verified; keep this record",
+            ));
+        }
+        if !old.slot_held {
+            return Err(QuineError::new(
+                CODE_INVALID_STATE,
+                "this attempt does not hold a slot",
+            ));
+        }
+        if !release {
+            if let Some(prep) = preparation {
+                if prep.id == params.preparation_id
+                    && prep.base_revision == params.expected_revision
+                    && old.revision == prep.base_revision + 1
+                    && context.same_origin(&prep.context)
+                {
+                    return Ok(old);
+                }
+                if old.revision == prep.base_revision + 1 || prep.id == params.preparation_id {
+                    return Err(QuineError::new(
+                        CODE_CONFLICT,
+                        "recovery is already prepared; re-read its receipt",
+                    ));
+                }
+                // A later cancellation/reconciliation invalidated the old fence.
+                // A fresh explicit preparation starts a new reboot boundary.
+            }
+            if old.revision != params.expected_revision {
+                return Err(QuineError::new(
+                    CODE_STALE_FENCE,
+                    "the attempt changed; re-read before preparing",
+                ));
+            }
+            let prep = Preparation {
+                id: params.preparation_id.clone(),
+                context: context.clone(),
+                base_revision: old.revision,
+                prepared_at: now,
+            };
+            tx.execute("UPDATE attempt SET preparation_json=?1,revision=revision+1 WHERE strategy_id=?2 AND intent_id=?3",
+                params![serde_json::to_string(&prep).expect("preparation serializes"),params.strategy_id,params.intent_id])?;
+        } else {
+            let prep = preparation.ok_or_else(|| {
+                QuineError::new(
+                    "recovery_unavailable",
+                    "prepare recovery before restarting the original machine",
+                )
+            })?;
+            if prep.id != params.preparation_id || !context.same_origin(&prep.context) {
+                return Err(QuineError::new(
+                    CODE_CONFLICT,
+                    "recovery preparation does not match",
+                ));
+            }
+            if params.expected_revision != old.revision || old.revision != prep.base_revision + 1 {
+                return Err(QuineError::new(
+                    CODE_STALE_FENCE,
+                    "the attempt changed after preparation",
+                ));
+            }
+            if context.boot == prep.context.boot {
+                return Err(QuineError::new("restart_required","the original machine must restart after preparation; application restart is insufficient"));
+            }
+            let receipt = Release {
+                preparation_id: prep.id,
+                context: context.clone(),
+                base_revision: old.revision,
+                released_at: now,
+            };
+            tx.execute("UPDATE attempt SET active=0,release_json=?1,revision=revision+1 WHERE strategy_id=?2 AND intent_id=?3",
+                params![serde_json::to_string(&receipt).expect("release serializes"),params.strategy_id,params.intent_id])?;
+        }
+        let result = self
+            .experiment_for(&tx, &params.strategy_id, &params.intent_id)?
+            .ok_or_else(|| QuineError::new(CODE_INTERNAL, "recovered attempt disappeared"))?;
+        tx.commit()?;
+        Ok(result)
+    }
+    fn recovery_records(
+        conn: &Connection,
+        strategy_id: &str,
+        intent_id: &str,
+    ) -> Result<
+        (
+            Option<RecoveryContext>,
+            Option<Preparation>,
+            Option<Release>,
+        ),
+        QuineError,
+    > {
+        let row=conn.query_row("SELECT origin_json,preparation_json,release_json FROM attempt WHERE strategy_id=?1 AND intent_id=?2",
+            params![strategy_id,intent_id],|row|Ok((row.get::<_,Option<String>>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,Option<String>>(2)?)))?;
+        fn decode<T: serde::de::DeserializeOwned>(
+            value: Option<String>,
+        ) -> Result<Option<T>, QuineError> {
+            value
+                .map(|s| {
+                    serde_json::from_str(&s).map_err(|_| {
+                        QuineError::new(CODE_INTERNAL, "stored recovery evidence is unreadable")
+                    })
+                })
+                .transpose()
+        }
+        Ok((decode(row.0)?, decode(row.1)?, decode(row.2)?))
     }
 
     /// Record a stopped attempt whose whole group is proven gone after an
@@ -1112,7 +1333,8 @@ impl Store {
              WHERE strategy_id = ?3 AND intent_id = ?4",
             params![STATUS_CANCELLED, now, strategy_id, intent_id],
         )?;
-        let experiment = Self::experiment_for(&transaction, strategy_id, intent_id)?
+        let experiment = self
+            .experiment_for(&transaction, strategy_id, intent_id)?
             .ok_or_else(|| QuineError::new(CODE_INTERNAL, "settled experiment lost its attempt"))?;
         transaction.commit()?;
         Ok(experiment)
@@ -1195,6 +1417,7 @@ impl Store {
     }
 
     fn experiment_for(
+        &self,
         conn: &Connection,
         strategy_id: &str,
         intent_id: &str,
@@ -1269,6 +1492,20 @@ impl Store {
         let result =
             result_json.and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
         let dispatch_eligible = active == 1 && status == STATUS_ELIGIBLE;
+        let recovery = if status == STATUS_UNKNOWN {
+            let (origin, preparation, release) =
+                Self::recovery_records(conn, strategy_id, intent_id)?;
+            let preparation =
+                preparation.filter(|p| release.is_some() || p.base_revision + 1 == revision);
+            Some(recovery::projection(
+                self.recovery_context.as_ref(),
+                origin.as_ref(),
+                preparation.as_ref(),
+                release.as_ref(),
+            ))
+        } else {
+            None
+        };
         Ok(Some(Experiment {
             strategy_id: strategy_id.to_string(),
             intent_id: intent_id.to_string(),
@@ -1285,6 +1522,8 @@ impl Store {
             job_id,
             attempt_id,
             dispatch_eligible,
+            slot_held: active == 1,
+            recovery,
             dispatch_owner,
             revision,
             result,
@@ -1295,3 +1534,7 @@ impl Store {
         }))
     }
 }
+
+#[cfg(test)]
+#[path = "recovery_tests.rs"]
+mod recovery_tests;

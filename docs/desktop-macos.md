@@ -1,5 +1,10 @@
 # QUINE local Mac desktop
 
+The desktop is QUINE's sole supported user entry point, release artifact and final product
+acceptance target ([ADR 0050](adr/0050-desktop-only-product-delivery.md)). This is an unpublished
+local candidate; no public desktop download is available. Independent browser/server/mobile
+products are outside support. Shared Web code and internal test tools remain in use.
+
 This bounded desktop candidate supports **Apple Silicon macOS**. It is a Tauri 2 window over the
 existing React application, with a bundled CPython 3.12.13 distribution, locked Web dependencies,
 the current installed EA wheel, and a freshly compiled Rust experiment owner. Python, Node, Cargo,
@@ -24,7 +29,7 @@ The stable data root is `~/Library/Application Support/QUINE`:
 - `core/` contains the existing Rust SQLite owner and its confirmed inputs and official reports.
 - `scenarios/` contains user-editable registered scenarios. First use seeds the two synthetic
   sample files once; an upgrade never overwrites them.
-- `settings.json` is the existing model settings format. It starts absent. The settings screen
+- `settings.json` is the existing model settings format. It starts absent. Resources → Model connections
   shows its exact path and provides provider, model ID, Base URL and write-only API key inputs.
   Save checks local format only; it never authenticates or calls a provider. Credentials are
   stored in this existing file with mode 0600, not in WebView storage. Blank key retains the
@@ -63,12 +68,16 @@ connect to, replace or stop the first session. Quit the extra window. Startup/ru
 an error page with a log location; quit and reopen after correcting the problem. There is no silent
 fallback to another service or experiment owner.
 
-Quit with Command-Q or close the last window. The desktop closes its session pipe and waits for
-its backend; backend exit closes the core's liveness pipe. Interrupted experiments retain the
-existing owner recovery/unknown semantics on reopen. Exiting is not an assertion that an active
-research job succeeded or was durably cancelled. A crash uses the same owner-loss boundary; work
-is never automatically resent. Python strategy plugins remain trusted executable local code,
-not sandboxed untrusted code.
+Quit with Command-Q or close the last window, then confirm. The research core first closes new
+dispatch admission and cancels its own unfinished work through the existing stop barrier. The
+desktop waits for whole-process-group stop proof, durable terminal readback and local Paper
+shutdown before closing the core's liveness pipe. Unconfirmed stop or persistence keeps the
+window open for an explicit retry; it never reports successful shutdown or redispatches work.
+Completed results remain completed. Existing historical unknown records remain frozen and do
+not prevent an otherwise idle session from closing; quitting does not recover or release them.
+A crash before this handshake retains the owner-loss/unknown boundary on reopen. Work is never
+automatically resent. Python strategy plugins remain trusted executable local code, not
+sandboxed untrusted code.
 
 ## Local build and acceptance
 
@@ -76,7 +85,7 @@ From the selected source checkout, with the repository's local Rust toolchain an
 build environment available:
 
 ```sh
-venv/bin/python scripts/build_desktop.py --output "$PWD/.local/desktop-settings"
+venv/bin/python scripts/build_desktop.py --output "$PWD/.local/desktop"
 ```
 
 Build outputs live under the explicitly selected output root (default `<checkout>/.local/desktop/`). The resulting app is at
@@ -102,11 +111,54 @@ venv/bin/python scripts/accept_desktop.py \
 It uses an empty HOME and `/usr/bin:/bin` PATH, launches the installed interpreter, refuses a
 second session, checks foreign-Origin rejection, confirms a synthetic strategy through the Rust
 owner, reads the real official report, closes/reopens and compares persisted evidence, then checks
-owned-core failure and recovery. It makes zero model requests. Native window/first-use/quit
-verification is additional to this API-level acceptance, not implied by it.
+owned-core failure and recovery. It makes zero model requests. Final installed-desktop acceptance owns native window/first-use/quit, workspace ownership,
+WebView navigation, focus/keyboard, IME and text scaling. Shared business/component/API checks
+are reused according to risk, not duplicated into a second desktop business suite. The installed
+API check does not imply native success. Scoped native keyboard/IME, minimum-window and text-scaling
+checks passed for the frozen technical package; [PR #261](https://github.com/jayjcc8-cloud/ea-quant/pull/261)
+records the exact identity and limits. Independent first use remains separate; use the
+[first-use card](first-use-acceptance.md).
 
 The desktop grants no shell/filesystem Tauri plugins or frontend IPC capabilities, denies popup
 windows and navigation outside its own session origin, and retains the existing Host/Origin/
 request-header checks. Its HTTP listener reserves a kernel-selected loopback port before starting
 ASGI; it never probes or reuses a pre-existing research port. A private short IPC socket avoids the
 macOS Unix-path length limit while the explicitly configured durable core root remains stable.
+
+
+## Explicit unknown disposition
+
+New dispatches retain local execution-machine, OS boot and database-file identity in the
+core transaction before spawning. A core-confirmed unknown can prepare recovery only when
+that original machine and workspace are still verifiable. Preparation retains the attempt
+and its revision; it neither cancels nor releases it. The user must then quit QUINE and
+restart the same machine. A later explicit release rechecks the trusted boot identity,
+original machine/file, attempt and fence in the single-owner store transaction.
+
+Release only changes concurrency occupancy. The outcome remains `unknown`; frozen input,
+original intent/job/attempt, dispatch consumption and model reservations remain. Old intent
+replays cannot spawn; late results or cancellation cannot reactivate a released unknown.
+A new experiment requires a new explicit preview and confirmation. If cancellation changed
+the record after preparation, a fresh explicit preparation and another OS restart are needed.
+Application restart, a missing PID, an idle lock or client-supplied boot claims are not proof.
+
+Legacy records without execution origin remain held. Migration does not invent that origin.
+Copied/restored/moved databases and unavailable host evidence also fail closed. The user's
+existing databases are not part of isolated development acceptance. Injected cross-boot tests
+prove decision rules only; a real cross-boot native acceptance is still required before claiming
+that journey has been verified on a Mac.
+
+## Read-only distribution preflight
+
+`scripts/check_desktop_distribution.py APP --expected-source-sha SHA --expected-version VERSION
+--expected-team-id TEAM` checks build identity, clean-source metadata, bundle version, nested
+signature integrity, the main executable's hardened-runtime flag, the supplied Developer ID
+team and an existing stapled notarization ticket. It neither signs nor uploads anything.
+A missing team, ad-hoc signature, missing proof or failed command is a failure, not a skipped
+pass. Passing this check is not release authorization or proof of the research/Full/clean-Mac
+installation journeys. The default local build remains an ad-hoc technical package.
+
+Interactive research grants now authorize at most 24 requests per new task or explicit
+continuation. The interface states the new-message allowance and the persisted task's actual
+cumulative authorization, used and remaining counts. Historic approvals and idempotent grant
+replays retain their original values. Request count is not a monetary cap.
