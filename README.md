@@ -26,7 +26,7 @@ candidate using the instructions in the desktop document.
 | AI collaboration | **REQUIRES AN EXPLICITLY CONFIGURED MODEL**; off by default |
 | Local simulated Paper | **SIMULATED ONLY**; explicitly accepted candidate and separate start confirmation |
 | External trading platforms / Live | **NOT CONNECTED / PREVIEW ONLY**; no real funds |
-| Native narrow-window, full keyboard and Chinese IME acceptance | **NOT YET VERIFIED** |
+| Native input, keyboard and narrow-window/text-scaling acceptance | **SCOPED ENGINEERING CHECKS PASSED**; independent first use remains pending |
 | 72-hour / 7-day Paper soak | **NO PASS RECORDED** |
 
 ## Research with your own evidence

@@ -114,8 +114,10 @@ owner, reads the real official report, closes/reopens and compares persisted evi
 owned-core failure and recovery. It makes zero model requests. Final installed-desktop acceptance owns native window/first-use/quit, workspace ownership,
 WebView navigation, focus/keyboard, IME and text scaling. Shared business/component/API checks
 are reused according to risk, not duplicated into a second desktop business suite. The installed
-API check does not imply native success. Native narrow-window, full keyboard and Chinese IME
-acceptance remain unverified; use the [first-use card](first-use-acceptance.md).
+API check does not imply native success. Scoped native keyboard/IME, minimum-window and text-scaling
+checks passed for the frozen technical package; [PR #261](https://github.com/jayjcc8-cloud/ea-quant/pull/261)
+records the exact identity and limits. Independent first use remains separate; use the
+[first-use card](first-use-acceptance.md).
 
 The desktop grants no shell/filesystem Tauri plugins or frontend IPC capabilities, denies popup
 windows and navigation outside its own session origin, and retains the existing Host/Origin/

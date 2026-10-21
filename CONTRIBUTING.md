@@ -1,14 +1,14 @@
 # Contributing
 
-Start with [current status](docs/STATUS.md), then read the complete
-[governance workflow](docs/governance/WORKFLOW.md), the current Issue, and its directly relevant
-ADRs. This is a contributor entry point, not a second workflow.
+Read [STATUS](docs/STATUS.md), the complete [WORKFLOW](docs/governance/WORKFLOW.md), the current
+Issue and its directly relevant ADRs. This contributor entry is not a second workflow.
 
 ## Contribution Flow
 
-Define one finite product objective in a GitHub Issue, including scope, acceptance criteria,
-actual-impact tier and owner. Before edits, record one writer, exact base SHA, branch/worktree,
-scope and merge order. Implement behavior test-first, then open a PR with the required checks.
+Use the existing checkout and one bounded branch per objective; record scope, acceptance, tier,
+owner, writer and exact base in the Issue/PR. Commit verified slices promptly and update the same
+PR. After integration, retire its branch and return to current main. Keep scratch/build/evidence
+under ignored `.local/`. Implement behavior test-first and run the required checks.
 
 Use the tier and bounded review loop in [WORKFLOW](docs/governance/WORKFLOW.md): T0 needs CI;
 T1 one primary review; T2/T3 one fresh independent adversarial review on exact HEAD. Repair
@@ -79,7 +79,7 @@ Shared component, business and API regressions run once according to risk. Prese
 IDs and safety/economic assertions. The installed desktop is the final product acceptance object
 for native lifecycle, workspace ownership, WebView restrictions, focus/keyboard/IME and text
 scaling; a browser pass is not native acceptance. Do not duplicate shared business E2E into a
-second desktop suite. Current native narrow-window, full keyboard and Chinese IME remain unverified.
+second desktop suite. [STATUS](docs/STATUS.md) links current native evidence and unverified scope.
 
 `production-runtime.yml` is historical server compatibility verification, not QUINE release
 acceptance. Manual dispatch is available; existing path-triggered checks remain until any required

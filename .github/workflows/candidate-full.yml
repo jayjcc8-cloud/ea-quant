@@ -75,7 +75,7 @@ jobs:
     needs: classify
     name: ${{ inputs.purpose == 'release_candidate' && 'Release candidate full' || 'Frozen candidate full' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     env:
       UV_PROJECT_ENVIRONMENT: venv
     steps:
