@@ -428,6 +428,16 @@ class UserStrategyResumeRequest(BaseModel):
     preview_identity: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
 
 
+class UserStrategyRecoveryRequest(BaseModel):
+    """No client-supplied stop/host proof is accepted."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    action: Literal["prepare", "release"]
+    attempt_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    expected_revision: int = Field(ge=1)
+    preparation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+
+
 class UserStrategyLaunchRequest(BaseModel):
     """One explicit confirmation of one already-previewed experiment."""
 
@@ -2067,6 +2077,17 @@ def create_app(settings: WebSettings) -> Any:
         try:
             return user_strategy_service.cancel_experiment(
                 user_strategy_id, launch_intent_id=launch_intent_id
+            ).document()
+        except strategy_failures as caught:
+            return strategy_refusal(caught)
+
+    @app.post("/api/user-strategies/{user_strategy_id}/experiments/{launch_intent_id}/recovery")
+    def recover_user_strategy_experiment(
+        user_strategy_id: str, launch_intent_id: str, request: UserStrategyRecoveryRequest
+    ) -> object:
+        try:
+            return user_strategy_service.recover_unknown_experiment(
+                user_strategy_id, launch_intent_id=launch_intent_id, **request.model_dump()
             ).document()
         except strategy_failures as caught:
             return strategy_refusal(caught)

@@ -122,3 +122,41 @@ windows and navigation outside its own session origin, and retains the existing 
 request-header checks. Its HTTP listener reserves a kernel-selected loopback port before starting
 ASGI; it never probes or reuses a pre-existing research port. A private short IPC socket avoids the
 macOS Unix-path length limit while the explicitly configured durable core root remains stable.
+
+
+## Explicit unknown disposition
+
+New dispatches retain local execution-machine, OS boot and database-file identity in the
+core transaction before spawning. A core-confirmed unknown can prepare recovery only when
+that original machine and workspace are still verifiable. Preparation retains the attempt
+and its revision; it neither cancels nor releases it. The user must then quit QUINE and
+restart the same machine. A later explicit release rechecks the trusted boot identity,
+original machine/file, attempt and fence in the single-owner store transaction.
+
+Release only changes concurrency occupancy. The outcome remains `unknown`; frozen input,
+original intent/job/attempt, dispatch consumption and model reservations remain. Old intent
+replays cannot spawn; late results or cancellation cannot reactivate a released unknown.
+A new experiment requires a new explicit preview and confirmation. If cancellation changed
+the record after preparation, a fresh explicit preparation and another OS restart are needed.
+Application restart, a missing PID, an idle lock or client-supplied boot claims are not proof.
+
+Legacy records without execution origin remain held. Migration does not invent that origin.
+Copied/restored/moved databases and unavailable host evidence also fail closed. The user's
+existing databases are not part of isolated development acceptance. Injected cross-boot tests
+prove decision rules only; a real cross-boot native acceptance is still required before claiming
+that journey has been verified on a Mac.
+
+## Read-only distribution preflight
+
+`scripts/check_desktop_distribution.py APP --expected-source-sha SHA --expected-version VERSION
+--expected-team-id TEAM` checks build identity, clean-source metadata, bundle version, nested
+signature integrity, the main executable's hardened-runtime flag, the supplied Developer ID
+team and an existing stapled notarization ticket. It neither signs nor uploads anything.
+A missing team, ad-hoc signature, missing proof or failed command is a failure, not a skipped
+pass. Passing this check is not release authorization or proof of the research/Full/clean-Mac
+installation journeys. The default local build remains an ad-hoc technical package.
+
+Interactive research grants now authorize at most 24 requests per new task or explicit
+continuation. The interface states the new-message allowance and the persisted task's actual
+cumulative authorization, used and remaining counts. Historic approvals and idempotent grant
+replays retain their original values. Request count is not a monetary cap.

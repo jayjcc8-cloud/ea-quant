@@ -27,6 +27,23 @@ def line(process: subprocess.Popen[str], timeout: float = 40) -> dict[str, Any]:
     return json.loads(raw)  # type: ignore[no-any-return]
 
 
+def stop(child: subprocess.Popen[str]) -> dict[str, Any]:
+    """An explicit shutdown must acknowledge the core's durable drain."""
+    assert child.stdin is not None
+    child.stdin.write("shutdown\n")
+    child.stdin.flush()
+    receipt = line(child)
+    assert (
+        receipt.get("status") == "closed"
+        and type(receipt.get("core_exit")) is int
+        and receipt["core_exit"] == 0
+    ), receipt
+    # Keep the parent's liveness pipe open until the shutdown receipt is known.
+    assert child.wait(timeout=25) == 0
+    child.stdin.close()
+    return receipt
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime", required=True, type=Path)
@@ -82,11 +99,6 @@ def main() -> None:
         )
         with urllib.request.urlopen(req, timeout=20) as response:
             return json.load(response)
-
-    def stop(child: subprocess.Popen[str]) -> None:
-        assert child.stdin is not None
-        child.stdin.close()
-        assert child.wait(timeout=25) == 0
 
     try:
         child = start()
@@ -147,7 +159,9 @@ def main() -> None:
             raise AssertionError("core remained live")
         except ProcessLookupError:
             pass
-        evidence["checks"].append("stdin EOF shut down web and reaped owned core")
+        evidence["checks"].append(
+            "explicit shutdown received closed/core_exit=0 and reaped owned core"
+        )
         child = start()
         ready = line(child)
         assert ready["status"] == "ready"

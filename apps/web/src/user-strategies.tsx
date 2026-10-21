@@ -1524,6 +1524,7 @@ function ChatPanel({ api, strategy, strategies, changed, modelSendBlock, modelSt
   const awaitingRunDecision = Boolean(conversation?.pending)
   const canSend = (!streaming || conversation !== null) && !awaitingRunDecision && !streamUnconfirmed
   const task = conversation?.task
+  const interactiveLimit = conversation?.budget.max_interactive_requests ?? 24
   const taskTurn = (busy ? liveTurn?.id : null) ?? task?.turn_id
   const taskActive = busy || Boolean(task && ['running', 'awaiting_budget', 'awaiting_decision'].includes(task.status))
   const stopLabels: Record<string, string> = {
@@ -1938,13 +1939,15 @@ function ChatPanel({ api, strategy, strategies, changed, modelSendBlock, modelSt
     {conversationNote && <p role="alert" className="notice error">{conversationNote}</p>}
     </AgentFeed>
     {conversation?.pending?.phase === 'awaiting_budget' && <div className="agent-pause" role="status">
-      <span>{task?.stop_reason === 'execution_limit' ? '连续执行达到安全边界，进度已保存。' : '这项旧任务已暂停，进度已保存。'}</span>
-      <button type="button" onClick={continueTask} disabled={busy}>继续研究</button>
+      <span>{task?.stop_reason === 'execution_limit' ? '本次请求额度已用完，进度已保存。' : '这项旧任务已暂停，进度已保存。'}</span>
+      <button type="button" onClick={continueTask} disabled={busy}>授权继续（最多再 {interactiveLimit} 次请求）</button>
     </div>}
     <ResearchComposer value={message} change={setMessage} send={()=>void ask()}
       stop={taskActive && taskTurn ? ()=>void cancelTask() : undefined} sending={busy}
       canSend={!busy&&!unresolved&&!!message.trim()&&modelSendBlock===null&&evidenceReady&&canSend}
       locked={configLocked} commands={commands} status={`${contextName} · ${executionState}`}>
+      <p className="agent-inline-note">发送新消息即授权最多 {interactiveLimit} 次模型请求；费用取决于模型用量。</p>
+      {task && <p className="agent-inline-note">当前任务累计授权 {task.limit} 次，已用 {task.used} 次，剩余 {task.remaining} 次。</p>}
       {!!message && <p className="agent-inline-note">未发送文字仅本次会话暂存；退出前请在输入框全选复制到本地文件。不要在消息中填写密钥。</p>}
       {streaming && conversation===null && <p className="agent-inline-note" role="status">正在恢复会话…</p>}
       {modelSendBlock!==null && <p className="agent-inline-note" role="status">模型未就绪 · <Link to="/resources/models">设置连接</Link></p>}
@@ -2356,6 +2359,7 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
     const open = [...strategy.experiments].reverse().find(item =>
       item.owner === 'quine'
       && UNRESOLVED_EXPERIMENT_STATUSES.includes(item.status)
+      && !(item.status === 'unknown' && item.slot_held === false && item.recovery?.status === 'released')
       && item.payload.preview_identity === confirmed.preview_identity)
     return open ? open.launch_intent_id : `li-${strategy.experiments.length + 1}`
   }
@@ -2558,15 +2562,10 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
           {EXPERIMENT_NOTES[item.status] ?? '这次实验没有已确认的运行。'}
           {item.message ? ` ${item.message}` : ''}
         </p>}
-        {item.owner === 'quine' && item.status === 'unknown' && <p className="notice">
-          当前无法确认这次运行的最终状态，不能仅凭“结果未知”判断运行名额是否占用。
-          若核心确认是中断后保留的未知运行，它仍占用本工作区唯一的运行名额，其他研究也暂时不能启动新实验；
-          重新打开应用不会自动释放该名额。若只是核心暂时不可达，请恢复连接后重新读取状态。
-          当前版本没有安全释放未知运行的入口；
-          请保留工作区和运行诊断，联系维护者核对，不要删除记录或修改数据库来解锁。
-          已保存的草稿和报告仍可查看。
-          {' '}<Link to="/settings?section=about">查看脱敏诊断与备份说明</Link>
-        </p>}
+        {item.owner === 'quine' && item.status === 'unknown' && <UnknownRecoveryControls
+          key={`${strategy.user_strategy_id}/${item.launch_intent_id}`}
+          strategyId={strategy.user_strategy_id} item={item} changed={changed} />}
+
       </li>)}
     </ul>}
     <p className="muted">
@@ -2575,6 +2574,55 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
     </p>
 
   </section>
+}
+
+function UnknownRecoveryControls({ strategyId, item, changed }: {
+  strategyId: string; item: UserStrategyExperiment; changed: (value: UserStrategy) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState('')
+  const sending = useRef(false)
+  const active = useRef(true)
+  const preparation = useRef({ revision: item.core_revision, id: crypto.randomUUID() })
+  useEffect(() => { active.current = true; return () => { active.current = false } }, [])
+  const recovery = item.recovery
+  const released = item.slot_held === false && recovery?.status === 'released'
+  const action = item.slot_held === true && item.attempt_id && item.core_revision
+    ? recovery?.status === 'prepare_required' ? 'prepare' : recovery?.status === 'ready' ? 'release' : null
+    : null
+  const act = async () => {
+    if (!action || !item.attempt_id || !item.core_revision || sending.current) return
+    sending.current = true; setBusy(true); setFailure('')
+    if (action === 'prepare' && preparation.current.revision !== item.core_revision) {
+      preparation.current = { revision: item.core_revision, id: crypto.randomUUID() }
+    }
+    try {
+      const updated = await userStrategiesApi.recoverExperiment(strategyId, item.launch_intent_id, {
+        action, attempt_id: item.attempt_id, expected_revision: item.core_revision,
+        preparation_id: recovery?.preparation_id ?? preparation.current.id,
+      })
+      if (active.current && updated.user_strategy_id === strategyId) changed(updated)
+    } catch (error) {
+      if (active.current) setFailure(`${explain(error)} 请重新加载并核对核心回执；不会自动重试或重跑。`)
+    } finally {
+      sending.current = false
+      if (active.current) setBusy(false)
+    }
+  }
+  return <div className="notice" aria-label="未知运行恢复">
+    {released ? <p>结果仍未知；核心已验证旧计算停止并释放运行名额。旧任务不会重跑，冻结输入和已扣预算保留。新实验仍需重新预览并确认。</p>
+      : item.slot_held === true ? <p>核心确认这次未知运行仍占用本工作区唯一的运行名额，其他研究也暂时不能启动新实验。重新打开应用不会自动释放该名额。保留历史、冻结输入和已扣预算；恢复仅解除名额，不恢复计算或补报结果。</p>
+      : <p>当前无法确认运行名额是否占用，不能仅凭“结果未知”判断运行名额是否占用。若核心确认是中断后保留的未知运行，须核对停止证据；若只是核心暂时不可达，请恢复连接后重新读取状态。</p>}
+    {recovery?.status === 'prepare_required' && <p>先记录恢复准备，然后正常退出 QUINE，手动重启此 Mac。重新打开后，核心会核对执行机器、工作区和系统启动证据。</p>}
+    {recovery?.status === 'restart_required' && <p>恢复准备已保存。请正常退出 QUINE 后手动重启此 Mac；仅重开应用不能证明旧计算停止。</p>}
+    {recovery?.status === 'ready' && <p>核心已核对同一机器跨系统启动的停止证据。可显式释放名额，原结果继续保留为未知。</p>}
+    {!released && (!recovery || recovery.status === 'unavailable') && <p>缺少可验证的运行归属或停止证据，暂不能释放。旧版记录可能缺少机器身份；不要删除记录或修改数据库来解锁。</p>}
+    {action && <button type="button" onClick={() => { void act() }} disabled={busy}>
+      {busy ? '正在核对核心回执…' : action === 'prepare' ? '记录恢复准备（需重启 Mac）' : '保留未知结果并释放运行名额'}
+    </button>}
+    {failure && <p role="alert">{failure}</p>}
+    <p>已保存的草稿和报告仍可查看。<Link to="/settings?section=about">查看脱敏诊断与备份说明</Link></p>
+  </div>
 }
 
 /**

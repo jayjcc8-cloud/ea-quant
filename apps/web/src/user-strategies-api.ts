@@ -299,6 +299,13 @@ export type UserStrategyExperimentPayload = {
  * with is retained on the record, so the same intent always resolves to the same
  * run even after the draft moves on.
  */
+export type UnknownRecovery = {
+  status: 'unavailable' | 'prepare_required' | 'restart_required' | 'ready' | 'released'
+  preparation_id: string | null
+  prepared_at: number | null
+  released_at: number | null
+}
+
 export type UserStrategyExperiment = {
   launch_intent_id: string
   request_id: string
@@ -315,6 +322,9 @@ export type UserStrategyExperiment = {
    * of that owner's own record — never a second authority.
    */
   owner?: 'quine' | null
+  slot_held?: boolean | null
+  core_revision?: number | null
+  recovery?: UnknownRecovery | null
   /** The core's own last bounded progress phase while the run is live. */
   phase?: string | null
   /** Whether the core registered a success *and* its official bytes are readable. */
@@ -419,6 +429,7 @@ export type UserStrategyConversation = {
   budget: {
     task_budget_required?: boolean
     max_task_requests?: number
+    max_interactive_requests?: number
     max_model_calls_per_turn: number
     reserved_model_calls: number
     max_backtests: number
@@ -785,6 +796,9 @@ export const userStrategiesApi = {
    * Ask the run's owner to stop one confirmed experiment. Only the owner decides
    * what that means; this returns the strategy, not a claim that the run stopped.
    */
+  recoverExperiment: (userStrategyId: string, launchIntentId: string, input: {
+    action: 'prepare' | 'release'; attempt_id: string; expected_revision: number; preparation_id: string
+  }) => write<UserStrategy>(`${base(userStrategyId)}/experiments/${encodeURIComponent(launchIntentId)}/recovery`, input),
   cancelExperiment: (userStrategyId: string, launchIntentId: string) =>
     write<UserStrategy>(
       `${base(userStrategyId)}/experiments/${encodeURIComponent(launchIntentId)}/cancel`,

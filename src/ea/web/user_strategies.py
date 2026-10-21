@@ -148,10 +148,10 @@ _CALL_APPROVAL = 1
 #: This is a per-turn bound, not a workspace-lifetime one: a workspace that has
 #: made many calls still admits the next turn up to this many, and no further.
 _TURN_MAX_CALLS = 4  # Legacy explicit approvals only.
-# Reuse the existing HTTP task ceiling as a defensive continuous-dispatch bound.
-# It is not completion or a user-entered allowance. Reaching it pauses; an explicit
-# continuation can proceed from saved tool results, never resend unknown calls.
-_INTERACTIVE_MAX_DISPATCHES = 100
+# Each new interactive turn and explicit continuation grants at most 24 requests.
+# Persisted approvals keep their original amounts; reaching the limit pauses,
+# and continuation resumes saved tool results without resending unknown calls.
+_INTERACTIVE_MAX_DISPATCHES = 24
 _DEFAULT_BUDGET = {"max_model_calls": 10, "max_backtests": 5}
 #: What a request says when the bounded history dropped older turns from it.
 _OMITTED_HISTORY_NOTE = (
@@ -1035,10 +1035,11 @@ class UserStrategyStore:
                 if (
                     type(total) is not int
                     or total <= task["limit"]
+                    or total > _task_usage(strategy, turn) + _INTERACTIVE_MAX_DISPATCHES
                     or (not continue_execution and total > 100)
                 ):
                     raise UserStrategyBudgetError(
-                        "choose a larger explicit task total, at most 100 requests"
+                        "a new grant must increase the task total by at most 24 requests"
                     )
                 task.update(
                     limit=total,
@@ -2204,8 +2205,14 @@ class UserStrategyService:
             "approved_budget": _requested_budget(approved_budget),
         }
         interactive = task_budget == "interactive"
+        existing = _entry(strategy.calls, "call_id", call)
         if interactive:
-            task_budget = _INTERACTIVE_MAX_DISPATCHES
+            saved_request = (existing or {}).get("request") or {}
+            task_budget = (
+                saved_request["task_budget"]
+                if saved_request.get("execution") == "interactive"
+                else _INTERACTIVE_MAX_DISPATCHES
+            )
             request["execution"] = "interactive"
         if task_budget is not None:
             if type(task_budget) is not int or not 1 <= task_budget <= 100:
@@ -2256,6 +2263,8 @@ class UserStrategyService:
             )
         # New messages authorize one bounded turn, independently of lifetime usage.
         # Replay returned above, so retained calls keep their original approval.
+        if task_budget is not None and task_budget > _INTERACTIVE_MAX_DISPATCHES:
+            raise UserStrategyBudgetError("a new task may authorize at most 24 requests")
         budget = self._approval(
             approved_budget,
             model_calls=_CALL_APPROVAL,
@@ -4338,6 +4347,9 @@ class UserStrategyService:
         return {
             **record,
             "status": "unknown",
+            "slot_held": None,
+            "core_revision": None,
+            "recovery": None,
             "phase": None,
             "report_ready": False,
             "report_sha256": None,
@@ -4354,6 +4366,9 @@ class UserStrategyService:
             return {
                 **record,
                 "status": "unknown",
+                "slot_held": None,
+                "core_revision": None,
+                "recovery": None,
                 "phase": None,
                 "report_ready": False,
                 "report_sha256": None,
@@ -4500,6 +4515,41 @@ class UserStrategyService:
             if record is None:
                 return restored
             return self._refresh_quine(restored, identity, intent)
+
+    def recover_unknown_experiment(
+        self,
+        user_strategy_id: object,
+        *,
+        launch_intent_id: object,
+        action: str,
+        attempt_id: str,
+        expected_revision: int,
+        preparation_id: str,
+    ) -> UserStrategy:
+        """Release concurrency only; the old intent, input and usage remain intact."""
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        intent = _identifier(launch_intent_id, "launch_intent_id")
+        with self._lock(identity):
+            strategy = self._store.get(identity)
+            record = _entry(strategy.experiments, "launch_intent_id", intent)
+            if self._quine is None or record is None or record.get("owner") != _QUINE_OWNER:
+                raise UserStrategyStateError("no readable core-owned experiment can be recovered")
+            experiment, _ = self._quine.query(identity, intent)
+            if experiment is None or not self._quine.frozen_matches(
+                record.get("payload") or {}, experiment
+            ):
+                raise UserStrategyStateError(
+                    "the core's frozen input does not match this experiment"
+                )
+            self._quine.recover_unknown(
+                identity,
+                intent,
+                action=action,
+                attempt_id=attempt_id,
+                expected_revision=expected_revision,
+                preparation_id=preparation_id,
+            )
+            return self._refresh_quine(strategy, identity, intent)
 
     def reconcile(self, user_strategy_id: object) -> UserStrategy:
         """Classify interrupted experiments and calls; dispatch and send nothing.
@@ -4798,12 +4848,18 @@ class UserStrategyService:
         copy, and it never causes a second provider call.
         """
         identity = _identifier(user_strategy_id, "user_strategy_id")
-        if approved_budget is None and task_budget is None:
-            approved_budget = {"max_model_calls": _INTERACTIVE_MAX_DISPATCHES, "max_backtests": 0}
-            task_budget = "interactive"
         with self._lock(identity):
+            strategy = self._store.migrate_conversation(identity)
+            if approved_budget is None and task_budget is None:
+                saved = (_entry(strategy.calls, "call_id", str(call_id)) or {}).get("request") or {}
+                approved_budget = (
+                    saved["approved_budget"]
+                    if saved.get("execution") == "interactive"
+                    else {"max_model_calls": _INTERACTIVE_MAX_DISPATCHES, "max_backtests": 0}
+                )
+                task_budget = "interactive"
             admitted = self._admit(
-                self._store.migrate_conversation(identity),
+                strategy,
                 call_id=call_id,
                 base_revision=base_revision,
                 text=text,
@@ -4994,6 +5050,7 @@ class UserStrategyService:
             "budget": {
                 "task_budget_required": False,
                 "max_task_requests": 100,
+                "max_interactive_requests": _INTERACTIVE_MAX_DISPATCHES,
                 # The most calls one explicitly initiated new turn may spend. It is a
                 # per-turn bound, deliberately separate from the recorded usage below,
                 # so a client can never read a lifetime balance out of this and disable

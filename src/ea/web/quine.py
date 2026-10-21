@@ -450,6 +450,31 @@ class QuineBridge:
             timeout=self._query_timeout,
         )
 
+    def recover_unknown(
+        self,
+        strategy_id: str,
+        intent_id: str,
+        *,
+        action: str,
+        attempt_id: str,
+        expected_revision: int,
+        preparation_id: str,
+    ) -> dict[str, Any]:
+        """Forward explicit disposition; only the core reads OS stop evidence."""
+        if action not in {"prepare", "release"}:
+            raise ValueError("unsupported recovery action")
+        return self._client.call(
+            "prepare_recovery" if action == "prepare" else "release_unknown",
+            {
+                "strategy_id": strategy_id,
+                "intent_id": intent_id,
+                "attempt_id": attempt_id,
+                "expected_revision": expected_revision,
+                "preparation_id": preparation_id,
+            },
+            timeout=self._query_timeout,
+        )
+
     def experiments(self) -> list[dict[str, Any]]:
         """Every experiment the core owns, in the core's own order.
 
@@ -713,6 +738,27 @@ class QuineBridge:
             attempt_id=_text(experiment.get("attempt_id")),
             frozen_sha256=_text(experiment.get("frozen_sha256")),
         )
+        # Only the owner's exact frozen record can carry recovery authority.
+        # Transport or input-mismatch projections never inherit a cached release.
+        if self.frozen_matches(payload, experiment):
+            held = experiment.get("slot_held")
+            revision = experiment.get("revision")
+            recovery = experiment.get("recovery")
+            if type(held) is bool and type(revision) is int:
+                row.update(slot_held=held, core_revision=revision)
+                if (
+                    projected == "unknown"
+                    and type(recovery) is dict
+                    and recovery.get("status")
+                    in {
+                        "unavailable",
+                        "prepare_required",
+                        "restart_required",
+                        "ready",
+                        "released",
+                    }
+                ):
+                    row["recovery"] = recovery
         if projected == "running":
             row["phase"] = self.phase(job_id)
         if projected != "created":
@@ -798,6 +844,9 @@ class QuineBridge:
             "facts": None,
             "report_schema": None,
             "path_schema": None,
+            "slot_held": None,
+            "core_revision": None,
+            "recovery": None,
         }
 
 

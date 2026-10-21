@@ -16,10 +16,11 @@ import { useEffect, useState } from 'react'
 import { BrowserRouter, Link } from 'react-router-dom'
 import { EvidenceSection } from './user-strategies'
 import { StrategyEvidenceResearch } from './user-strategy-research'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App, type ApiAdapter, type BacktestJob, type ScenarioSummary } from './app'
 import {
   UserStrategyRequestError,
+  userStrategiesApi,
   isIntentDraft,
   type UserStrategy,
   type UserStrategyChange,
@@ -1732,7 +1733,8 @@ describe('user strategy workspace', () => {
     const user = userEvent.setup()
     const frozen = strategy({ experiments: [createdExperiment({
       owner: 'quine', status: 'unknown', frozen_sha256: 'b'.repeat(64),
-      attempt_id: 'attempt-unknown', report_ready: false,
+      attempt_id: 'attempt-unknown', report_ready: false, slot_held: true, core_revision: 3,
+      recovery: {status: 'unavailable', preparation_id: null, prepared_at: null, released_at: null},
     })] })
     const { api, calls } = scripted({ strategies: [frozen], current: () => frozen })
     detail(api)
@@ -1748,7 +1750,8 @@ describe('user strategy workspace', () => {
     expect(panel.textContent).toContain('仍占用本工作区唯一的运行名额')
     expect(panel.textContent).toContain('其他研究也暂时不能启动新实验')
     expect(panel.textContent).toContain('重新打开应用不会自动释放该名额')
-    expect(panel.textContent).toContain('当前版本没有安全释放未知运行的入口')
+    expect(panel.textContent).toContain('缺少可验证的运行归属或停止证据，暂不能释放')
+    expect(within(panel).queryByRole('button', {name: /恢复准备|释放运行名额/})).toBeNull()
     expect(within(panel).getByRole('link', { name: '查看脱敏诊断与备份说明' }).getAttribute('href'))
       .toBe('/settings?section=about')
     expect(within(panel).queryByRole('button', { name: '停止这次运行' })).toBeNull()
@@ -2579,4 +2582,29 @@ it('links a recorded call to its exact frozen evidence and opens the work view',
   expect(screen.getByRole('group', { name: '工作区视图' }).parentElement?.getAttribute('data-workspace-view')).toBe('work')
   expect(calls.ask).toBe(0)
   expect(calls.launch).toBe(0)
+})
+
+
+it('releases only on an explicit core-bound action and keeps the unknown visible', async () => {
+  const user = userEvent.setup()
+  const old = createdExperiment({ owner:'quine', status:'unknown', attempt_id:'attempt-unknown',
+    slot_held:true, core_revision:4, recovery:{status:'ready', preparation_id:'prep-1',prepared_at:1,released_at:null} })
+  const saved = strategy({experiments:[old]})
+  const {api, calls} = scripted({strategies:[saved],current:()=>saved})
+  const release = vi.spyOn(userStrategiesApi,'recoverExperiment').mockResolvedValue(strategy({experiments:[{
+    ...old, slot_held:false, core_revision:5,
+    recovery:{status:'released',preparation_id:'prep-1',prepared_at:1,released_at:2},
+  }]}))
+  try {
+    detail(api)
+    const panel=await openSection(user,'实验')
+    expect(release).not.toHaveBeenCalled()
+    await user.click(within(panel).getByRole('button',{name:'保留未知结果并释放运行名额'}))
+    expect(release).toHaveBeenCalledExactlyOnceWith('us-1',old.launch_intent_id,{
+      action:'release',attempt_id:'attempt-unknown',expected_revision:4,preparation_id:'prep-1',
+    })
+    await waitFor(()=>expect(panel.textContent).toContain('结果仍未知；核心已验证旧计算停止并释放运行名额'))
+    expect(within(panel).queryByRole('button',{name:'保留未知结果并释放运行名额'})).toBeNull()
+    expect(calls.launch).toBe(0); expect(calls.ask).toBe(0)
+  } finally { release.mockRestore() }
 })

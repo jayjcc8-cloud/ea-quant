@@ -7,3 +7,5 @@ pub mod result;
 pub mod store;
 pub mod supervise;
 pub mod util;
+
+mod recovery;

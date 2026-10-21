@@ -536,3 +536,73 @@ def test_stop_cuts_partial_generation_without_claiming_completion_then_new_messa
     )
     assert len(provider.calls) == 1
     assert owner.conversation_state(strategy.user_strategy_id)["task"]["stop_reason"] == "completed"
+
+
+def test_interactive_grants_stop_at_24_and_replay_without_new_spend(stack: Stack) -> None:
+    owner, _, provider = stack
+    strategy = owner.create(name="Bounded", intent="Inspect inputs")
+    provider.responses.extend(tool("discover_resources", {}, f"read-{i}") for i in range(48))
+    provider.responses.append(_response([], text="Done"))
+    start(owner, strategy, None)
+    assert len(provider.calls) == 24
+    state = owner.conversation_state(strategy.user_strategy_id)
+    assert (state["task"]["limit"], state["task"]["remaining"]) == (24, 0)
+    assert state["task"]["stop_reason"] == "execution_limit"
+    owner.reconcile_all()
+    assert len(provider.calls) == 24
+    for _ in range(2):
+        list(
+            owner.conversation_resume(
+                strategy.user_strategy_id, turn_id="task-1", action="continue", grant_id="next-24"
+            )
+        )
+    state = owner.conversation_state(strategy.user_strategy_id)
+    assert len(provider.calls) == 48
+    assert (state["task"]["limit"], state["task"]["remaining"]) == (48, 0)
+    assert len(state["task"]["grants"]) == 1
+    assert state["task"]["grants"][0]["total"] == 48
+    assert state["pending"]["phase"] == "awaiting_budget"
+
+
+def test_old_implicit_interactive_request_replays_its_original_budget(
+    stack: Stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ea.web import user_strategies as module
+
+    owner, _, provider = stack
+    strategy = owner.create(name="Retained", intent="Inspect inputs")
+    provider.responses.append(_response([], text="Done"))
+    with monkeypatch.context() as context:
+        context.setattr(module, "_INTERACTIVE_MAX_DISPATCHES", 100)
+        start(owner, strategy, None)
+    original = owner.get(strategy.user_strategy_id).calls[0]
+    assert original["task"]["limit"] == 100
+    monkeypatch.setattr(module, "_INTERACTIVE_MAX_DISPATCHES", 24)
+    start(owner, strategy, None)
+    assert len(provider.calls) == 1
+    assert owner.get(strategy.user_strategy_id).calls[0] == original
+    with pytest.raises(UserStrategyConflictError):
+        list(
+            owner.conversation_turn(
+                strategy.user_strategy_id,
+                call_id="task-1",
+                base_revision=1,
+                text="Different intent",
+            )
+        )
+    assert len(provider.calls) == 1
+
+
+def test_new_explicit_approval_cannot_bypass_24_request_grant(stack: Stack) -> None:
+    owner, _, provider = stack
+    strategy = owner.create(name="Bounded", intent="Inspect inputs")
+    with pytest.raises(UserStrategyBudgetError):
+        start(owner, strategy, 25)
+    assert not provider.calls
+    provider.responses.append(tool("discover_resources", {}))
+    start(owner, strategy, 1)
+    before = owner.conversation_state(strategy.user_strategy_id)["task"]
+    with pytest.raises(UserStrategyBudgetError):
+        topup(owner, strategy, 26)
+    assert owner.conversation_state(strategy.user_strategy_id)["task"] == before
+    assert len(provider.calls) == 1

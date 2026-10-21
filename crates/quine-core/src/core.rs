@@ -271,6 +271,32 @@ impl Core {
             Request::Query { params } => self.query(&params),
             Request::List { params } => self.list(&params),
             Request::Quiesce { .. } => self.quiesce(),
+            Request::PrepareRecovery { params } => self.recovery_action(&params, false),
+            Request::ReleaseUnknown { params } => self.recovery_action(&params, true),
+        }
+    }
+
+    fn recovery_action(
+        &self,
+        params: &crate::protocol::RecoveryParams,
+        release: bool,
+    ) -> ReplyEnvelope {
+        let method = if release {
+            "release_unknown"
+        } else {
+            "prepare_recovery"
+        };
+        if self.quiescing {
+            return ReplyEnvelope::err(method, "core_quiescing", "the core is closing".into());
+        }
+        let result = if release {
+            self.store.release_unknown(params, now())
+        } else {
+            self.store.prepare_recovery(params, now())
+        };
+        match result {
+            Ok(experiment) => ReplyEnvelope::ok(method, json!({"experiment":experiment})),
+            Err(error) => ReplyEnvelope::err(method, &error.code, error.message),
         }
     }
 

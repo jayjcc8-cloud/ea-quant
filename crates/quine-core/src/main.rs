@@ -219,7 +219,9 @@ fn handle(store: &Store, line: &str) -> ReplyEnvelope {
         Request::List { params } => store
             .list(&params)
             .map(|value| serde_json::to_value(value).expect("list result serializes")),
-        Request::Quiesce { .. } => Err(QuineError::new(
+        Request::Quiesce { .. }
+        | Request::PrepareRecovery { .. }
+        | Request::ReleaseUnknown { .. } => Err(QuineError::new(
             "invalid_request",
             "quiesce requires the supervising core",
         )),
@@ -237,6 +239,8 @@ fn request_method(request: &Request) -> &'static str {
         Request::Query { .. } => "query",
         Request::List { .. } => "list",
         Request::Quiesce { .. } => "quiesce",
+        Request::PrepareRecovery { .. } => "prepare_recovery",
+        Request::ReleaseUnknown { .. } => "release_unknown",
     }
 }
 
