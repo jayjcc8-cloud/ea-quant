@@ -331,7 +331,7 @@ describe('core-owned experiments', () => {
     await openExperimentTab(user)
 
     const panel = await screen.findByRole('region', { name: '实验' })
-    expect(within(panel).getByText(/结果未知/)).toBeTruthy()
+    expect(within(panel).getByText('实验 li-1 来自修订 1 — 结果未知')).toBeTruthy()
     expect(within(panel).getByText(/the core could not prove how this run ended/)).toBeTruthy()
     expect(within(panel).queryByRole('link', { name: '查看这次实验报告' })).toBeNull()
   }, 20_000)
