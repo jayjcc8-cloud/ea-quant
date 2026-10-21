@@ -876,3 +876,43 @@ main > .content:has(.strategy-workspace) { padding: 0; }
 .report-supporting-results { display:flex; flex-wrap:wrap; gap:8px 24px; padding:12px 2px 2px; font-size:12px; color:var(--muted); }
 .report-supporting-results strong { color:var(--ink); font-weight:500; margin-left:5px; }
 @media(max-width:767px) { .research-row-identity { gap:10px; } .report-key-results dd { font-size:21px; } }
+
+/* Short zoomed windows can scroll the AI pane without crushing its feed.
+   AgentFeed keeps its own scroll owner for following new output. */
+@media (max-height: 460px) {
+  .strategy-workspace > .strategy-ai {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+  .strategy-workspace .strategy-chat {
+    flex: 0 0 auto;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+  .strategy-workspace .strategy-chat .chat-body {
+    flex: 0 0 auto;
+    height: min(240px, 60dvh);
+    min-height: 140px;
+    overflow: auto;
+  }
+  .strategy-workspace .strategy-chat .chat-head,
+  .strategy-workspace .strategy-chat .agent-identity,
+  .strategy-workspace .strategy-chat .agent-context,
+  .strategy-workspace .strategy-chat .agent-state,
+  .strategy-workspace .strategy-chat .composer {
+    flex: 0 0 auto;
+  }
+  .strategy-workspace .command-menu {
+    position: fixed;
+    top: auto;
+    right: 8px;
+    bottom: 8px;
+    left: 8px;
+    max-height: calc(100dvh - 16px);
+    box-sizing: border-box;
+    margin: 0;
+    z-index: 40;
+  }
+}
