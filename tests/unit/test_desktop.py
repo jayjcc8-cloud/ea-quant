@@ -8,6 +8,97 @@ from ea.desktop import install_samples, prepare_root
 from ea.desktop_settings import DesktopSettings
 
 
+@pytest.mark.parametrize("parent_lost", [False, True])
+def test_native_owner_pipe_distinguishes_requested_exit_from_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parent_lost: bool
+) -> None:
+    import asyncio
+    import os
+    from types import SimpleNamespace
+
+    import uvicorn
+
+    import ea.desktop as desktop
+    import ea.web.app
+    import ea.web.paper_desktop
+    import ea.web.quine
+
+    runtime = tmp_path / "bundle"
+    (runtime / "samples").mkdir(parents=True)
+    for name in ("synthetic-bounded-long.yaml", "prices.csv"):
+        (runtime / "samples" / name).write_text("fixture")
+    root = tmp_path / "data"
+    methods: list[str] = []
+    receipts: list[dict] = []
+
+    class Core:
+        pid = 123
+        returncode = None
+
+        def __init__(self, args: list[str], **kwargs: object) -> None:
+            Path(args[args.index("--socket") + 1]).touch()
+            self.stdin = SimpleNamespace(close=lambda: None)
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, *, timeout: float) -> None:
+            # Match the separately integrated core EOF contract, without
+            # launching another service from this lifecycle boundary test.
+            self.returncode = 0 if "quiesce" in methods else 70
+
+    class Client:
+        def __init__(self, socket: Path, **kwargs: object) -> None:
+            pass
+
+        def call(self, method: str, params: dict, **kwargs: object) -> dict:
+            methods.append(method)
+            return {"drained": True, "pending": 0} if method == "quiesce" else {}
+
+    async def serve(server: SimpleNamespace, sockets: list, finished: asyncio.Event) -> None:
+        server.started = True
+        while not server.should_exit:
+            await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(desktop.subprocess, "Popen", Core)
+    monkeypatch.setattr(desktop, "emit", receipts.append)
+    monkeypatch.setattr(desktop, "serve_web", serve)
+    monkeypatch.setattr(ea.web.quine, "QuineClient", Client)
+    monkeypatch.setattr(ea.web.app, "create_app", lambda settings: object())
+    monkeypatch.setattr(
+        ea.web.paper_desktop,
+        "DesktopPaper",
+        lambda *args, **kwargs: SimpleNamespace(
+            open=lambda: None, close=lambda: None, shutdown=lambda: True, runs=root / "paper"
+        ),
+    )
+    monkeypatch.setattr(
+        uvicorn, "Server", lambda config: SimpleNamespace(started=False, should_exit=False)
+    )
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "r") as owner:
+        monkeypatch.setattr(desktop.sys, "stdin", owner)
+        try:
+            if not parent_lost:
+                os.write(write_fd, b"shutdown\n")
+            else:
+                os.close(write_fd)
+            asyncio.run(
+                asyncio.wait_for(
+                    desktop.workspace_session(root, runtime, None, asyncio.Event()), timeout=3
+                )
+            )
+        finally:
+            if not parent_lost:
+                os.close(write_fd)
+    assert ("quiesce" in methods) is not parent_lost
+    assert receipts[-1] == {
+        "status": "interrupted" if parent_lost else "closed",
+        "core_exit": 70 if parent_lost else 0,
+        "research_state": "read_from_owner_on_reopen",
+    }
+
+
 @pytest.mark.parametrize("first", ["lost_receipt", "pending"])
 def test_research_exit_retries_only_the_idempotent_drain(first: str) -> None:
     import asyncio

@@ -264,11 +264,17 @@ async def workspace_session(
                                 return
                             stopping = True
                             try:
-                                research_drained, paper_stopped = await asyncio.gather(
-                                    drain_research(QuineClient(ipc)),
-                                    asyncio.to_thread(paper.shutdown),
-                                )
-                                if research_drained and paper_stopped:
+                                if parent_lost:
+                                    # EOF without a requested shutdown is owner loss,
+                                    # not permission to settle research as cancelled.
+                                    # Closing the core pipe preserves its crash path.
+                                    paper_stopped = await asyncio.to_thread(paper.shutdown)
+                                else:
+                                    research_drained, paper_stopped = await asyncio.gather(
+                                        drain_research(QuineClient(ipc)),
+                                        asyncio.to_thread(paper.shutdown),
+                                    )
+                                if (parent_lost or research_drained) and paper_stopped:
                                     parent_gone.set()
                                     server.should_exit = True
                                 else:
