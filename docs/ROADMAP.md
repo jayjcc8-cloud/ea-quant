@@ -1,144 +1,87 @@
 # Roadmap
 
-This document defines Phase boundaries. Current delivery status belongs in [STATUS](STATUS.md);
-task detail belongs in Issues; accepted decisions belong in [ADRs](adr/).
+This document defines phase boundaries, not a second progress register. Current capabilities,
+remaining acceptance and the next bounded outcome belong in [STATUS](STATUS.md); tasks belong in
+Issues and architectural decisions in [ADRs](adr/).
+
+## Current delivery direction
+
+[ADR 0050](adr/0050-desktop-only-product-delivery.md) makes the Mac desktop QUINE's sole product
+entry and release target. Shared React/WebView, HTTP, internal browser checks and historical server
+compatibility remain. The current objective is convergence of the existing research candidate,
+not an independent browser/server/mobile product, IPC migration or replacement research engine.
+
+The commercial objective is reducing Idea → Evidence-ready Candidate time and cost. The existing
+boundary is research → frozen evidence → human Candidate decision → separately confirmed local
+simulation. A later phase name never authorizes external connectivity or Live.
 
 ## Phase 0 — Engineering Foundation
 
-Purpose: establish the repository, deterministic Python environment, configuration boundary, CI,
-testing, ADR process, reproducibility primitives, and safe collaboration rules.
+Purpose: establish the repository, locked Python environment, configuration, CI, tests,
+reproducibility primitives and collaboration rules.
 
-Exit: merged, verified, and tagged `v0.1.0`.
+Exit: merged, verified and tagged `v0.1.0`. Delivery history remains in Git and the release record;
+the original bootstrap implementation checklist is not an active development backlog.
 
 ## Phase 1 — Backtest MVP
 
-Purpose: deliver one mature offline backtest product that composes bounded OHLCV input, strict
-scenario validation, initial funding, strategy signals, portfolio/risk decisions,
-execution/matching, ledger reconciliation, durable audit, supported recovery, and a stable result
-report from an installed distribution.
+Purpose: one installed offline backtest product composing bounded OHLCV input, strict scenario
+validation, initial funding, strategy/portfolio/risk decisions, execution facts, ledger
+reconciliation, durable audit, supported recovery and formal reports.
 
-Entry: Phase 0 is released and `main` is healthy.
+Entry: released Phase 0 and a healthy merged main. Exit criteria:
 
-## Phase 1 Delivery Order
+- Point-in-time input visibility and deterministic run/attempt identities.
+- Installed `ea backtest validate|run|resume` outside a source checkout.
+- Replay-safe funding and supported interruption recovery without duplicate economic effects.
+- Bounded risk and fail-closed ledger, journal, manifest, scenario and reconciliation conflicts.
+- Byte-stable formal reports and equivalent independent semantic/economic outcomes.
+- Required acceptance, CI and review, followed by the explicitly authorized `v0.2.0` prerelease.
 
-1. **RESET offline vertical slice — COMPLETE.** The installed deterministic demonstration proves
-   the bounded signal-to-report path without claiming the funded Backtest MVP.
-2. **Backtest Identity contract — COMPLETE.** Run/attempt identity, lineage, semantic comparison,
-   and seed ownership are defined for the accepted product surface.
-3. **Funded deterministic Backtest single-run — #81 — COMPLETE.** Strict scenario input, initial
-   funding, limits, strategies, and installed `validate`/`run` commands are delivered.
-4. **Resume and failure durability — COMPLETE.** The installed product resumes the same trusted
-   attempt from the funded, completed-dispatch, and reconciled pre-publication durable frontiers,
-   preserving exactly-once economics and failing closed on ambiguous or conflicting evidence.
-5. **BacktestReportV1 — #83 — COMPLETE.** Canonical JSON/text and semantic outcome comparison are
-   delivered from accepted product evidence.
-6. **v0.2.0 product acceptance and release gate — #84 — COMPLETE.** The Product Owner accepted one
-   exact clean `main` product and published its fixed tag, wheel, and checksum as a GitHub
-   prerelease. No package-registry publication or deployment was performed.
-
-Post-release bounded increments retain the Phase 1 product boundary. ADR 0030 adds the local-only
-browser adapter; ADR 0031 adds input replay, durable normalized history, and pairwise comparison.
-Issue #171 extends the existing `bounded-long-v1` surface to exactly `target_quantity` and
-`entry_delay_bars`, with backend-derived next-bar bounds and no sweep or optimizer. Symbol/data
-configuration, Experiment tracking, optimization, and research-grade analytics remain Phase 2
-concerns.
-
-This is a product dependency order, not a sequence of governance phases or actor chains.
-
-## Phase 1 Non-goals
-
-- Live trading, broker/exchange writes, credentials, deployment, or production operations.
-- Walk-forward research, parameter optimization, sophisticated transaction-cost modelling, or
-  production experiment tracking.
-- Multiple live adapters, multi-strategy orchestration, or portfolio-scale production scheduling.
-- Tool migration or governance automation without repeated evidence of manual failure.
-- Automatic reconciliation correction, balance adjustment, ancestry repair, or exhaustive recovery
-  across dormant correction combinations.
-- Initial positions, multiple settlement currencies, network/deployed Web integration, or
-  research-grade performance analytics. ADRs 0030 and 0031 permit only the bounded loopback Web
-  adapter and its small replay/history/compare loop over the existing offline product.
-
-## Phase 1 Exit Criteria
-
-- Historical inputs enforce point-in-time visibility and deterministic identity.
-- `RunManifest v2` binds installed provenance, one strict scenario, one instrument specification,
-  one settlement currency, initial cash, data, strategy, limits, and seed lineage.
-- `ea backtest validate`, `run`, and `resume` execute from an installed wheel outside a Git checkout.
-- `always-flat-v1` and `bounded-long-v1` run through portfolio/risk, matcher, ledger, audit, and a
-  successful terminal path without look-ahead or duplicate economic mutation.
-- Supported interruption recovery is economically and audit-equivalent to uninterrupted execution.
-- Reconciliation, ledger, journal, manifest, or scenario conflicts detect, audit, report, and stop;
-  they never produce a successful terminal state or success report.
-- `BacktestReportV1` emits canonical JSON and text; exact-run regeneration is byte-identical and
-  independent runs expose a stable semantic outcome digest.
-- Required ADRs, STATUS, Issues, tests, and CI agree; no critical decision survives only in comments.
-- Full product acceptance passes on merged `main`; the Human Product Owner has published the fixed
-  accepted artifact as the `v0.2.0` GitHub prerelease while retaining the package-registry and
-  deployment prohibitions.
+This historical exit is complete. The release does not authorize later phases automatically.
+Broker/exchange writes, real funds, external credentials, production deployment, automatic
+reconciliation correction and arbitrary instruction-level recovery were outside that slice.
 
 ## Phase 1.1 — Reconciliation and Recovery Expansion
 
-Phase 1.1 may begin after the offline v0.2.0 product is accepted. It owns the superseded
-#76/#97/#98/#99 product scope: explicit reconciliation adjustment authorization, ancestry repair,
-additional observation/fact combinations, and broader recovery matrices. It may not weaken the
-Phase 1 fail-closed product boundary or expose live/external writes. It remains unactivated and
-requires a separate Product Owner decision.
+The former expansion under #125 is closed not-planned. Broader adjustment/ancestry repair and
+recovery matrices need a new bounded Issue and explicit owner priority; old unchecked plans do
+not reactivate them. Preserve the existing fail-closed authorities.
 
-## Phase 2 Entry Gate
+## Phase 2 — Research and Validation
 
-Phase 2 may start only after every Phase 1 Exit Criterion is true and `v0.2.0` exists. Open Phase 1
-debt cannot be relabelled as Phase 2 work to bypass this gate.
+Phase 2 concerns richer data/version evidence, execution assumptions, out-of-sample evaluation,
+experiment analysis and authoring assistance. The `v0.2.0` prerelease alone authorizes none of it;
+bounded Issues/ADRs have since delivered specific capabilities listed in [STATUS](STATUS.md).
+Do not reopen completed strategy packages, data registration, Candidate, trade analytics or AI
+integration as future prerequisites merely because an older roadmap listed them that way.
 
-The existence of the `v0.2.0` prerelease does not itself activate Phase 2; no Phase 2 work is
-authorized by the release decision.
-
-Phase 2 adds serious backtest research capabilities: realistic fees/slippage/latency, out-of-sample
-validation, walk-forward evaluation, experiment tracking, and richer data/version evidence.
-
-## Research Foundation and commercial workflow
-
-EA's product direction is an AI-native quantitative R&D and strategy promotion system, with
-Idea → Evidence-ready Candidate time and cost as its commercial north star. Issue #182 delivers
-SCHEMA_DRIVEN_STRATEGY_V1: a versioned built-in contract, preserved V1 identity, Scenario V2,
-and two real research strategies across the bounded Web/holdout loop. This is the first
-Research Foundation slice, not activation of all Phase 2 capabilities.
-
-Future dependency direction (not delivered or authorized by this slice):
-Research Foundation → Local Strategy Package → Dataset Registry → Candidate → Agent Research Tools.
-AI strategy generation, external plugins/packages, automatic selection and paper/live remain absent.
-
-## Research Validation
-
-Issue #200 enters the bounded Research Validation phase with repeated full long-only round trips,
-identity-bound limits, Local Package V3 and formal Report/Path V3 evidence through the existing
-Web/Batch/Comparison/Holdout loop. Captured real OHLCV and a stateful MA crossover are the reference
-acceptance path. Candidate, optimizer, general multi-position trading and Paper/Live stay deferred.
-Trade Analytics V1 is the next recommended decision, not an authorization to start it.
+Further research work needs a concrete user outcome and acceptance criteria. Walk-forward
+analysis, general optimization, broader strategy semantics and an untrusted-code host are not
+implied by the current bounded research loop. A small dataset or passing example demonstrates
+workflow, not generalization, robustness or profitability.
 
 ## Phase 3 — Paper Trading
 
-Entry: Phase 2 evidence demonstrates credible deterministic research semantics. Purpose: connect
-real or simulated market feeds while reusing OMS, risk, reconciliation, and monitoring boundaries;
-risk bypass remains impossible.
+Purpose: operate simulated or external feeds while reusing order, risk, reconciliation and
+monitoring boundaries; risk bypass remains impossible. Mac-local simulated Paper is already
+available under [ADR 0049](adr/0049-explicit-local-paper-profile.md). This does not establish an
+external Paper provider or account connection.
+
+[Personal Production V1](personal-production-v1.md) owns the existing maturity-gate definitions.
+PPV identifiers name capabilities, not execution order. RC freeze and the 72-hour/7-day soak remain
+separate acceptance work; VPS is not a desktop development prerequisite. Follow the existing
+operator tools and preserve running services and evidence.
 
 ## Phase 4 — Small Live Trading
 
-Entry: paper operation is stable and explicitly approved. Purpose: one broker/exchange, low
-frequency, small capital, strict limits, kill switch, reconciliation, secret isolation, and
-operational runbooks.
+Entry requires stable, evidenced Paper operation and explicit Human Product Owner authorization.
+Scope would be one broker/exchange, low frequency, small capital, strict limits, kill switch,
+reconciliation, secret isolation and operational runbooks. Live remains unavailable; this roadmap
+is not authorization to implement or activate it.
 
 ## Phase 5 — Small-scale Production
 
-Entry: small live operation has durable recovery and operational evidence. Purpose: multi-strategy
-and multi-environment operation, monitoring/alerts, periodic reports, backup, and deployment
-discipline without weakening safety contracts.
-
-## EA Personal Production V1 — bounded planning
-
-[Personal Production V1](personal-production-v1.md) records the inspected main capabilities,
-remaining work and the maturity-gate execution order (GATE M1 .. M6) for one
-strategy/server/account. PPV numbering identifies capability, not execution order; PPV-01 .. PPV-11
-are delivered at their repository boundaries, and GATE M1 (PPV-12/13/14 crash-safe Paper) is
-SATISFIED. VPS is not a product-development prerequisite. This planning does not activate Paper,
-Live, deployment or the broader Phase 5 scope; the crash-safe Mac-local simulated Paper capability
-delivered through GATE M1 remains the current boundary.
+Entry requires durable small-live recovery and operational evidence. Scope may include multiple
+strategies/environments, monitoring, backup and deployment discipline without weakening safety.
+Each expansion requires a bounded product decision; no automated promotion or release is implied.

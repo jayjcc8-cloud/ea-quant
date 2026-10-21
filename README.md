@@ -72,4 +72,4 @@ release. Nothing here changes package metadata, tags or publication. No real-tim
 robustness, profit, hosted-service or real-money trading claim is made.
 
 [STATUS](docs/STATUS.md) · [Contributing](CONTRIBUTING.md) ·
-[Workflow](docs/governance/WORKFLOW.md) · [Historical capability evidence](docs/research-first-release.md)
+[Workflow](docs/governance/WORKFLOW.md) · [Desktop release evidence](docs/research-first-release.md)
