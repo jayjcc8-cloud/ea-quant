@@ -75,6 +75,34 @@ Frontend lint, types, unit tests and build run for Web/Node/CI changes. Release 
 run `full`; T2/T3 retain the exact-SHA candidate-full workflow. T0/T1 do not need it merely to
 prove more process.
 
+Two native path-driven jobs extend that routing without changing existing job IDs or the shared
+E2E policy:
+
+- `rust_core` runs on `ubuntu-latest` when `crates/quine-core/**` (non-Markdown), the root
+  `Cargo.toml`/`Cargo.lock`, `rust-toolchain*`, `.cargo/**`, `scripts/build_desktop.py`,
+  `scripts/ci_routes.py` or `.github/workflows/ci.yml` changes. It installs a minimal stable Rust
+  toolchain and runs
+  `cargo test --locked --manifest-path crates/quine-core/Cargo.toml --lib --test store --test cli --test canonical_identity`.
+  These are the unit, store, CLI and canonical-identity contract tests. `tests/stage2.rs` is the
+  real-engine Python journey and is deliberately excluded; this job does not claim to run the
+  complete Rust integration suite and needs no Python environment.
+- `macos_shell` runs on the official `macos-15` Apple Silicon standard runner when
+  `apps/desktop/**` (non-Markdown), the root Rust inputs above, `scripts/build_desktop.py`,
+  `scripts/ci_routes.py` or `.github/workflows/ci.yml` changes. It asserts `uname -m` is `arm64`,
+  installs minimal stable Rust and runs
+  `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`. This is a compile-only
+  check: it does not build an installable package, launch the app, link the Python runtime or sign
+  anything. The runner label table is authoritative:
+  <https://docs.github.com/en/actions/reference/runners/github-hosted-runners> lists `macos-15` as
+  arm64 and the Intel label separately as `macos-15-intel`.
+
+Both jobs use paths under `.local/` for cargo targets, set a bounded timeout, keep
+`persist-credentials: false` with the same exact event checkout as the other jobs, and fail rather
+than continue on error. Markdown, `docs/**`, ordinary `src/ea/**` Python, `apps/web/**` React,
+plain Python tests and other existing workflows do not trigger them. Unknown paths, an empty diff
+and unsupported Git statuses route conservatively to both checks. No cargo cache action, artifact
+hash, packaging, signing, publication, second frontend build or second E2E suite is added.
+
 Shared component, business and API regressions run once according to risk. Preserve existing job
 IDs and safety/economic assertions. The installed desktop is the final product acceptance object
 for native lifecycle, workspace ownership, WebView restrictions, focus/keyboard/IME and text

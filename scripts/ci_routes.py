@@ -21,6 +21,8 @@ class Routes:
     web: bool = False
     web_e2e: bool = False
     ci: bool = False
+    rust_core: bool = False
+    macos_shell: bool = False
 
 
 def installed_python_modules(source_root: Path) -> set[str] | None:
@@ -111,7 +113,7 @@ def classify(
 ) -> Routes:
     """Keep unknown paths on the conservative route, including new build inputs."""
     if not paths:
-        return Routes(False, True, True, True, True, True)
+        return Routes(False, True, True, True, True, True, True, True)
 
     docs_only = True
     governance = False
@@ -119,11 +121,16 @@ def classify(
     web = False
     web_e2e = False
     ci = False
+    rust_core = False
+    macos_shell = False
     installed_modules: set[str] | None = None
     for path in paths:
+        markdown = path.lower().endswith(".md")
         if path.startswith(".github/workflows/") or path == "scripts/ci_routes.py":
             docs_only = False
             governance = python = web = web_e2e = ci = True
+            if path in {".github/workflows/ci.yml", "scripts/ci_routes.py"}:
+                rust_core = macos_shell = True
         elif path.startswith("apps/web/") or path in {
             "package.json",
             "package-lock.json",
@@ -131,6 +138,16 @@ def classify(
         }:
             docs_only = False
             web = web_e2e = True
+        elif path.startswith("crates/quine-core/"):
+            # Keep the existing conservative fallback for these paths; the new
+            # flag only narrows which native build a change actually compiles.
+            docs_only = False
+            governance = python = web = web_e2e = True
+            rust_core = rust_core or not markdown
+        elif path.startswith("apps/desktop/"):
+            docs_only = False
+            governance = python = web = web_e2e = True
+            macos_shell = macos_shell or not markdown
         elif path.startswith("src/"):
             docs_only = False
             python = True
@@ -153,6 +170,8 @@ def classify(
         elif path.startswith("scripts/"):
             docs_only = False
             python = web_e2e = True
+            if path == "scripts/build_desktop.py":
+                rust_core = macos_shell = True
         elif path.startswith("tests/"):
             docs_only = False
             python = True
@@ -170,6 +189,13 @@ def classify(
         elif path.startswith("docs/fixtures/"):
             docs_only = False
             governance = python = True
+        elif path in {"Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml"} or (
+            path.startswith(".cargo/")
+        ):
+            docs_only = False
+            governance = python = web = web_e2e = True
+            if not markdown:
+                rust_core = macos_shell = True
         elif (
             path.startswith(("docs/", ".governance/", ".github/ISSUE_TEMPLATE/"))
             or path in {"README.md", "AGENTS.md", "CONTRIBUTING.md"}
@@ -179,12 +205,14 @@ def classify(
         else:
             docs_only = False
             governance = python = web = web_e2e = True
+            if not markdown:
+                rust_core = macos_shell = True
 
     if candidate:
         # The full profile already owns Python checks. Candidate frontend remains
         # path-aware; release candidates always build the frontend as a release gate.
-        return Routes(False, False, False, web or release, web_e2e, False)
-    return Routes(docs_only, governance, python, web, web_e2e, ci)
+        return Routes(False, False, False, web or release, web_e2e, False, rust_core, macos_shell)
+    return Routes(docs_only, governance, python, web, web_e2e, ci, rust_core, macos_shell)
 
 
 def parse_change_statuses(raw: bytes) -> dict[str, str]:
@@ -213,7 +241,7 @@ def main() -> int:
     ):
         parser.error("changed paths must be repository relative")
     if any(status not in {"A", "M", "D"} for status in statuses.values()):
-        routes = Routes(False, True, True, True, True, True)
+        routes = Routes(False, True, True, True, True, True, True, True)
     else:
         added_paths = frozenset(path for path, status in statuses.items() if status == "A")
         routes = classify(
