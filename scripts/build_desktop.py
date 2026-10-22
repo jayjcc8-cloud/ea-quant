@@ -12,6 +12,7 @@ import os
 import platform
 import shutil
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,6 +23,36 @@ RUNTIME = OUT / "runtime"
 
 def run(*args: str | Path, cwd: Path = ROOT) -> None:
     subprocess.run([str(arg) for arg in args], cwd=cwd, check=True, env=os.environ)
+
+
+def select_wheel(directory: Path) -> Path:
+    wheels = sorted(directory.glob("ea_quant-*.whl"))
+    if len(wheels) != 1:
+        raise SystemExit(
+            f"Expected exactly one ea_quant wheel in {directory}, found {len(wheels)}."
+        )
+    return wheels[0]
+
+
+def build_and_install_wheel(out: Path, python: Path) -> None:
+    # A directory unique to this invocation: no earlier or concurrent build can be selected.
+    out.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="build-wheels-", dir=out) as temporary:
+        wheel_dir = Path(temporary)
+        run("uv", "build", "--wheel", "--out-dir", wheel_dir)
+        wheel = select_wheel(wheel_dir)
+        run(
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            python,
+            "--break-system-packages",
+            "--reinstall-package",
+            "ea-quant",
+            "--no-deps",
+            wheel,
+        )
 
 
 def main() -> None:
@@ -75,20 +106,7 @@ def main() -> None:
         "-r",
         requirements,
     )
-    run("uv", "build", "--wheel", "--out-dir", OUT / "wheels")
-    wheel = next((OUT / "wheels").glob("ea_quant-*.whl"))
-    run(
-        "uv",
-        "pip",
-        "install",
-        "--python",
-        python,
-        "--break-system-packages",
-        "--reinstall-package",
-        "ea-quant",
-        "--no-deps",
-        wheel,
-    )
+    build_and_install_wheel(OUT, python)
     # Build-only console scripts carry absolute shebangs. Keep them outside the
     # payload; the app and core use python -I -B -m and need no installed CLI.
     omitted = OUT / "omitted-build-tools"

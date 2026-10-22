@@ -64,6 +64,50 @@ it('unknown manual submission stays blocked across remount and is resolved by re
   expect(save).toHaveBeenCalledTimes(1)
 })
 
+it('storage failure before sending keeps values editable and cancel available without an API call', async () => {
+  const save = vi.fn()
+  render(<DraftEditor api={makeApi({ saveUserStrategyDraft: save })} strategy={strategy} changed={() => {}} />)
+  const cash = await screen.findByLabelText(/初始资金/) as HTMLInputElement
+  fireEvent.change(cash, { target: { value: '12000' } })
+  const write = vi.spyOn(Object.getPrototypeOf(sessionStorage) as Storage, 'setItem')
+    .mockImplementation(() => { throw new DOMException('quota', 'QuotaExceededError') })
+  try {
+    fireEvent.click(screen.getByText('保存草稿'))
+    await screen.findByText(/本次未发送/)
+    expect(write).toHaveBeenCalled()
+    expect(save).not.toHaveBeenCalled()
+    expect(cash.value).toBe('12000')
+    expect((screen.getByText('取消编辑') as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.change(cash, { target: { value: '12100' } })
+    expect(cash.value).toBe('12100')
+    fireEvent.click(screen.getByText('取消编辑'))
+    expect(cash.value).toBe('10000')
+    expect(save).not.toHaveBeenCalled()
+  } finally { write.mockRestore() }
+})
+
+it('restored storage lets the user explicitly save the preserved draft exactly once', async () => {
+  let request!: SaveDraftRequest
+  const save = vi.fn(async (_id: string, input: SaveDraftRequest) => { request = input; return saved(input) })
+  const changed = vi.fn()
+  render(<DraftEditor api={makeApi({ saveUserStrategyDraft: save })} strategy={strategy} changed={changed} />)
+  fireEvent.change(await screen.findByLabelText(/初始资金/), { target: { value: '12000' } })
+  const write = vi.spyOn(Object.getPrototypeOf(sessionStorage) as Storage, 'setItem')
+    .mockImplementation(() => { throw new DOMException('quota', 'QuotaExceededError') })
+  try {
+    fireEvent.click(screen.getByText('保存草稿'))
+    await screen.findByText(/本次未发送/)
+    expect(write).toHaveBeenCalled()
+    expect(save).not.toHaveBeenCalled()
+  } finally { write.mockRestore() }
+  fireEvent.click(screen.getByText('保存草稿'))
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(1))
+  expect(save).toHaveBeenCalledTimes(1)
+  expect(request.values).toEqual({ initial_cash: '12000' })
+  expect(screen.getByText(/已保存为修订 2/)).toBeTruthy()
+  expect(sessionStorage.getItem('quine.manual-draft.a')).toBeNull()
+})
+
 it('manual late response does not call the previous page owner', async () => {
   let resolve!: (value: UserStrategy) => void; let request!: SaveDraftRequest
   const changed = vi.fn()

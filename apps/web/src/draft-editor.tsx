@@ -83,6 +83,8 @@ export function DraftEditor({ api, strategy, changed }: {
     const request = { operation_id: `manual-${crypto.randomUUID()}`, expected_revision: buffer.revision, values }
     inFlight.current = true; setBusy(true); setError(null)
     if (!persist({ ...buffer, pending: request })) {
+      // No request was sent: keep the editable draft instead of an unresolvable pending identity.
+      setBuffer(buffer)
       inFlight.current = false; setBusy(false)
       setError('无法保留提交身份，本次未发送。请恢复本地存储后再保存。')
       return
