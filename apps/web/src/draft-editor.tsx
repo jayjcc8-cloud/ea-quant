@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ApiAdapter } from './app'
 import { DraftEditorForm } from './draft-editor-form'
+import { StorageFailureGuard } from './storage-failure-guard'
 import { UserStrategyRequestError, type DraftContract, type SaveDraftRequest, type UserStrategy } from './user-strategies-api'
 
 type Buffer = { revision: number; values: Record<string, string>; pending?: SaveDraftRequest }
@@ -41,18 +42,6 @@ export function DraftEditor({ api, strategy, changed }: {
       setRetained(true); return true
     } catch { setRetained(false); return false }
   }
-  useEffect(() => {
-    if (!buffer || retained) return
-    const unload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
-    const leave = (event: MouseEvent) => {
-      if ((event.target as Element).closest?.('a[href]') && !window.confirm('本地缓冲不可用，离开将丢失未保存输入。放弃并离开？')) {
-        event.preventDefault(); event.stopPropagation()
-      }
-    }
-    window.addEventListener('beforeunload', unload)
-    document.addEventListener('click', leave, true)
-    return () => { window.removeEventListener('beforeunload', unload); document.removeEventListener('click', leave, true) }
-  }, [buffer, retained])
   const finish = (next: UserStrategy, operation: string) => {
     if (next.user_strategy_id !== id || !next.changes.some(item => item.operation_id === operation && item.kind === 'manual')) {
       throw new Error('保存结果未包含本次修订，请核对后继续。')
@@ -108,5 +97,6 @@ export function DraftEditor({ api, strategy, changed }: {
       onChange={(path, value) => { persist({ revision: buffer?.revision ?? strategy.draft.revision, values: { ...buffer?.values, [path]: value } }); setNotice(null); setError(null) }}
       onSave={() => { void save() }} onCancel={() => { persist(null); setError(null); setNotice('已取消编辑，未写入修订。') }} />
     {buffer?.pending && <button type="button" disabled={busy} onClick={() => { void reconcile() }}>核对保存结果</button>}
+    <StorageFailureGuard active={!retained && Boolean(buffer)} message="本地缓冲不可用，离开将丢失未保存输入。" />
   </>
 }
