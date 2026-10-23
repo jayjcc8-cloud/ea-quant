@@ -4,6 +4,7 @@ import { App } from './app'
 import { startAppearance } from './appearance'
 import { radianApi } from './radian-api'
 import './styles.css'
+import './workbench.css'
 
 // The saved appearance is applied to the root element before the first paint, so a
 // refresh comes back in the theme the user chose instead of flashing the default

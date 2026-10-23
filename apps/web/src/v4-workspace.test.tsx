@@ -11,6 +11,32 @@ const record: UserStrategy = { schema: 'ea.user-strategy.v1', user_strategy_id: 
 const scriptedAdapter = () => ({ ...baseAdapter(), listUserStrategies: async () => [record], getUserStrategy: async () => record, saveUserStrategyDraft: vi.fn() })
 beforeEach(() => { sessionStorage.clear(); localStorage.clear() })
 afterEach(cleanup)
+it('clears the exchange selection without changing research or dispatching work', async () => {
+  window.history.replaceState({}, '', '/strategies')
+  const user = userEvent.setup()
+  const api = scriptedAdapter()
+  render(<App api={api} />)
+  await screen.findByRole('link', { name: '均线研究' })
+  await user.click(screen.getByRole('button', { name: 'Binance 未接入' }))
+  await user.click(screen.getByRole('button', { name: '全部交易所' }))
+  expect(sessionStorage.getItem('quine.platform-filter')).toBeNull()
+  expect(screen.getByRole('button', { name: '全部交易所' }).getAttribute('aria-pressed')).toBe('true')
+  expect(screen.getByRole('link', { name: '均线研究' })).toBeTruthy()
+  expect(api.saveUserStrategyDraft).not.toHaveBeenCalled()
+})
+
+it('opens the real creation form from the assistant without creating or calling a model', async () => {
+  window.history.replaceState({}, '', '/strategies')
+  const user = userEvent.setup()
+  const create = vi.fn()
+  render(<App api={{ ...scriptedAdapter(), listUserStrategies: async () => [], createUserStrategy: create }} />)
+  await screen.findByText('还没有策略。')
+  await user.click(within(screen.getByRole('region', { name: 'AI 协作' })).getByRole('link', { name: /梳理研究思路/ }))
+  expect(await screen.findByRole('textbox', { name: '策略名称' })).toBeTruthy()
+  expect(document.activeElement).toBe(screen.getByRole('textbox', { name: '意图' }))
+  expect(create).not.toHaveBeenCalled()
+})
+
 it('keeps management independent and returns to the actual report', async () => {
   window.history.replaceState({}, '', '/strategies/us-1?tab=experiments&report=trades')
   const user = userEvent.setup()

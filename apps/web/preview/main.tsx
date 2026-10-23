@@ -16,6 +16,7 @@ import { createRoot } from 'react-dom/client'
 import { App, type ApiAdapter, type BacktestParameters } from '../src/app'
 import { ResearchRequestError, type PluginSelection, type ResearchTask } from '../src/research-api'
 import '../src/styles.css'
+import '../src/workbench.css'
 import './preview.css'
 import {
   STATES, analytics, batch, cancelTask, equityPath, holdout, job, report, scenario, settings,

@@ -1,4 +1,5 @@
 import { FrozenReportFacts, FrozenReportMetrics, FrozenReportDetails, ReportTrades } from './frozen-report'
+import { WorkbenchIcon } from './workbench-icon'
 import { platformNames, usePlatform } from './platform-context'
 import { SourceLink as Link } from './workspace-navigation'
 import { ResearchComposer, type ComposerCommand } from './research-composer'
@@ -434,7 +435,7 @@ function CreateStrategy({ api, created, value, update, close }: {
     <form onSubmit={submit}>
       <div className="field">
         <label htmlFor="strategy-intent">意图</label>
-        <textarea id="strategy-intent" value={intent} maxLength={2000} required rows={2}
+        <textarea id="strategy-intent" value={intent} maxLength={2000} required rows={2} autoFocus
           onChange={event => update({ name, intent: event.target.value })} />
       </div>
       <div className="field">
@@ -1847,10 +1848,10 @@ function ChatPanel({ api, strategy, strategies, changed, modelSendBlock, modelSt
     : task?.stop_reason ? stopLabels[task.stop_reason] ?? '已停止' : '准备就绪'
   return <section aria-label="AI 协作" className="strategy-panel strategy-chat">
     <header className="chat-head agent-identity">
-      <span className="agent-mark" aria-hidden="true">Q</span>
+      <span className="agent-mark"><WorkbenchIcon name="spark" /></span>
       <div><h2>QUINE <span>研究助手</span></h2><p>{modelName}</p></div>
     </header>
-    <div className="agent-object"><span aria-hidden="true">⌁</span><strong title={strategy.name}>{strategy.name}</strong><span>草稿 v{strategy.draft.revision}</span></div>
+    <div className="agent-object"><WorkbenchIcon name="draft" /><div><small>当前研究</small><strong title={strategy.name}>{strategy.name}</strong></div><span>草稿 v{strategy.draft.revision}</span></div>
     <nav className="agent-context" aria-label="AI 当前上下文">
       <Link onClick={()=>showWorkspace('work')} to={`/strategies/${encodeURIComponent(strategy.user_strategy_id)}?${new URLSearchParams({...Object.fromEntries(params),tab:'strategy'})}`}>草稿 v{strategy.draft.revision}</Link>
       {a && <Link onClick={()=>showWorkspace('work')} to={`/strategies/${encodeURIComponent(strategy.user_strategy_id)}?tab=experiments&evidence_a=${encodeURIComponent(a.job_id!)}`}>证据 A · v{a.payload.draft_revision}</Link>}
@@ -1970,9 +1971,22 @@ function EmptyChat({ note, live = false }: { note?: string; live?: boolean }) {
     requestAnimationFrame(() => document.querySelector<HTMLElement>('input[aria-label="搜索研究"]')?.focus())
   }
   return <section aria-label="AI 协作" className="strategy-panel strategy-chat strategy-chat-empty">
-    <header className="chat-head"><h2><span aria-hidden="true">✦ </span>AI 研究助手</h2></header>
+    <header className="chat-head agent-identity"><span className="agent-mark"><WorkbenchIcon name="spark" /></span><h2>QUINE <span>研究助手</span></h2></header>
     {note ? <p className="chat-empty-status" role={live ? 'status' : undefined} aria-live={live ? 'polite' : undefined}>{note}</p>
-      : <div className="chat-empty-start"><span className="chat-empty-symbol" aria-hidden="true">✦</span><h3>从一条研究开始</h3><p>选择或新建研究，继续它自己的对话。</p><div className="chat-empty-actions"><button type="button" onClick={reveal}>选择研究</button></div></div>}
+      : <>
+        <div className="agent-object"><WorkbenchIcon name="layers" /><div><small>当前上下文</small><strong>研究工作区</strong></div><span>未选择研究</span></div>
+        <div className="chat-empty-start">
+          <span className="chat-empty-symbol"><WorkbenchIcon name="spark" /></span>
+          <h3>从问题开始，<br />循证前进。</h3>
+          <p>选择或新建研究，继续它自己的对话。让 AI 帮你梳理思路、审阅草稿和解读证据。</p>
+          <div className="assistant-start-actions">
+            <Link to="/strategies" state={{ createStrategy: true }} onClick={() => show('work')}><WorkbenchIcon name="idea" /><span><strong>梳理研究思路</strong><small>先保存想法，再逐步验证</small></span><WorkbenchIcon name="arrow" /></Link>
+            <Link to="/resources/data"><WorkbenchIcon name="evidence" /><span><strong>查看数据与模型</strong><small>准备研究所需的输入</small></span><WorkbenchIcon name="arrow" /></Link>
+          </div>
+          <div className="chat-empty-actions"><button type="button" onClick={reveal}>选择研究</button><span>继续已有的对话</span></div>
+        </div>
+        <footer className="assistant-boundary"><WorkbenchIcon name="draft" /><p>AI 建议由你审阅。<br />每次实验，都需要你的确认。</p></footer>
+      </>}
   </section>
 }
 
@@ -2694,7 +2708,7 @@ function StrategyTable({ api, strategies, selectedId, select, filtered = false }
 }) {
   return <nav aria-label="策略列表" className="strategy-list">
     {strategies.length === 0
-      ? <p className="strategy-empty">{filtered ? '当前范围没有研究。可调整筛选，或新建研究。' : '还没有策略。'}</p>
+      ? <div className="research-empty-state"><WorkbenchIcon name={filtered ? 'search' : 'idea'} /><h2>{filtered ? '没有匹配的研究' : '给你的下一个想法，留一个位置。'}</h2><p className="strategy-empty">{filtered ? '当前范围没有研究。可调整筛选，或新建研究。' : '还没有策略。'}</p>{!filtered && <p>点击「新建研究」保存想法，再绑定数据、完善草稿。</p>}</div>
       : <table className="strategy-table">
           <thead><tr>
             <th scope="col">研究名称</th>
@@ -2982,8 +2996,17 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
               <span aria-hidden="true">+</span>新建研究
             </button>}
       </header>}
-
-
+      {!userStrategyId && <>
+        <p className="workbench-intro">从一个想法，到一份可复核的证据。</p>
+        <ol className="research-journey" aria-label="研究流程">
+          {([
+            ['idea', '想法', '提出问题与假设'],
+            ['draft', '策略草稿', '把思路变成规则'],
+            ['experiment', '实验', '确认输入后运行'],
+            ['evidence', '证据', '复核结果与局限'],
+          ] as const).map(([icon, title, description]) => <li key={icon}><WorkbenchIcon name={icon} /><div><strong>{title}</strong><span>{description}</span></div></li>)}
+        </ol>
+      </>}
       {!userStrategyId && <div className="research-list-controls"><div className="research-scope-row"><div className="scope-switch" role="group" aria-label="研究范围"><button aria-pressed={scope === 'all'} onClick={() => filter({ scope: 'all' })}>全部研究</button><button aria-pressed={scope === 'current'} onClick={() => filter({ scope: 'current' })}>当前交易所</button></div><p className="muted">{scope === 'current' ? platform ? `${platformNames[platform]} · 当前没有归属此交易所的研究。历史未归属研究仍在全部研究。` : '请先从侧栏选择交易所。' : '切换交易所仅改变筛选'}</p></div><div className="list-search"><input type="search" aria-label="搜索研究" placeholder="搜索研究名称、标的或备注" value={search} onChange={e => filter({ search: e.target.value })} /><select aria-label="研究排序" value={sort} onChange={e => filter({ sort: e.target.value })}><option value="updated">最近更新</option><option value="name">名称</option></select></div></div>}
       {!userStrategyId && (listState === 'reading'
         ? <p className="muted" role="status" aria-live="polite">正在读取策略…</p>

@@ -1,4 +1,5 @@
 import { PlatformContext, platformNames, savedPlatform, type PlatformId } from './platform-context'
+import { WorkbenchIcon } from './workbench-icon'
 import { LiveWorkspace } from './live-workspace'
 import { PlatformWorkspace } from './platform-workspace'
 import { SourceLink as Link, WorkspaceNavigation } from './workspace-navigation'
@@ -568,7 +569,7 @@ function Shell({ api }: { api: ApiAdapter }) {
   }
   const management = /^\/(resources|settings|platform|data|extensions|events)(\/|$)/.test(location.pathname)
   const split = /^\/(strategies|runs|live)(\/|$)/.test(location.pathname) || /^\/backtests\/[^/]+$/.test(location.pathname)
-  const chrome = <><div className="workspace-commandbar"><button className="sidebar-toggle" aria-label="切换侧栏" aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}>☰</button>{!management && <nav aria-label="主导航" className="business-navigation">
+  const chrome = <><div className="workspace-commandbar"><button className="sidebar-toggle" aria-label="切换侧栏" aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}><WorkbenchIcon name="panel" /></button>{!management && <nav aria-label="主导航" className="business-navigation">
     <NavLink to={primaryPages['/strategies'] ?? '/strategies'} className={() => /^\/(strategies|research|candidates|holdouts)(\/|$)/.test(location.pathname) ? 'active' : undefined}>研究</NavLink><NavLink to={primaryPages['/runs'] ?? '/runs'}>模拟运行</NavLink><NavLink to={primaryPages['/live'] ?? '/live'}>实盘运行</NavLink><NavLink to={primaryPages['/backtests'] ?? '/backtests'}>回测记录</NavLink>
   </nav>}</div><WorkspaceNavigation /></>
   const select = (id: PlatformId | null) => {
@@ -578,8 +579,9 @@ function Shell({ api }: { api: ApiAdapter }) {
   return <PlatformContext value={{ platform, select }}><div className="app-shell" data-sidebar-open={sidebar} data-management={management}>
     <aside className="sidebar" aria-label="工作区侧栏">
       <Link className="brand" aria-label="QUINE" to="/strategies"><QuineMark /><span>QUINE</span></Link>
-
+      <p className="sidebar-workspace-label">本地研究工作区</p>
       <nav className="platform-navigation" aria-label="交易所筛选">
+        <button type="button" aria-label="全部交易所" aria-pressed={platform === null} onClick={() => select(null)}><span className="exchange-icon"><WorkbenchIcon name="layers" /></span><span>全部交易所</span></button>
         {(Object.keys(platformNames) as PlatformId[]).map(id => <button key={id} type="button" aria-label={`${platformNames[id]} 未接入`} aria-pressed={platform === id} onClick={() => select(id)}><span aria-hidden="true" className={`exchange-icon ${id}`}>{id === 'binance' ? <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="m12 1 4 4-4 4-4-4Zm-7 7 4 4-4 4-4-4Zm14 0 4 4-4 4-4-4Zm-7 7 4 4-4 4-4-4Zm0-6 3 3-3 3-3-3Z"/></svg> : <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M1 1h7v7H1Zm15 0h7v7h-7ZM8.5 8.5h7v7h-7ZM1 16h7v7H1Zm15 0h7v7h-7Z"/></svg>}</span><span>{platformNames[id]}</span><small>未接入</small></button>)}
       </nav>
 
