@@ -294,7 +294,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   await expect(page.getByText(`已从修订 ${boundRevision} 启动实验 li-1`)).toBeVisible()
   await expect(experimentPanel.locator('p.muted', { hasText: /一次运行只是一个冻结的结果，不是已经完成的研究/ })).toBeVisible()
   await expect(experimentPanel.getByRole('link', { name: '查看这次实验报告' }))
-    .toHaveAttribute('href', `/backtests/${experiment.job_id}?research=${firstId}`)
+    .toHaveAttribute('href', `/strategies/${firstId}?tab=experiments&evidence_a=${experiment.job_id}`)
 
   // The run's own outcome is the run's own, read from its persisted record until
   // it reaches a state its owner will not move on its own.
@@ -409,7 +409,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   await expect(rereadControls).toHaveAttribute('open', '')
   await expect(page.getByText(`已从修订 ${boundRevision} 启动实验 li-1`)).toBeVisible()
   await expect(page.getByRole('region', { name: '实验' }).getByRole('link', { name: '查看这次实验报告' }))
-    .toHaveAttribute('href', `/backtests/${experiment.job_id}?research=${firstId}`)
+    .toHaveAttribute('href', `/strategies/${firstId}?tab=experiments&evidence_a=${experiment.job_id}`)
   const reread = await read(page, firstId)
   expect(reread.experiments).toEqual(launched.experiments)
   expect(reread.draft.revision).toBe(boundRevision)

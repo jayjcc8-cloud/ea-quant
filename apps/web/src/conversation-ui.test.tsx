@@ -1,3 +1,7 @@
+import { useState } from 'react'
+import { BrowserRouter } from 'react-router-dom'
+import { ReportAssistant } from './user-strategies'
+import type { ResearchReference } from './research-workbench-api'
 import { researchCollection } from '../preview/research-fixtures'
 /**
  * The conversation panel's own contract, over a scripted stream.
@@ -833,4 +837,35 @@ it('sends with Enter without a numeric form and keeps Shift+Enter as a newline',
   expect(sent[0].approved).toBeUndefined()
   expect(within(panel).getByRole('button',{name:'停止生成'})).toBeTruthy()
   stream.end()
+})
+
+
+it('keeps a report conversation stream alive when a state event updates its source reference', async () => {
+  const stream = queue()
+  const value = strategy({ experiments: [{
+    launch_intent_id: INTENT, request_id: 'request-1', payload_sha256: 'a'.repeat(64),
+    payload: { draft_revision: 1, scenario_id: 'bounded-long.yaml', parameters: {} },
+    task_id: 'task-1', job_id: 'job-1', status: 'created', created_at: '2026-10-06T10:02:00Z',
+  }] })
+  const api = scripted({ strategies: [value], conversation: () => conversation(), send: async function* () {
+    yield* stream.source()
+    throw new UserStrategyRequestError('request_failed','连接已中断')
+  } })
+  api.getBacktest = async () => ({ job_id:'job-1',engine_run_id:'run-1',status:'succeeded',report_ready:true } as BacktestJob)
+  api.getReport = async () => ({run_id:'run-1'} as BacktestReport)
+  function Report() {
+    const [sources,setSources] = useState<ResearchReference[]>([value])
+    return <BrowserRouter><ReportAssistant api={api} jobId="job-1" sources={sources} changed={next=>setSources([next])} /></BrowserRouter>
+  }
+  render(<Report />)
+  await ask(userEvent.setup(),'解读已冻结的证据')
+  const composer = screen.getByLabelText('消息')
+  await act(async()=>{stream.push({kind:'state',strategy:{...value,updated_at:'2026-10-23'}})})
+  expect(signals[0].aborted).toBe(false)
+  expect(screen.getByLabelText('消息')).toBe(composer)
+  stream.push({kind:'text_delta',text:'后续解释仍然到达'})
+  expect(await screen.findByText('后续解释仍然到达')).toBeTruthy()
+  stream.end()
+  await screen.findByText('响应未确认', {exact:true})
+  expect((screen.getByRole('button',{name:'发送消息'}) as HTMLButtonElement).disabled).toBe(true)
 })

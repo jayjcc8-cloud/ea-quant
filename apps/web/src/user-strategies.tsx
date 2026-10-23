@@ -2943,7 +2943,7 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
   const failedFor = (id: string) => (message: string) => note(id, message)
 
   const changed = useCallback((value: UserStrategy) => {
-    setDetail({ id: value.user_strategy_id, value })
+    setDetail(previous => previous?.id === value.user_strategy_id ? { id: value.user_strategy_id, value } : previous)
     setNotes(currentNotes => {
       if (!(value.user_strategy_id in currentNotes)) return currentNotes
       const next = { ...currentNotes }
@@ -3088,19 +3088,19 @@ export function ReportAssistant({ api, jobId, sources, changed }: { api: ApiAdap
   }, [api])
   const records = (sources ?? []).flatMap(item => item.experiments.filter(experiment => experiment.job_id === jobId).map(() => item))
   const owner = records.length === 1 ? records[0].user_strategy_id : null
-  const [loaded, setLoaded] = useState<{api: ApiAdapter; sources: ResearchReference[] | null; id: string; value: UserStrategy | null; error?: string} | null>(null)
+  const [loaded, setLoaded] = useState<{api: ApiAdapter; id: string; value: UserStrategy | null; error?: string} | null>(null)
   useEffect(() => {
     let active = true
     if (owner) void (api.getUserStrategy ? api.getUserStrategy(owner) : Promise.reject(new Error('本客户端无法读取研究会话。')))
       .then(value => {
         if (value.user_strategy_id !== owner) throw new Error('读取到的研究与报告来源不一致。')
-        if (active) setLoaded({api,sources,id:owner,value})
-      }).catch(error => { if (active) setLoaded({api,sources,id:owner,value:null,error:explain(error)}) })
+        if (active) setLoaded({api,id:owner,value})
+      }).catch(error => { if (active) setLoaded({api,id:owner,value:null,error:explain(error)}) })
     return () => { active = false }
-  }, [api, owner, sources])
-  const observed = loaded?.id === owner && loaded.api === api && loaded.sources === sources ? loaded : null
+  }, [api, owner])
+  const observed = loaded?.id === owner && loaded.api === api ? loaded : null
   const strategy = observed?.value ?? null
   const selected = strategy?.model_profile_id ? model?.profiles?.find(profile => profile.id === strategy.model_profile_id) : model
-  return strategy ? <ChatPanel key={`${strategy.user_strategy_id}.${strategy.draft.revision}.${strategy.model_profile_id ?? ''}`} api={api} strategy={strategy} strategies={sources ?? []} changed={value => { setLoaded({api,sources,id:value.user_strategy_id,value}); changed(value) }} modelStatus={model} modelSendBlock={selected?.configured ? null : '模型未配置或状态不可读，请前往模型连接。'} completedReads={reads} completed={(_id, job, turn) => setReads(value => ({ ...value, [job]: turn }))} fixedEvidenceJobId={jobId} />
+  return strategy ? <ChatPanel key={`${strategy.user_strategy_id}.${strategy.draft.revision}.${strategy.model_profile_id ?? ''}`} api={api} strategy={strategy} strategies={sources ?? []} changed={value => { setLoaded({api,id:value.user_strategy_id,value}); changed(value) }} modelStatus={model} modelSendBlock={selected?.configured ? null : '模型未配置或状态不可读，请前往模型连接。'} completedReads={reads} completed={(_id, job, turn) => setReads(value => ({ ...value, [job]: turn }))} fixedEvidenceJobId={jobId} />
     : <div className="preview-assistant"><h2>QUINE 研究助手</h2><p>上下文：当前冻结报告</p><p>{!sources ? '正在读取报告的研究来源…' : owner ? observed?.error ? `研究会话读取失败：${observed.error}` : '正在读取来源研究的会话…' : '这份报告没有唯一可核对的研究会话。可独立阅读报告事实。'}</p><Link to="/strategies">前往研究</Link></div>
 }

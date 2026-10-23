@@ -53,3 +53,18 @@ it('keeps an exchange refusal beside its row and only retries on an explicit sav
   expect(alert.textContent).toContain('research changed')
   expect(assign).toHaveBeenCalledExactlyOnceWith(row.user_strategy_id,'okx',row.updated_at)
 })
+it('organizing another row leaves the selected research conversation mounted', async () => {
+  const { researchCollection } = await import('../preview/research-fixtures')
+  const a = {schema:'ea.user-strategy.v1' as const,user_strategy_id:row.user_strategy_id,name:row.name,intent:row.intent,created_at:row.updated_at,updated_at:row.updated_at,draft:{kind:'intent' as const,revision:1,scenario_id:null},history:[],messages:[],calls:[],proposals:[],changes:[],experiments:[]}
+  const b = {...a,user_strategy_id:'other',name:'另一项研究'}
+  const user = userEvent.setup()
+  render(<App api={{...scriptedAdapter(),listResearch:async query=>researchCollection([a,b],query),getUserStrategy:async id=>id===a.user_strategy_id?a:b,assignResearchExchange:async ()=>({...b,exchange_id:'okx'})}} />)
+  await user.click(await screen.findByRole('button',{name:`选择研究 ${a.name}`}))
+  const composer = await screen.findByLabelText('消息')
+  await user.click(screen.getByRole('button',{name:`整理研究 ${b.name}`}))
+  await user.selectOptions(screen.getByLabelText('研究归属'),'okx')
+  await user.click(screen.getByRole('button',{name:'保存归属'}))
+  await waitFor(()=>expect(screen.queryByRole('button',{name:'保存归属'})).toBeNull())
+  expect(screen.getByLabelText('消息')).toBe(composer)
+  expect(within(screen.getByRole('region',{name:'AI 协作'})).getByText(a.name,{exact:true})).toBeTruthy()
+})

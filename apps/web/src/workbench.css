@@ -299,7 +299,8 @@ table.strategy-table { border-radius: 9px; border-color: var(--line); }
 .research-experiment-status.running, .research-experiment-status.accepted { background: var(--notice); color: var(--accent); }
 .research-experiment-status.unknown { background: var(--danger-soft); color: var(--danger); }
 .research-row-updated { display: flex; align-items: start; gap: 6px; }
-.research-row-menu { margin-left: auto; border: 0; background: transparent; padding: 2px 5px; min-width: 28px; min-height: 28px; }
+.research-row-updated time { white-space: nowrap; font-size: 12px; }
+.strategy-workspace .research-row-menu { margin-left: auto; border: 0; background: transparent; padding: 0; width: 28px; min-width: 28px; min-height: 28px; flex: 0 0 28px; white-space: nowrap; }
 .research-row-organize { display: grid; gap: 10px; padding-top: 14px; }
 .research-row-organize select { width: 100%; font-size: 12px; padding: 6px; }
 .research-row-organize small { color: var(--muted); font-size: 11px; }
