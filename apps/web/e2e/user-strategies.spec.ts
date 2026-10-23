@@ -642,6 +642,20 @@ test('existing report returns to its persisted strategy without writes', async (
   expect(await appearanceInForce(), 'opening the report must not disturb the appearance').toEqual(['dark', 'compact'])
   await page.screenshot({ path: testInfo.outputPath('report-return-1400.png'), fullPage: true })
 
+  // Secondary report tables reuse this already-frozen evidence; viewing them
+  // never creates another experiment or changes the research association.
+  for (const width of [1400, 420]) {
+    await page.setViewportSize({ width, height: 1000 })
+    for (const view of ['complete', 'orders']) {
+      await page.goto(`/backtests/${jobId}?report=${view}`)
+      await expect(page.locator('.report-trade-section')).toBeVisible()
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: testInfo.outputPath(`report-${view}-${width}.png`), fullPage: true })
+    }
+  }
+  await page.setViewportSize({ width: 1400, height: 1000 })
+  await page.goto(`/backtests/${jobId}`)
+
   // Following it lands on the very strategy that froze the run, with its own
   // conversation, evidence and AI column intact and the other one never selected.
   const origin = new URL(baseURL).origin

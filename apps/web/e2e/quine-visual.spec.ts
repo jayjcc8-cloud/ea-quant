@@ -196,7 +196,7 @@ test('the empty workspace keeps the AI column visible and creates inline', async
   const nav = page.getByRole('navigation', { name: '主导航' })
   await expect(nav.getByRole('link', { name: '研究' })).toHaveAttribute('href', '/strategies')
   await expect(nav.getByRole('link', { name: '模拟运行' })).toHaveAttribute('href', '/runs')
-  await expect(page.getByRole('complementary', { name: '工作区侧栏' }).getByRole('link', { name: '资源' })).toHaveAttribute('href', '/resources/data')
+  await expect(page.getByRole('complementary', { name: '工作区侧栏' }).getByRole('link', { name: '数据与模型' })).toHaveAttribute('href', '/resources/data')
   await expect(nav.getByRole('link', { name: '回测记录' })).toHaveAttribute('href', '/backtests')
   await expect(page.getByRole('link', { name: '历史记录' })).toHaveAttribute('href', '/backtests#history-records')
   await expect(page.getByRole('link', { name: '历史记录' })).toHaveCount(1)

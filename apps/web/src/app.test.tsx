@@ -1060,7 +1060,7 @@ describe('QUINE shell navigation', () => {
 
     // The resource center is one more destination under its own plain group label,
     // and every research and validation child keeps its own route.
-    expect(screen.getByRole('link', { name: '资源' }).getAttribute('href')).toBe('/resources/data')
+    expect(screen.getByRole('link', { name: '数据与模型' }).getAttribute('href')).toBe('/resources/data')
     for (const label of ['研究任务', '留出验证', '候选', '事件校验']) {
       expect(nav.queryByRole('link', { name: label })).toBeNull()
     }

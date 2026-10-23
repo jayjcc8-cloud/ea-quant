@@ -42,9 +42,8 @@ export function AppearanceSettings({ runtime }: { runtime?: AppearanceRuntime } 
   const apply = (next: AppearancePreferences) => setUnsaved(!appearance.set(next))
 
   return <section className="panel appearance-settings" aria-label="本地外观">
-    <header><h2>本地外观</h2><span>只保存在本机浏览器</span></header>
-    <p className="muted">外观偏好立即作用于整个页面，并保存在这台机器的这个浏览器里，刷新后仍然生效。</p>
-    <p className="muted">这里没有语言、时区或通知开关：界面语言与时间戳沿用现有页面，通知也只是现有的页内反馈，本页不申请系统或浏览器通知权限。</p>
+    <header><h2>本地外观</h2><span>自动保存</span></header>
+    <p className="muted">选择适合你的显示方式。更改立即生效，并保存在本机。</p>
     <div className="appearance-fields">
       <fieldset className="appearance-field">
         <legend>主题</legend>
@@ -53,7 +52,7 @@ export function AppearanceSettings({ runtime }: { runtime?: AppearanceRuntime } 
             onChange={() => apply({ ...preferences, theme: choice.value })} />
           {choice.label}
         </label>)}</div>
-        <small>「跟随系统」时随操作系统的浅色/深色设置变化；选择浅色或深色后不再读取系统配色。本页不修改系统设置。</small>
+        <small>跟随系统，或为 QUINE 单独选择浅色与深色。</small>
       </fieldset>
       <fieldset className="appearance-field">
         <legend>密度</legend>
@@ -62,7 +61,7 @@ export function AppearanceSettings({ runtime }: { runtime?: AppearanceRuntime } 
             onChange={() => apply({ ...preferences, density: choice.value })} />
           {choice.label}
         </label>)}</div>
-        <small>紧凑会减小桌面端的留白与行高；窄屏下的可点按目标仍不小于 44px。</small>
+        <small>紧凑模式在同一屏幕中呈现更多内容。</small>
       </fieldset>
     </div>
     <div className="actions"><button type="button" onClick={() => apply(APPEARANCE_DEFAULTS)}>恢复默认</button><span className="muted">跟随系统 · 标准</span></div>

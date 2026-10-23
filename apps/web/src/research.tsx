@@ -2293,7 +2293,7 @@ export function ModelConnections({ api }: { api: ApiAdapter }) {
     void load()
     return () => { current = false }
   }, [api, check])
-  return <><PageHeading title="模型连接" subtitle="管理当前工作区共享的模型连接配置。" />
+  return <><header className="resource-subheading"><h2>模型连接</h2><p>管理研究对话使用的模型。配置在当前工作区共享。</p></header>
     <DesktopSettings api={api} section="model" onSaved={() => setCheck(value => value + 1)} />
     <details className="model-diagnostics"><summary>模型连接诊断</summary><button type="button" disabled={!currentRead} onClick={() => setCheck(value => value + 1)}>重新检查模型配置</button><ModelConfigurationPanel status={currentRead?.status ?? null} error={currentRead?.error ?? null} /></details></>
 }
@@ -2348,10 +2348,35 @@ export function DataWorkspace({ api }: { api: ApiAdapter }) {
 
 /** Declarations and validation retain their original, explicit effects. */
 export function ExtensionWorkspace({ api }: { api: ApiAdapter }) {
-  return <section className="panel" aria-label="扩展工具"><h1>扩展</h1>
-    <p className="muted">检查与选择本地策略包；在研究中明确绑定后使用。</p>
-    {(api.localStrategySlot || api.inspectLocalStrategy) && <details><summary>本地策略包</summary><LocalStrategyPanel api={api} /></details>}
-    <p><Link to="/settings?section=diagnostics">资源声明与校验工具</Link></p>
+  const [generation, setGeneration] = useState(0)
+  const [read, setRead] = useState<{ api: ApiAdapter; generation: number; items: ScenarioSummary[]; error: string | null } | null>(null)
+  const current = read?.api === api && read.generation === generation ? read : null
+  useEffect(() => {
+    let active = true
+    const load = async () => {
+      try {
+        if (!api.listScenarios) throw new Error('当前工作区无法读取策略目录。')
+        const items = await api.listScenarios(true)
+        if (active) setRead({ api, generation, items, error: null })
+      } catch (error) {
+        if (active) setRead({ api, generation, items: [], error: messageOf(error, '策略目录读取失败。') })
+      }
+    }
+    void load()
+    return () => { active = false }
+  }, [api, generation])
+  return <section className="strategy-library" aria-label="扩展工具">
+    <header className="resource-subheading"><div><h2>策略与模板</h2><p>查看已支持的策略，在研究草稿中选择并绑定。</p></div><button disabled={!current} onClick={() => setGeneration(value => value + 1)}>刷新策略目录</button></header>
+    {!current && <p role="status">正在读取策略目录…</p>}
+    {current?.error && <p className="notice error" role="alert">{current.error}</p>}
+    {current && !current.error && !current.items.length && <p className="resource-empty">暂无可用策略。可刷新目录，或检查本地策略包。</p>}
+    <div className="template-library">{current?.items.map(item => <article className="template-entry" key={item.scenario_id}>
+      <header><h3>{item.name}</h3><span className="chip">{item.valid ? '已登记' : '需修正'}</span></header>
+      {item.summary ? <><p>{item.summary.venue}:{item.summary.symbol}</p><dl><div><dt>策略</dt><dd>{item.summary.strategy_id}</dd></div><div><dt>数据记录</dt><dd>{item.summary.record_count}</dd></div></dl></> : <p>{item.message ?? '输入信息不可读取。'}</p>}
+      <details><summary>来源</summary><code>{item.scenario_id}</code></details>
+    </article>)}</div>
+    {(api.localStrategySlot || api.inspectLocalStrategy) && <details className="resource-history"><summary>本地策略包</summary><LocalStrategyPanel api={api} /></details>}
+    <p className="resource-footnote"><Link to="/settings?section=diagnostics">资源声明与校验工具</Link></p>
   </section>
 }
 

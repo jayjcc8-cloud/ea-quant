@@ -575,9 +575,9 @@ function Shell({ api }: { api: ApiAdapter }) {
   }
   const management = /^\/(resources|settings|platform|data|extensions|events)(\/|$)/.test(location.pathname)
   const split = /^\/(strategies|runs|live)(\/|$)/.test(location.pathname) || /^\/backtests\/[^/]+$/.test(location.pathname)
-  const chrome = <><div className="workspace-commandbar"><button className="sidebar-toggle" aria-label="切换侧栏" aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}><WorkbenchIcon name="panel" /></button>{!management && <nav aria-label="主导航" className="business-navigation">
+  const chrome = <><div className="workspace-commandbar"><button className="sidebar-toggle" aria-label="切换侧栏" aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}><WorkbenchIcon name="panel" /></button><nav aria-label="主导航" className="business-navigation">
     <NavLink to={primaryPages['/strategies'] ?? '/strategies'} className={() => /^\/(strategies|research|candidates|holdouts)(\/|$)/.test(location.pathname) ? 'active' : undefined}>研究</NavLink><NavLink to={primaryPages['/runs'] ?? '/runs'}>模拟运行</NavLink><NavLink to={primaryPages['/live'] ?? '/live'}>实盘运行</NavLink><NavLink to={primaryPages['/backtests'] ?? '/backtests'}>回测记录</NavLink>
-  </nav>}</div><WorkspaceNavigation /></>
+  </nav></div><WorkspaceNavigation /></>
   const select = (id: PlatformId | null) => {
     setPlatform(id)
     try { if (id) sessionStorage.setItem('quine.platform-filter', id); else sessionStorage.removeItem('quine.platform-filter') } catch { /* scope remains in this window */ }
@@ -592,7 +592,7 @@ function Shell({ api }: { api: ApiAdapter }) {
       </nav>
 
       <div className="sidebar-bottom">
-        <Link className={`nav-settings${location.pathname.startsWith('/resources') ? ' active' : ''}`} to="/resources/data"><NavIcon name="data" />资源</Link>
+        <Link className={`nav-settings${location.pathname.startsWith('/resources') ? ' active' : ''}`} to="/resources/data"><NavIcon name="data" />数据与模型</Link>
         <Link className={`nav-settings${location.pathname.startsWith('/platform') ? ' active' : ''}`} to="/platform"><NavIcon name="extensions" />交易所配置</Link>
         <Link className={`nav-settings${location.pathname === '/settings' ? ' active' : ''}`} to="/settings"><NavIcon name="settings" />设置</Link>
         <div className="sidebar-footer">未接入 · 本地工作区</div>

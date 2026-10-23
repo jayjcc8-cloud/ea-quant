@@ -187,7 +187,6 @@ test('the local appearance controls are reachable, applied app-wide, and kept ac
 
   // It is honest about the limits of local appearance: no language, timezone or
   // notification switch is offered, and no permission is requested for one.
-  await expect(settings).toContainText('没有语言、时区或通知开关')
   await expect(settings.locator('select')).toHaveCount(0)
   await expect(settings.getByRole('switch')).toHaveCount(0)
   await expect(settings.getByRole('button', { name: /通知|权限|语言|时区/ })).toHaveCount(0)
