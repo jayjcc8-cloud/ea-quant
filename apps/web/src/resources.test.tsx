@@ -388,7 +388,7 @@ function stubApi(script: Partial<Script> = {}): { api: ApiAdapter; calls: Calls 
     settingsStatus: () => { calls.settings += 1; return script.settings ? script.settings() : Promise.resolve(modelStatus) },
     pluginCatalog: () => { calls.catalog += 1; return script.catalog ? script.catalog() : Promise.resolve(catalog) },
     resolveRecipe: (selection) => { calls.resolve.push(selection); return script.resolve ? script.resolve(selection) : Promise.resolve(usableResolution) },
-    listUserStrategies: () => { calls.strategies += 1; return script.strategies ? script.strategies() : Promise.resolve([userStrategy]) },
+    researchReferences: () => { calls.strategies += 1; return script.strategies ? script.strategies() : Promise.resolve([userStrategy]) },
     listResearchTasks: () => { calls.tasks += 1; return script.tasks ? script.tasks() : Promise.resolve([researchTask]) },
   }
   return { api, calls }

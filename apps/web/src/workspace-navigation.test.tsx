@@ -15,7 +15,7 @@ it('organizes the shell by research, local simulation and reusable resources', a
   expect(screen.getByRole('link', { name: '资源' }).getAttribute('href')).toBe('/resources/data')
   expect(nav.queryByRole('link', { name: '数据' })).toBeNull()
   expect(nav.queryByRole('link', { name: '扩展' })).toBeNull()
-  await screen.findByRole('heading', { name: '研究' })
+  await screen.findByRole('heading', { name: '研究工作台' })
 })
 
 it('keeps a legacy import deep link bound to the same research and revision', async () => {

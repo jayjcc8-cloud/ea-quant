@@ -1,3 +1,4 @@
+import type { ResearchCollection, ResearchQuery, ResearchReference } from './research-workbench-api'
 import { PlatformContext, platformNames, savedPlatform, type PlatformId } from './platform-context'
 import { WorkbenchIcon } from './workbench-icon'
 import { LiveWorkspace } from './live-workspace'
@@ -256,8 +257,11 @@ export type ApiAdapter = {
    * working, and a workspace that serves none of them renders the honest empty
    * state instead. `scenario_id` is absent when a save is a bare intent, and the
    * binding below is the one explicit choice that later gives it a scenario. */
-  listUserStrategies?(): Promise<UserStrategy[]>
+  listResearch?(query?: ResearchQuery): Promise<ResearchCollection>
+  researchReferences?(jobId?: string): Promise<ResearchReference[]>
+  assignResearchExchange?(id: string, exchangeId: PlatformId | null, updatedAt: string): Promise<UserStrategy>
   createUserStrategy?(input: {
+    exchange_id?: PlatformId | null
     name: string
     intent: string
     scenario_id?: string | null
@@ -440,7 +444,9 @@ const browserApi: ApiAdapter = {
   inspectLocalStrategy: (contentBase64, manifest) => researchApi.inspectLocalStrategy(contentBase64, manifest),
   registerLocalStrategy: request => researchApi.registerLocalStrategy(request),
   revokeLocalStrategy: () => researchApi.revokeLocalStrategy(),
-  listUserStrategies: () => userStrategiesApi.list(),
+  listResearch: query => userStrategiesApi.listResearch(query),
+  researchReferences: jobId => userStrategiesApi.references(jobId),
+  assignResearchExchange: (id, exchange, at) => userStrategiesApi.assignExchange(id, exchange, at),
   createUserStrategy: input => userStrategiesApi.create(input),
   getUserStrategy: userStrategyId => userStrategiesApi.get(userStrategyId),
   selectUserStrategyModelProfile: (id, profileId) =>
@@ -967,8 +973,8 @@ function BacktestDetailRoute({ api }: { api: ApiAdapter }) {
   return <ReportWorkspace key={jobId} api={api} jobId={jobId} />
 }
 function ReportWorkspace({ api, jobId }: { api: ApiAdapter; jobId: string }) {
-  const [sources, setSources] = useState<UserStrategy[] | null>(null)
-  const onRead = useCallback((items: UserStrategy[]) => setSources(items), [])
+  const [sources, setSources] = useState<ResearchReference[] | null>(null)
+  const onRead = useCallback((items: ResearchReference[]) => setSources(items), [])
   const changed = useCallback((next: UserStrategy) => setSources(items => items?.map(item => item.user_strategy_id === next.user_strategy_id ? next : item) ?? null), [])
   const associations = sources ? experimentRecordsForJob(sources, jobId) : []
   const frozenRevision = associations.length === 1 ? associations[0].revision : null
@@ -1231,7 +1237,7 @@ function StrategyComparisonAssociation({ api, leftJobId, rightJobId }: { api: Ap
 
   useEffect(() => {
     const read = ++generation.current
-    const list = api.listUserStrategies
+    const list = api.researchReferences
     if (!list) {
       void Promise.resolve().then(() => {
         if (generation.current === read) setPair({ kind: 'none', note: '这个工作区不提供已保存的用户策略。' })
@@ -1277,7 +1283,7 @@ function StrategyComparisonAssociation({ api, leftJobId, rightJobId }: { api: Ap
   </section>
 }
 
-function BacktestDetail({ api, jobId, onResearchRead, frozenRevision }: { api: ApiAdapter; jobId: string; onResearchRead?: (items: UserStrategy[]) => void; frozenRevision?: number | null }) {
+function BacktestDetail({ api, jobId, onResearchRead, frozenRevision }: { api: ApiAdapter; jobId: string; onResearchRead?: (items: ResearchReference[]) => void; frozenRevision?: number | null }) {
   const [reportParams, setReportParams] = useSearchParams()
   const reportView = reportParams.get('report') ?? 'overview'
   const [job, setJob] = useState<BacktestJob | null>(null)

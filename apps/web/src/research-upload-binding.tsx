@@ -1,3 +1,4 @@
+import type { ResearchSummary } from './research-workbench-api'
 import { useEffect, useRef, useState } from 'react'
 import { SourceLink as Link } from './workspace-navigation'
 import type { ApiAdapter } from './app'
@@ -94,18 +95,18 @@ function BoundResearchUpload({ api, target, datasetId }: {
 
 /** One target picker for both a library dataset and a newly published version. */
 export function ResearchUploadBinding({ api, target, datasetId }: { api: ApiAdapter; target: ImportTarget | null; datasetId: string }) {
-  const [strategies, setStrategies] = useState<UserStrategy[] | null>(null)
+  const [strategies, setStrategies] = useState<ResearchSummary[] | null>(null)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState('')
   useEffect(() => {
     let active = true
-    if (!target && api.listUserStrategies) void api.listUserStrategies().then(items => { if (active) setStrategies(items) }).catch(() => { if (active) setError('研究列表不可读，请返回研究检查。') })
+    if (!target && api.listResearch) void api.listResearch().then(collection => { if (active) setStrategies(collection.items) }).catch(() => { if (active) setError('研究列表不可读，请返回研究检查。') })
     return () => { active = false }
   }, [api, target])
   const item = strategies?.find(value => value.user_strategy_id === selected)
   const chosen = target ?? (item ? { id: item.user_strategy_id, revision: item.draft.revision, returnTo: `/strategies/${encodeURIComponent(item.user_strategy_id)}?tab=strategy` } : null)
   return <section className="dataset-binding-picker">
-    {!target && <><h3>选择研究并绑定</h3><p>只修改目标的可编辑草稿，冻结报告不变。</p><label>目标研究<select value={selected} onChange={e => setSelected(e.target.value)}><option value="">请选择目标研究</option>{strategies?.map(value => <option value={value.user_strategy_id} key={value.user_strategy_id}>{value.name} · 草稿 v{value.draft.revision} · 未指定交易所</option>)}</select></label>{error && <p role="alert">{error}</p>}<Link to="/strategies" state={{ createStrategy: true }}>新建研究</Link></>}
+    {!target && <><h3>选择研究并绑定</h3><p>只修改目标的可编辑草稿，冻结报告不变。</p><label>目标研究<select value={selected} onChange={e => setSelected(e.target.value)}><option value="">请选择目标研究</option>{strategies?.map(value => <option value={value.user_strategy_id} key={value.user_strategy_id}>{value.name} · 草稿 v{value.draft.revision} · {value.exchange_id ?? '未指定交易所'}</option>)}</select></label>{error && <p role="alert">{error}</p>}<Link to="/strategies" state={{ createStrategy: true }}>新建研究</Link></>}
     {chosen && <BoundResearchUpload key={`${chosen.id}.${chosen.revision}.${datasetId}`} api={api} target={chosen} datasetId={datasetId} />}
   </section>
 }

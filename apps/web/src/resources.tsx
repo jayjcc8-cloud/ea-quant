@@ -41,7 +41,7 @@ import {
   type RecipeResolution,
   type ResearchTask,
 } from './research-api'
-import { isIntentDraft, type UserStrategy } from './user-strategies-api'
+import type { ResearchReference } from './research-workbench-api'
 import './resources.css'
 
 const UNKNOWN = '未知'
@@ -118,7 +118,7 @@ export type KnownReference = {
 }
 
 export type KnownReferenceSources = {
-  strategies?: UserStrategy[]
+  strategies?: ResearchReference[]
   tasks?: ResearchTask[]
   jobs?: BacktestJob[]
 }
@@ -316,7 +316,7 @@ export function deriveKnownReferences(sources: KnownReferenceSources): KnownRefe
   for (const strategy of sources.strategies ?? []) {
     const link = { to: `/strategies/${encodeURIComponent(strategy.user_strategy_id)}`, label: '策略' }
     const draft = strategy.draft
-    if (draft && !isIntentDraft(draft)) {
+    if (draft && draft.kind !== 'intent') {
       const reference = ensureReference(references, `draft:${strategy.user_strategy_id}:${draft.revision}`, 'draft', null)
       fillIdentity(reference, draft)
       push(reference.scope, '策略草稿')
@@ -533,7 +533,7 @@ export function ResourcesPage({ api }: { readonly api: ApiAdapter }) {
   const [catalog, reloadCatalog] = useRead(api.pluginCatalog)
   const [datasets, reloadDatasets] = useRead(api.listDatasets)
   const [scenarios, reloadScenarios] = useRead(api.listScenarios)
-  const [strategies, reloadStrategies] = useRead(api.listUserStrategies)
+  const [strategies, reloadStrategies] = useRead(api.researchReferences)
   const [tasks, reloadTasks] = useRead(api.listResearchTasks)
   const [jobs, reloadJobs] = useRead(api.listBacktests)
 

@@ -1,3 +1,4 @@
+import { researchCollection } from '../preview/research-fixtures'
 /**
  * The conversation panel's own contract, over a scripted stream.
  *
@@ -178,7 +179,8 @@ function scripted(input: {
     getReport: async () => { throw new Error('unused') },
     getEquityPath: async () => { throw new Error('unused') },
     artifactUrl: (jobId, name) => `/api/backtests/${jobId}/artifacts/${name}`,
-    listUserStrategies: async () => input.strategies,
+    listResearch: async query => researchCollection(input.strategies, query),
+    researchReferences: async () => input.strategies,
     getUserStrategy: async id => input.strategies.find(item => item.user_strategy_id === id) ?? persisted,
     userStrategyConversation: async id => ({
       ...input.conversation(),

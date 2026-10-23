@@ -1,3 +1,4 @@
+import { researchCollection } from '../preview/research-fixtures'
 import { act, cleanup, fireEvent, render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -8,7 +9,7 @@ import { App } from './app'
 import { scriptedAdapter as baseAdapter } from '../preview/first-use-fixtures'
 import type { UserStrategy } from './user-strategies-api'
 const record: UserStrategy = { schema: 'ea.user-strategy.v1', user_strategy_id: 'us-1', name: '均线研究', intent: '合成样本研究', created_at: '2026-10-14', updated_at: '2026-10-14', draft: { kind: 'intent', revision: 1, scenario_id: null }, history: [], messages: [], calls: [], proposals: [], changes: [], experiments: [] }
-const scriptedAdapter = () => ({ ...baseAdapter(), listUserStrategies: async () => [record], getUserStrategy: async () => record, saveUserStrategyDraft: vi.fn() })
+const scriptedAdapter = () => ({ ...baseAdapter(), listResearch: async (query?: import('./research-workbench-api').ResearchQuery) => researchCollection([record], query), getUserStrategy: async () => record, saveUserStrategyDraft: vi.fn() })
 beforeEach(() => { sessionStorage.clear(); localStorage.clear() })
 afterEach(cleanup)
 it('clears the exchange selection without changing research or dispatching work', async () => {
@@ -29,7 +30,7 @@ it('opens the real creation form from the assistant without creating or calling 
   window.history.replaceState({}, '', '/strategies')
   const user = userEvent.setup()
   const create = vi.fn()
-  render(<App api={{ ...scriptedAdapter(), listUserStrategies: async () => [], createUserStrategy: create }} />)
+  render(<App api={{ ...scriptedAdapter(), listResearch: async () => researchCollection([]), createUserStrategy: create }} />)
   await screen.findByText('还没有策略。')
   await user.click(within(screen.getByRole('region', { name: 'AI 协作' })).getByRole('link', { name: /梳理研究思路/ }))
   expect(await screen.findByRole('textbox', { name: '策略名称' })).toBeTruthy()
@@ -107,7 +108,7 @@ it('offers a real research target and prevents a known incompatible symbol bindi
   const user = userEvent.setup()
   const target = { ...record, draft: { revision: 1, scenario_id: 'bounded-long.yaml', strategy_id: 'bounded-long-v1', venue: 'XNAS', symbol: 'AAPL', dataset_id: null, source_sha256: null, initial_cash: '10000', parameters: {}, criterion: null } } as UserStrategy
   const select = vi.fn()
-  const api = { ...scriptedAdapter(), getUserStrategy: async () => target, listUserStrategies: async () => [target], listDatasets: async () => [{ dataset_id: 'btc', venue: 'TEST', symbol: 'BTC' }], selectUserStrategyDataset: select } as unknown as Parameters<typeof ResearchUploadBinding>[0]['api']
+  const api = { ...scriptedAdapter(), getUserStrategy: async () => target, listResearch: async () => researchCollection([target]), listDatasets: async () => [{ dataset_id: 'btc', venue: 'TEST', symbol: 'BTC' }], selectUserStrategyDataset: select } as unknown as Parameters<typeof ResearchUploadBinding>[0]['api']
   render(<BrowserRouter><ResearchUploadBinding api={api} target={null} datasetId="btc" /></BrowserRouter>)
   await screen.findByRole('option', { name: /均线研究/ })
   await user.selectOptions(screen.getByLabelText('目标研究'), 'us-1')
@@ -121,8 +122,9 @@ it('restores the initial all-research entry when browser history removes the fil
   const user = userEvent.setup()
   render(<App api={scriptedAdapter()} />)
   await screen.findByRole('link', { name: '均线研究' })
+  await user.click(screen.getByRole('button', { name: 'Binance 未接入' }))
   await user.click(screen.getByRole('button', { name: '当前交易所' }))
-  expect(screen.queryByRole('link', { name: '均线研究' })).toBeNull()
+  await waitFor(() => expect(screen.queryByRole('link', { name: '均线研究' })).toBeNull())
   await act(async () => { window.history.back() })
   expect(await screen.findByRole('link', { name: '均线研究' })).toBeTruthy()
   expect(window.location.search).toBe('')
@@ -142,7 +144,7 @@ it('restores filters, selected row and the same AI object after returning from d
 
 it('keeps one creation entry and reveals the real search from empty AI', async () => {
   window.history.replaceState({}, '', '/strategies')
-  const api = { ...scriptedAdapter(), listUserStrategies: async () => [], createUserStrategy: vi.fn(), askUserStrategy: vi.fn(), launchUserStrategyExperiment: vi.fn() }
+  const api = { ...scriptedAdapter(), listResearch: async () => researchCollection([]), createUserStrategy: vi.fn(), askUserStrategy: vi.fn(), launchUserStrategyExperiment: vi.fn() }
   render(<App api={api} />)
   const ai = await screen.findByRole('region', { name: 'AI 协作' })
   expect(document.querySelector('[data-ai-dock="split"]')).toBeTruthy()
@@ -157,11 +159,14 @@ it('keeps one creation entry and reveals the real search from empty AI', async (
 it('selects a research beside the list without navigation or any model or experiment write', async () => {
   window.history.replaceState({}, '', '/strategies')
   const other = { ...record, user_strategy_id: 'us-2', name: '第二项研究', updated_at: '2026-10-15' }
-  const api = { ...scriptedAdapter(), listUserStrategies: async () => [record, other], askUserStrategy: vi.fn(), launchUserStrategyExperiment: vi.fn() }
+  const api = { ...scriptedAdapter(), listResearch: async () => researchCollection([record, other]), getUserStrategy: async (id: string) => id === other.user_strategy_id ? other : record, askUserStrategy: vi.fn(), launchUserStrategyExperiment: vi.fn() }
   render(<App api={api} />)
+  await screen.findByRole('link', { name: '第二项研究' })
+  expect(within(screen.getByRole('region', { name: 'AI 协作' })).getByText('研究工作区')).toBeTruthy()
+  await userEvent.click(screen.getByRole('button', { name: '选择研究 第二项研究' }))
   await waitFor(() => expect(within(screen.getByRole('region', { name: 'AI 协作' })).getByText('第二项研究', { exact: true })).toBeTruthy())
   await userEvent.click(screen.getByRole('button', { name: '选择研究 均线研究' }))
-  expect(within(screen.getByRole('region', { name: 'AI 协作' })).getByText('均线研究', { exact: true })).toBeTruthy()
+  await waitFor(() => expect(within(screen.getByRole('region', { name: 'AI 协作' })).getByText('均线研究', { exact: true })).toBeTruthy())
   expect(screen.getByRole('button', { name: '选择研究 均线研究' }).getAttribute('aria-pressed')).toBe('true')
   expect(window.location.pathname).toBe('/strategies')
   expect(api.askUserStrategy).not.toHaveBeenCalled()

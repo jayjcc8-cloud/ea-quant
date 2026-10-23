@@ -1,3 +1,5 @@
+import type { ResearchCollection, ResearchQuery, ResearchReference } from './research-workbench-api'
+import type { PlatformId } from './platform-context'
 /**
  * QUINE user-strategy contract.
  *
@@ -338,6 +340,7 @@ export type UserStrategyExperiment = {
 }
 
 export type UserStrategy = {
+  exchange_id?: PlatformId | null
   model_profile_id?: string | null
   schema: 'ea.user-strategy.v1'
   user_strategy_id: string
@@ -652,15 +655,20 @@ async function streamRequest(
 export const userStrategiesApi = {
   selectModelProfile: (id: string, profileId: string | null) =>
     write<UserStrategy>(`${base(id)}/model-profile`, { profile_id: profileId }),
-  async list(): Promise<UserStrategy[]> {
-    return (await apiRequest<{ strategies: UserStrategy[] }>('/api/user-strategies')).strategies
+  listResearch: (query: ResearchQuery = {}) => apiRequest<ResearchCollection>(`/api/research?${new URLSearchParams(Object.entries(query))}`),
+  async references(jobId?: string): Promise<ResearchReference[]> {
+    return (await apiRequest<{ items: ResearchReference[] }>(`/api/research/references${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ''}`)).items
   },
+  assignExchange: (id: string, exchangeId: PlatformId | null, updatedAt: string) => apiRequest<UserStrategy>(`/api/research/${encodeURIComponent(id)}/exchange`, {
+    method: 'PATCH', headers: writeHeaders, body: JSON.stringify({ exchange_id: exchangeId, expected_updated_at: updatedAt }),
+  }),
   /**
    * A save. With a scenario it is the executable revision 1 it always was; with
    * no scenario it saves an intent, which the host needs no catalog for. Either
    * way this creates no model call and starts no experiment.
    */
   create: (input: {
+    exchange_id?: PlatformId | null
     name: string
     intent: string
     scenario_id?: string | null

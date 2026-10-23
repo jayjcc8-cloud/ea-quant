@@ -134,7 +134,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   // The default entry is the strategy workspace; the legacy pages stay reachable.
   await page.goto('/')
   await expect(page).toHaveURL(/\/strategies$/)
-  await expect(page.getByRole('heading', { name: '研究', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '研究工作台', exact: true })).toBeVisible()
   await expect(page.getByText('还没有策略。')).toBeVisible()
   await expect(page.getByRole('navigation', { name: '主导航' }).getByRole('link', { name: '研究' })).toBeVisible()
 
@@ -294,7 +294,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   await expect(page.getByText(`已从修订 ${boundRevision} 启动实验 li-1`)).toBeVisible()
   await expect(experimentPanel.locator('p.muted', { hasText: /一次运行只是一个冻结的结果，不是已经完成的研究/ })).toBeVisible()
   await expect(experimentPanel.getByRole('link', { name: '查看这次实验报告' }))
-    .toHaveAttribute('href', `/strategies/${firstId}?tab=experiments&evidence_a=${experiment.job_id}`)
+    .toHaveAttribute('href', `/backtests/${experiment.job_id}?research=${firstId}`)
 
   // The run's own outcome is the run's own, read from its persisted record until
   // it reaches a state its owner will not move on its own.
@@ -409,7 +409,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   await expect(rereadControls).toHaveAttribute('open', '')
   await expect(page.getByText(`已从修订 ${boundRevision} 启动实验 li-1`)).toBeVisible()
   await expect(page.getByRole('region', { name: '实验' }).getByRole('link', { name: '查看这次实验报告' }))
-    .toHaveAttribute('href', `/strategies/${firstId}?tab=experiments&evidence_a=${experiment.job_id}`)
+    .toHaveAttribute('href', `/backtests/${experiment.job_id}?research=${firstId}`)
   const reread = await read(page, firstId)
   expect(reread.experiments).toEqual(launched.experiments)
   expect(reread.draft.revision).toBe(boundRevision)
@@ -432,8 +432,8 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   const table = page.getByRole('navigation', { name: '策略列表' })
   await expect(table.getByText(`冻结 v${boundRevision}`)).toBeVisible()
   const firstRow = table.locator('tr').filter({ has: page.getByRole('link', { name: 'Trend follow', exact: true }) })
-  await expect(firstRow.getByRole('link', { name: /成功/ }))
-    .toHaveAttribute('href', `/strategies/${firstId}?tab=experiments&evidence_a=${experiment.job_id}`)
+  await expect(firstRow.getByRole('link', { name: '查看正式报告' }))
+    .toHaveAttribute('href', `/backtests/${experiment.job_id}?research=${firstId}`)
   // The one history entry leads to the existing read-only classifications.
   await page.getByRole('link', { name: '历史记录' }).click()
   const history = page.getByRole('navigation', { name: '历史记录分类' })

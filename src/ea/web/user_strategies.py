@@ -629,6 +629,7 @@ class UserStrategy:
     #: decision the user still has to make.
     conversation_confirmation: dict[str, Any] | None = None
     model_profile_id: str | None = None
+    exchange_id: str | None = None
 
     def document(self) -> dict[str, Any]:
         return {
@@ -638,6 +639,7 @@ class UserStrategy:
             "updated_at": self.updated_at,
             "name": self.name,
             "intent": self.intent,
+            "exchange_id": self.exchange_id,
             **({"model_profile_id": self.model_profile_id} if self.model_profile_id else {}),
             "draft": self.draft.document(),
             "history": [item.document() for item in self.history],
@@ -671,6 +673,7 @@ class UserStrategy:
             name=str(document["name"]),
             intent=str(document["intent"]),
             model_profile_id=document.get("model_profile_id"),
+            exchange_id=document.get("exchange_id"),
             draft=_decode_draft(document["draft"]),
             history=tuple(_decode_draft(item) for item in document.get("history") or []),
             messages=tuple(dict(item) for item in document.get("messages") or []),
@@ -1683,6 +1686,7 @@ class UserStrategyService:
         intent: object,
         scenario_id: object = None,
         criterion: Any = None,
+        exchange_id: str | None = None,
     ) -> UserStrategy:
         """One saved strategy: a saved intent, or an executable draft of a scenario.
 
@@ -1692,6 +1696,8 @@ class UserStrategyService:
         this owner has always written, validated by the same backend before
         anything is saved.
         """
+        if exchange_id not in (None, "binance", "okx"):
+            raise UserStrategyError("unsupported research exchange")
         title = _bounded(name, "name", _MAX_NAME)
         purpose = _bounded(intent, "intent", _MAX_INTENT)
         now = _now()
@@ -1716,6 +1722,7 @@ class UserStrategyService:
             name=title,
             intent=purpose,
             draft=draft,
+            exchange_id=exchange_id,
         )
         self._store.save(strategy)
         return strategy
@@ -1729,6 +1736,23 @@ class UserStrategyService:
         if self._quine is not None:
             return self.reconcile_all()
         return self._store.list()
+
+    def assign_exchange(
+        self, user_strategy_id: str, *, exchange_id: str | None, expected_updated_at: str
+    ) -> UserStrategy:
+        """Research organization only; never changes the draft or connection authority."""
+        identity = _identifier(user_strategy_id, "user_strategy_id")
+        if exchange_id not in (None, "binance", "okx"):
+            raise UserStrategyError("unsupported research exchange")
+        with self._lock(identity):
+            current = self.get(identity)
+            if current.updated_at != expected_updated_at:
+                raise UserStrategyStaleError(
+                    "research changed; refresh before assigning its exchange"
+                )
+            updated = replace(current, exchange_id=exchange_id, updated_at=_now())
+            self._store.save(updated)
+            return updated
 
     # -- one explicit binding ------------------------------------------------
 

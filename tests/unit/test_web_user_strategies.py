@@ -3298,7 +3298,7 @@ def test_http_routes_bound_identities_and_keep_the_frozen_child_read_only(
         second = cast(dict[str, Any], second_response.json())
         assert first["draft"]["criterion"] == FROZEN_CRITERION
         assert second["draft"]["criterion"] is None
-        listed = cast(list[dict[str, Any]], client.get("/api/user-strategies").json()["strategies"])
+        listed = cast(list[dict[str, Any]], client.get("/api/research").json()["items"])
         assert {item["user_strategy_id"] for item in listed} == {
             first["user_strategy_id"],
             second["user_strategy_id"],

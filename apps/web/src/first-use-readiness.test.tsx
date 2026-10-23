@@ -1,3 +1,4 @@
+import { researchCollection } from '../preview/research-fixtures'
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -26,7 +27,7 @@ function host(overrides: Partial<ApiAdapter> = {}) {
   const ask = vi.fn(async () => { throw new Error('no model calls permitted') })
   const run = vi.fn(async () => { throw new Error('no run permitted') })
   const api: ApiAdapter = {
-    ...scriptedAdapter(), listUserStrategies: async () => [], getUserStrategy: async () => idea,
+    ...scriptedAdapter(), listResearch: async () => researchCollection([]), getUserStrategy: async () => idea,
     createUserStrategy: async () => idea, settingsStatus: async () => absent, listDatasets: async () => [],
     sendUserStrategyMessage: ask, createBacktest: run, ...overrides,
   }
@@ -78,7 +79,7 @@ describe('first-use preparation and recovery', () => {
   it('distinguishes a failed catalog from empty, retries without selecting or losing the current idea', async () => {
     const user = userEvent.setup()
     let reads = 0
-    const { api, ask, run } = host({ listUserStrategies: async () => [idea], listScenarios: async () => {
+    const { api, ask, run } = host({ listResearch: async () => researchCollection([idea]), listScenarios: async () => {
       if (++reads === 1) throw new Error('fixture catalog unavailable')
       return [scenario]
     } })
@@ -144,7 +145,7 @@ describe('first-use preparation and recovery', () => {
 
   it('opens the existing upload controls via the first-use link and returns to saved work', async () => {
     const user = userEvent.setup()
-    const { api } = host({ listUserStrategies: async () => [idea] })
+    const { api } = host({ listResearch: async () => researchCollection([idea]) })
     open(api)
     await user.click((await preparation(user)).getByRole('link', { name: '导入 CSV 数据' }))
     const disclosure = document.getElementById('data-upload') as HTMLDetailsElement
@@ -175,7 +176,7 @@ describe('model send readiness blocker', () => {
       : state === 'loading' ? () => pending.promise
         : state === 'error' ? async () => { throw new Error('fixture status failed') }
           : async () => absent
-    const { api, ask } = host({ listUserStrategies: async () => [idea], settingsStatus })
+    const { api, ask } = host({ listResearch: async () => researchCollection([idea]), settingsStatus })
     open(api, '/strategies/first-idea')
     await user.type(await screen.findByLabelText('消息'), 'Keep my question')
     const send = screen.getByRole('button', { name: '发送消息' }) as HTMLButtonElement
@@ -191,7 +192,7 @@ describe('model send readiness blocker', () => {
     const user = userEvent.setup()
     let configured = false
     const send = vi.fn(async () => idea)
-    const { api } = host({ listUserStrategies: async () => [idea],
+    const { api } = host({ listResearch: async () => researchCollection([idea]),
       settingsStatus: async () => configured ? ready : absent, sendUserStrategyMessage: send })
     open(api, '/strategies/first-idea')
     await user.type(await screen.findByLabelText('消息'), 'Keep my question')
@@ -212,7 +213,7 @@ describe('model send readiness blocker', () => {
     const user = userEvent.setup()
     const pending = deferred<ModelConfigurationStatus>()
     let reads = 0
-    const { api, ask } = host({ listUserStrategies: async () => [idea], settingsStatus: async () => {
+    const { api, ask } = host({ listResearch: async () => researchCollection([idea]), settingsStatus: async () => {
       reads += 1
       if (reads === 1) return ready
       if (reads === 2) return pending.promise

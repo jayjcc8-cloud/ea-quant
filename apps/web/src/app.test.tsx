@@ -1069,7 +1069,7 @@ describe('QUINE shell navigation', () => {
     // The backtest destination keeps every route it already had.
     await user.click(nav.getByRole('link', { name: '研究' }))
     expect(window.location.pathname).toBe('/strategies')
-    expect(await screen.findByRole('heading', { name: '研究' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '研究工作台' })).toBeTruthy()
 
     cleanup()
     window.history.pushState({}, '', '/backtests/job-1')
@@ -1146,7 +1146,7 @@ describe('report to strategy return', () => {
     }
 
     reportPage(adapter({
-      listUserStrategies: async () => [ownerStrategy, otherStrategy],
+      researchReferences: async () => [ownerStrategy, otherStrategy],
       getUserStrategy: async (userStrategyId) => (userStrategyId === 'us-2' ? otherStrategy : ownerStrategy),
       createUserStrategy: refuse('createUserStrategy'),
       sendUserStrategyMessage: refuse('sendUserStrategyMessage'),
@@ -1188,7 +1188,7 @@ describe('report to strategy return', () => {
   })
 
   it('says no persisted strategy froze this run and offers the strategy list instead', async () => {
-    reportPage(adapter({ listUserStrategies: async () => [otherStrategy] }))
+    reportPage(adapter({ researchReferences: async () => [otherStrategy] }))
 
     const association = await associationPanel()
     expect(await within(association).findByText('没有已保存的用户策略冻结了这个运行。')).toBeTruthy()
@@ -1208,7 +1208,7 @@ describe('report to strategy return', () => {
     cleanup()
     let reads = 0
     reportPage(adapter({
-      listUserStrategies: async () => {
+      researchReferences: async () => {
         reads += 1
         if (reads === 1) throw new Error('strategy list is unavailable')
         return [ownerStrategy, otherStrategy]
@@ -1235,7 +1235,7 @@ describe('report to strategy return', () => {
         frozenExperiment('job-1', 2, '2026-10-06T10:31:00.000000Z', 'li-b'),
       ],
     }
-    reportPage(adapter({ listUserStrategies: async () => [doubled] }))
+    reportPage(adapter({ researchReferences: async () => [doubled] }))
 
     const association = await associationPanel()
     expect(await within(association).findByText(/这个运行匹配到 2 条冻结记录/)).toBeTruthy()
@@ -1256,7 +1256,7 @@ describe('report to strategy return', () => {
         frozenExperiment('job-1', 3, '2026-10-06T10:31:00.000000Z', 'li-b'),
       ],
     }
-    reportPage(adapter({ listUserStrategies: async () => [disagreeing] }))
+    reportPage(adapter({ researchReferences: async () => [disagreeing] }))
 
     const association = await associationPanel()
     expect(await within(association).findByText(/这个运行匹配到 2 条冻结记录/)).toBeTruthy()
@@ -1273,7 +1273,7 @@ describe('report to strategy return', () => {
       ...otherStrategy,
       experiments: [frozenExperiment('job-1', 3, '2026-10-06T10:41:00.000000Z')],
     }
-    reportPage(adapter({ listUserStrategies: async () => [ownerStrategy, twin] }))
+    reportPage(adapter({ researchReferences: async () => [ownerStrategy, twin] }))
 
     const association = await associationPanel()
     expect(await within(association).findByText(/这个运行匹配到 2 条冻结记录/)).toBeTruthy()
@@ -1287,7 +1287,7 @@ describe('report to strategy return', () => {
       ...ownerStrategy,
       experiments: [frozenExperiment('job-1', 0, '2026-10-06T10:30:00.000000Z')],
     }
-    reportPage(adapter({ listUserStrategies: async () => [odd] }))
+    reportPage(adapter({ researchReferences: async () => [odd] }))
 
     const association = await associationPanel()
     expect(await within(association).findByText('冻结修订未知')).toBeTruthy()
@@ -1316,7 +1316,7 @@ describe('report to strategy return', () => {
       listBacktests: async () => [job, flatJob],
       getBacktest: async (jobId) => (jobId === 'job-1' ? job : flatJob),
       getReport: async (jobId) => (jobId === 'job-1' ? report : flatReport),
-      listUserStrategies: async () => {
+      researchReferences: async () => {
         reads += 1
         return reads === 1 ? await firstRead : [later]
       },
@@ -1389,7 +1389,7 @@ describe('evidence continuity from a report or a comparison', () => {
   it('continuity: the report return link keeps the frozen run this report is about', async () => {
     const user = userEvent.setup()
     reportPage(adapter({
-      listUserStrategies: async () => [ownerStrategy, otherStrategy],
+      researchReferences: async () => [ownerStrategy, otherStrategy],
       getUserStrategy: async () => ownerStrategy,
     }))
 
@@ -1409,7 +1409,7 @@ describe('evidence continuity from a report or a comparison', () => {
     const user = userEvent.setup()
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
     render(<App api={compareAdapter({
-      listUserStrategies: async () => [commonOwner],
+      researchReferences: async () => [commonOwner],
       getUserStrategy: async () => commonOwner,
     })} />)
 
@@ -1502,7 +1502,7 @@ describe('maturity round 2', () => {
     const decoy: UserStrategy = { ...otherStrategy, user_strategy_id: 'us-decoy', name: 'Bold entry', experiments: [] }
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
     render(<App api={compareAdapter({
-      listUserStrategies: async () => [decoy, commonOwner],
+      researchReferences: async () => [decoy, commonOwner],
       getUserStrategy: async () => commonOwner,
       createUserStrategy: refuse('createUserStrategy'),
       sendUserStrategyMessage: refuse('sendUserStrategyMessage'),
@@ -1532,7 +1532,7 @@ describe('maturity round 2', () => {
     // Two different saved strategies, one per run, both on the same registered
     // engine strategy: sharing an engine strategy is not sharing an owner.
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
-    render(<App api={compareAdapter({ listUserStrategies: async () => [ownerStrategy, otherStrategy] })} />)
+    render(<App api={compareAdapter({ researchReferences: async () => [ownerStrategy, otherStrategy] })} />)
     let association = await screen.findByRole('region', { name: '对比策略关联' })
     await waitFor(() => expect(within(association).queryByText(/正在读取/)).toBeNull())
     expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
@@ -1548,7 +1548,7 @@ describe('maturity round 2', () => {
       ],
     }
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
-    render(<App api={compareAdapter({ listUserStrategies: async () => [ambiguous] })} />)
+    render(<App api={compareAdapter({ researchReferences: async () => [ambiguous] })} />)
     association = await screen.findByRole('region', { name: '对比策略关联' })
     await waitFor(() => expect(within(association).queryByText(/正在读取/)).toBeNull())
     expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
@@ -1557,7 +1557,7 @@ describe('maturity round 2', () => {
     // back honestly to the strategy list.
     cleanup()
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
-    render(<App api={compareAdapter({ listUserStrategies: async () => { throw new Error('strategy list is unavailable') } })} />)
+    render(<App api={compareAdapter({ researchReferences: async () => { throw new Error('strategy list is unavailable') } })} />)
     association = await screen.findByRole('region', { name: '对比策略关联' })
     expect(await within(association).findByRole('link', { name: /策略列表/ })).toBeTruthy()
     expect(within(association).queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
@@ -1598,7 +1598,7 @@ describe('maturity round 2', () => {
     const firstRead = new Promise<UserStrategy[]>(resolve => { resolveFirst = resolve })
     let reads = 0
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
-    render(<App api={compareAdapter({ listUserStrategies: async () => { reads += 1; return reads === 1 ? await firstRead : [] } })} />)
+    render(<App api={compareAdapter({ researchReferences: async () => { reads += 1; return reads === 1 ? await firstRead : [] } })} />)
     const reading = await screen.findByRole('region', { name: '对比策略关联' })
     expect(within(reading).getByText(/正在读取/)).toBeTruthy()
 
@@ -1619,7 +1619,7 @@ describe('maturity round 2', () => {
 
   it('keeps the report numbers and return while moving identities behind a disclosure', async () => {
     reportPage(adapter({
-      listUserStrategies: async () => [ownerStrategy, otherStrategy],
+      researchReferences: async () => [ownerStrategy, otherStrategy],
       getUserStrategy: async (userStrategyId) => (userStrategyId === 'us-2' ? otherStrategy : ownerStrategy),
     }))
 
@@ -1652,7 +1652,7 @@ describe('maturity round 2', () => {
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
     render(<App api={compareAdapter({
       getBacktest: async (jobId) => jobId === 'job-1' ? job : jobId === 'job-2' ? compareRight : pendingThird,
-      listUserStrategies: async () => associationRead,
+      researchReferences: async () => associationRead,
     })} />)
 
     expect(await screen.findByText('10017 USD')).toBeTruthy()
@@ -1690,7 +1690,7 @@ describe('maturity round 2', () => {
     window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
     render(<App api={compareAdapter({
       getBacktest: async (jobId) => ({ ...compareRight, job_id: jobId === 'job-1' ? 'job-9' : 'job-2' }),
-      listUserStrategies: async () => [commonOwner],
+      researchReferences: async () => [commonOwner],
     })} />)
     expect(await screen.findByText('Loaded run identity does not match the requested run')).toBeTruthy()
     expect(screen.queryByRole('region', { name: '对比策略关联' })).toBeNull()
@@ -1701,7 +1701,7 @@ describe('maturity round 2', () => {
     // claimed for it and the way back is still offered.
     cleanup()
     window.history.pushState({}, '', '/backtests/compare/job-1/job-1')
-    render(<App api={compareAdapter({ listUserStrategies: async () => [commonOwner] })} />)
+    render(<App api={compareAdapter({ researchReferences: async () => [commonOwner] })} />)
     expect(await screen.findByText('同一个运行不能与它自己对比：请选择两个不同的已持久化运行。')).toBeTruthy()
     expect(screen.queryByRole('region', { name: '对比策略关联' })).toBeNull()
     expect(screen.queryByRole('link', { name: '返回此策略继续研究' })).toBeNull()
@@ -1716,7 +1716,7 @@ describe('validation retains research ownership', () => {
       window.history.pushState({}, '', route)
       const writes = vi.fn()
       render(<App api={adapter({
-        listUserStrategies: async () => [ownerStrategy, otherStrategy],
+        researchReferences: async () => [ownerStrategy, otherStrategy],
         getCandidate: async () => evaluatedCandidate(),
         getHoldout: async () => ({ schema: 'ea.chronological-holdout.v1', validation_id: 'holdout-1', created_at: '', source_job_id: 'job-1', holdout_job_id: 'job-2' }),
         createHoldout: writes, decideCandidate: writes, createCandidate: writes,
@@ -1734,7 +1734,7 @@ it('returns through the actual report association to the same source report view
   const user = userEvent.setup()
   const writes = vi.fn(async () => { throw new Error('navigation must not write') })
   window.history.replaceState({}, '', '/backtests/job-1?report=complete')
-  render(<App api={adapter({ listUserStrategies: async () => [ownerStrategy], getUserStrategy: async () => ownerStrategy, launchUserStrategyExperiment: writes, sendUserStrategyMessage: writes })} />)
+  render(<App api={adapter({ researchReferences: async () => [ownerStrategy], getUserStrategy: async () => ownerStrategy, launchUserStrategyExperiment: writes, sendUserStrategyMessage: writes })} />)
   await user.click(await screen.findByRole('link', { name: '返回此策略继续研究' }))
   expect(window.location.pathname + window.location.search).toBe('/strategies/us-1?evidence_a=job-1')
   const back = screen.getByRole('link', { name: '返回实验报告' })

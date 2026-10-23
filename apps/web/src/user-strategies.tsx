@@ -1,3 +1,5 @@
+import type { ResearchSummary, ResearchReference } from './research-workbench-api'
+import type { PlatformId } from './platform-context'
 import { FrozenReportFacts, FrozenReportMetrics, FrozenReportDetails, ReportTrades } from './frozen-report'
 import { WorkbenchIcon } from './workbench-icon'
 import { platformNames, usePlatform } from './platform-context'
@@ -402,6 +404,8 @@ function CreateStrategy({ api, created, value, update, close }: {
 }) {
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
+  const { platform } = usePlatform()
+  const [exchange, setExchange] = useState<PlatformId | null>(platform)
   const { name, intent } = value
 
   const submit = async (event: FormEvent) => {
@@ -421,6 +425,7 @@ function CreateStrategy({ api, created, value, update, close }: {
       const strategy = await createStrategy({
         name: name.trim() || temporaryName(intent),
         intent: intent.trim(),
+        exchange_id: exchange,
       })
       update({ name: '', intent: '' })
       created(strategy)
@@ -444,6 +449,7 @@ function CreateStrategy({ api, created, value, update, close }: {
           onChange={event => update({ name: event.target.value, intent })} />
         <small>{`可以留空；留空时用你自己的话作为临时名称：${temporaryName(intent)}`}</small>
       </div>
+      <label className="field">研究归属<select aria-label="研究归属" value={exchange ?? ''} onChange={event => setExchange((event.target.value || null) as PlatformId | null)}><option value="">未指定交易所</option><option value="binance">Binance</option><option value="okx">OKX</option></select><small>仅用于整理和筛选研究，不连接账户或改变执行参数。</small></label>
       <div className="create-actions"><button type="button" disabled={busy} onClick={close}>收起（保留输入）</button>
         <button type="submit" className="primary" disabled={busy || !intent.trim()}>
           保存想法
@@ -1446,7 +1452,7 @@ function RecordedTurn({ calls: turnCalls, messages: turnMessages, strategyId, cu
 function ChatPanel({ api, strategy, strategies, changed, modelSendBlock, modelStatus, completedReads, completed, fixedEvidenceJobId }: {
   api: ApiAdapter
   strategy: UserStrategy
-  strategies: UserStrategy[]
+  strategies: { user_strategy_id: string; name: string }[]
   completedReads: Record<string, string>
   completed: (strategyId: string, jobId: string, turnId: string) => void
   changed: (strategy: UserStrategy) => void
@@ -2699,51 +2705,47 @@ function researchLocation(id: string) {
   try { const saved = sessionStorage.getItem(`quine.research-location.${id}`); return saved === path || saved?.startsWith(path + '?') ? saved : path } catch { return path }
 }
 
-function StrategyTable({ api, strategies, selectedId, select, filtered = false }: {
-  api: ApiAdapter
-  strategies: UserStrategy[]
-  selectedId?: string
-  select: (id: string) => void
-  filtered?: boolean
+const nextStepNames = { draft: '完善草稿', review: '审阅修改', experiment: '预览实验', inspect: '查看实验状态', evidence: '查看证据' } as const
+function researchNextLocation(item: ResearchSummary) {
+  const path = `/strategies/${encodeURIComponent(item.user_strategy_id)}`
+  return item.next_step === 'draft' ? path : item.next_step === 'review' ? `${path}#strategy-ai-column`
+    : `${path}?tab=experiments${item.latest_experiment?.job_id ? `&evidence_a=${encodeURIComponent(item.latest_experiment.job_id)}` : ''}`
+}
+function ResearchRow({ api, item, selected, select, changed }: { api: ApiAdapter; item: ResearchSummary; selected: boolean; select: (id: string) => void; changed: (value: UserStrategy) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [exchange, setExchange] = useState<PlatformId | null>(item.exchange_id)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const latest = item.latest_experiment
+  const status = latest?.read_error ? '状态未知' : latest?.job_status ? JOB_STATUS_LABELS[latest.job_status as keyof typeof JOB_STATUS_LABELS] ?? latest.job_status
+    : latest ? EXPERIMENT_STATUS_LABELS[latest.launch_status as keyof typeof EXPERIMENT_STATUS_LABELS] ?? latest.launch_status : '尚未实验'
+  const assign = async () => {
+    if (!api.assignResearchExchange || busy) return
+    setBusy(true); setError('')
+    try { changed(await api.assignResearchExchange(item.user_strategy_id, exchange, item.updated_at)); setEditing(false) }
+    catch (caught) { setError(explain(caught)) }
+    finally { setBusy(false) }
+  }
+  return <tr className={selected ? 'selected' : undefined}>
+    <th scope="row"><div className="research-row-identity"><button type="button" className="research-row-select" aria-label={`选择研究 ${item.name}`} aria-pressed={selected} onClick={() => select(item.user_strategy_id)}><WorkbenchIcon name="draft" /></button><div>
+      <Link className="strategy-name" aria-current={selected ? 'page' : undefined} to={researchLocation(item.user_strategy_id)}>{item.name}</Link>
+      <span className="strategy-instrument">{item.instrument ? `${item.instrument.venue}:${item.instrument.symbol}` : '尚未绑定'} · {item.exchange_id ? platformNames[item.exchange_id] : '未指定交易所'}</span>
+      <span className="research-intent-excerpt">{item.intent}</span>
+    </div></div></th>
+    <td data-label="草稿状态"><span className="chip chip-draft">{item.draft.kind === 'intent' ? '想法已保存' : '草稿已配置'}</span><small className="strategy-instrument">v{item.draft.revision}{item.draft.pending_proposals > 0 ? ` · ${item.draft.pending_proposals} 项建议待审阅` : ''}</small><Link className="research-next-step" to={researchNextLocation(item)}>{nextStepNames[item.next_step]}</Link></td>
+    <td data-label="实验"><span className={`research-experiment-status ${latest?.read_error ? 'unknown' : latest?.job_status ?? ''}`}>{status}</span><small className="strategy-instrument">{item.experiment_count} 次确认{latest?.draft_revision ? ` · 冻结 v${latest.draft_revision}` : ''}</small>{latest?.job_id && <Link to={`/backtests/${encodeURIComponent(latest.job_id)}?research=${encodeURIComponent(item.user_strategy_id)}`}>{latest.report_ready ? '查看正式报告' : '查看运行'}</Link>}{latest?.read_error && <small className="strategy-instrument" role="status">{latest.read_error}</small>}</td>
+    <td data-label="最近更新"><div className="research-row-updated"><time dateTime={item.updated_at}>{item.updated_at.slice(0, 10)}<small className="strategy-instrument">{utcClock(item.updated_at)}</small></time><button className="research-row-menu" aria-label={`整理研究 ${item.name}`} aria-expanded={editing} onClick={() => { setEditing(value => !value); setExchange(item.exchange_id); setError('') }}>•••</button></div>
+      {editing && <div className="research-row-organize"><label>研究归属<select value={exchange ?? ''} onChange={event => setExchange((event.target.value || null) as PlatformId | null)}><option value="">未指定交易所</option><option value="binance">Binance</option><option value="okx">OKX</option></select></label><button disabled={busy || !api.assignResearchExchange} onClick={() => { void assign() }}>保存归属</button><small>仅用于分类，不改变草稿。</small>{error && <p role="alert">{error}</p>}</div>}
+    </td>
+  </tr>
+}
+function StrategyTable({ api, strategies, selectedId, select, changed, filtered = false }: {
+  api: ApiAdapter; strategies: ResearchSummary[]; selectedId?: string; select: (id: string) => void; changed: (value: UserStrategy) => void; filtered?: boolean
 }) {
   return <nav aria-label="策略列表" className="strategy-list">
     {strategies.length === 0
       ? <div className="research-empty-state"><WorkbenchIcon name={filtered ? 'search' : 'idea'} /><h2>{filtered ? '没有匹配的研究' : '给你的下一个想法，留一个位置。'}</h2><p className="strategy-empty">{filtered ? '当前范围没有研究。可调整筛选，或新建研究。' : '还没有策略。'}</p>{!filtered && <p>点击「新建研究」保存想法，再绑定数据、完善草稿。</p>}</div>
-      : <table className="strategy-table">
-          <thead><tr>
-            <th scope="col">研究名称</th>
-            <th scope="col">交易所 / 市场</th><th scope="col">标的</th>
-            <th scope="col">工作版本</th>
-            <th scope="col">更新时间</th>
-            <th scope="col">运行</th>
-          </tr></thead>
-          <tbody>
-            {strategies.map(item => {
-              const latest = item.experiments.at(-1)
-              const selected = item.user_strategy_id === selectedId
-              // A saved intent has no scenario, so it has no frozen run to report
-              // and nothing that could be started: its row says that plainly.
-              const unbound = isIntentDraft(item.draft)
-              return <tr key={item.user_strategy_id} className={selected ? 'selected' : undefined}>
-                <th scope="row"><div className="research-row-identity">
-                  <button type="button" className="research-row-select" aria-label={`选择研究 ${item.name}`} aria-pressed={selected} onClick={() => select(item.user_strategy_id)}><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="m4 17 5-6 5 3 6-9"/><circle cx="4" cy="17" r="1"/><circle cx="9" cy="11" r="1"/><circle cx="14" cy="14" r="1"/><circle cx="20" cy="5" r="1"/></svg></button><div>
-                  <Link className="strategy-name" aria-current={selected ? 'page' : undefined}
-                    to={researchLocation(item.user_strategy_id)}>{item.name}</Link>
-                  <span className="strategy-instrument research-intent-excerpt">{item.intent || strategyLine(item.draft)}</span>
-                </div></div></th>
-                <td data-label="交易所 / 市场"><span>未指定</span><small className="strategy-instrument">市场未记录</small></td><td data-label="标的">{isIntentDraft(item.draft) ? '待绑定' : `${item.draft.venue}:${item.draft.symbol}`}</td><td data-label="工作版本"><span className="chip chip-draft">{revisionChip(item.draft)}</span></td>
-                <td data-label="更新时间"><time dateTime={item.updated_at}>{item.updated_at.slice(0, 10)}<small className="strategy-instrument">{utcClock(item.updated_at)}</small></time>{latest && <small className="strategy-instrument">{`冻结 v${latest.payload.draft_revision}`}</small>}</td>
-                <td data-label="运行">{!latest
-                  ? <span className="table-muted">{unbound ? '不可运行' : '未启动'}</span>
-                  // A created run has a real run page, whatever owner registered it:
-                  // its state is read from that run itself, never from the record.
-                  : latest.status === 'created' && latest.job_id
-                    ? <JobStatusCell key={latest.job_id} api={api} jobId={latest.job_id} strategyId={item.user_strategy_id} />
-                    : <span className="table-muted">{EXPERIMENT_STATUS_LABELS[latest.status]}</span>}</td>
-              </tr>
-            })}
-          </tbody>
-        </table>}
+      : <table className="strategy-table research-collection-table"><thead><tr><th scope="col">研究</th><th scope="col">草稿状态</th><th scope="col">实验</th><th scope="col">最近更新</th></tr></thead><tbody>{strategies.map(item => <ResearchRow key={item.user_strategy_id} api={api} item={item} selected={item.user_strategy_id === selectedId} select={select} changed={changed} />)}</tbody></table>}
   </nav>
 }
 
@@ -2765,7 +2767,10 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
   useEffect(() => {
     if (userStrategyId) { try { sessionStorage.setItem(`quine.research-location.${userStrategyId}`, location.pathname + location.search); sessionStorage.setItem('quine.research-selection', userStrategyId) } catch { /* presentation only */ } }
   }, [userStrategyId, location.pathname, location.search])
-  const [strategies, setStrategies] = useState<UserStrategy[]>([])
+  const [strategies, setStrategies] = useState<ResearchSummary[]>([])
+  const [total, setTotal] = useState(0)
+  const [listVersion, setListVersion] = useState(0)
+  const queryKey = JSON.stringify([scope, search, sort, platform])
   // Share only the existing view invalidation between the selected research's
   // two panels. This stores no job result and never alters frozen evidence.
   const [completedReads, setCompletedReads] = useState<Record<string, Record<string, string>>>({})
@@ -2797,7 +2802,7 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
   // It is kept with the adapter it was read from, so "still reading" is derived
   // rather than written when the effect starts, and neither another adapter's answer
   // nor a late one from an adapter this workspace has left is read as this one's.
-  const [listRead, setListRead] = useState<{ api: ApiAdapter; ok: boolean; note: string } | null>(null)
+  const [listRead, setListRead] = useState<{ api: ApiAdapter; key: string; ok: boolean; note: string } | null>(null)
   const [creating, setCreating] = useState(false)
   // The half-written idea is kept above the form, so leaving the collection route
   // and coming back does not throw away what the user had typed.
@@ -2811,28 +2816,30 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
 
   useEffect(() => {
     let active = true
+    let timer: ReturnType<typeof setTimeout> | undefined
     const load = async () => {
-      const list = api.listUserStrategies
+      const list = api.listResearch
       if (!list) {
         // The optional method is settled asynchronously, so a workspace that
         // unmounts or swaps its api never writes this note from a stale load.
         await Promise.resolve()
-        if (active) setListRead({ api, ok: false, note: '这个工作区不提供用户策略。' })
+        if (active) setListRead({ api, key: queryKey, ok: false, note: '这个工作区不提供研究集合。' })
         return
       }
       try {
-        const items = await list()
+        const collection = await list({ q: search, ...(scope === 'current' && platform ? { exchange_id: platform } : {}), sort: sort === 'name' ? 'name' : 'updated' })
         if (active) {
-          setStrategies(items)
-          setListRead({ api, ok: true, note: '' })
+          setStrategies(collection.items); setTotal(collection.total)
+          setListRead({ api, key: queryKey, ok: true, note: '' })
+          if (collection.items.some(item => ['accepted','running','stopping'].includes(item.latest_experiment?.job_status ?? ''))) timer = setTimeout(() => setListVersion(value => value + 1), OBSERVATION_INTERVAL_MS)
         }
       } catch (error) {
-        if (active) setListRead({ api, ok: false, note: explain(error) })
+        if (active) setListRead({ api, key: queryKey, ok: false, note: explain(error) })
       }
     }
     void load()
-    return () => { active = false }
-  }, [api])
+    return () => { active = false; clearTimeout(timer) }
+  }, [api, queryKey, search, scope, platform, sort, listVersion])
 
   useEffect(() => {
     let active = true
@@ -2869,39 +2876,42 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
     return () => { active = false }
   }, [api, check])
 
+  const selectedInList = !userStrategyId && listRead?.api === api && listRead.key === queryKey && listRead.ok
+    ? strategies.find(item => item.user_strategy_id === (listParams.get('selected') ?? lastSelectedId)) : undefined
+  const requestedId = userStrategyId ?? selectedInList?.user_strategy_id
   useEffect(() => {
-    if (!userStrategyId) return
+    if (!requestedId) return
     const read = api.getUserStrategy
     let active = true
     if (!read) {
       // Settled asynchronously for the same reason as the list above: this note is
       // never written by a read the workspace has already left.
       void Promise.resolve().then(() => {
-        if (active) setDetailNote({ id: userStrategyId, text: '这个工作区不提供读取单条策略。' })
+        if (active) setDetailNote({ id: requestedId, text: '这个工作区不提供读取单条策略。' })
       })
       return () => { active = false }
     }
-    read(userStrategyId)
-      .then(value => { if (active) { setDetail({ id: value.user_strategy_id, value }); setDetailNote(null) } })
+    read(requestedId)
+      .then(value => {
+        if (value.user_strategy_id !== requestedId) throw new Error('读取到的研究与当前选择不一致。')
+        if (active) { setDetail({ id: value.user_strategy_id, value }); setDetailNote(null) }
+      })
       // The failure names the strategy it was read for, so it is not shown over
       // another strategy's page.
-      .catch(error => { if (active) setDetailNote({ id: userStrategyId, text: explain(error) }) })
+      .catch(error => { if (active) setDetailNote({ id: requestedId, text: explain(error) }) })
     return () => { active = false }
-  }, [api, userStrategyId])
+  }, [api, requestedId])
 
   // The render is derived from the routed id, never from whatever was read last:
   // a strategy that is no longer the open one is never rendered as if it were, so
   // a slow answer or a stale callback cannot put another object's editable draft,
   // preview or approval under this route.
   const current = detail && detail.id === userStrategyId ? detail.value : null
-  const filtered = (scope === 'current' ? [] : strategies).filter(item => `${item.name} ${item.intent} ${isIntentDraft(item.draft) ? '' : item.draft.symbol}`.toLowerCase().includes(search.toLowerCase())).sort((a, b) => sort === 'name' ? a.name.localeCompare(b.name) : b.updated_at.localeCompare(a.updated_at))
-  const selectedInList = !userStrategyId && listRead?.api === api && listRead.ok
-    ? filtered.find(item => item.user_strategy_id === (listParams.get('selected') ?? lastSelectedId)) ?? filtered[0] : undefined
   const selectInList = (id: string) => {
     try { sessionStorage.setItem('quine.research-selection', id) } catch { /* URL keeps the selection */ }
     setListParams(new URLSearchParams({ ...Object.fromEntries(listParams), selected: id }))
   }
-  const assistantStrategy = current ?? selectedInList
+  const assistantStrategy = detail && detail.id === requestedId ? detail.value : null
   const selectedModel = assistantStrategy?.model_profile_id
     ? model?.value?.profiles?.find(item => item.id === assistantStrategy.model_profile_id)
     : model?.value
@@ -2916,7 +2926,7 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
     && modelSendBlock === null && usableCount > 0 && data.count > data.invalid
 
   // Loading, ready and failed, read from the adapter this list state belongs to.
-  const listSettled = listRead && listRead.api === api ? listRead : null
+  const listSettled = listRead && listRead.api === api && listRead.key === queryKey ? listRead : null
   const listState: 'reading' | 'ready' | 'failed' =
     !listSettled ? 'reading' : listSettled.ok ? 'ready' : 'failed'
   const listNote = listSettled?.note ?? ''
@@ -2940,15 +2950,11 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
       delete next[value.user_strategy_id]
       return next
     })
-    setStrategies(items => items.some(item => item.user_strategy_id === value.user_strategy_id)
-      ? items.map(item => item.user_strategy_id === value.user_strategy_id ? value : item)
-      : [...items, value])
-  }, [setDetail, setNotes, setStrategies])
+    setListVersion(value => value + 1)
+  }, [setListVersion])
 
   const created = (value: UserStrategy) => {
-    setStrategies(items => items.some(item => item.user_strategy_id === value.user_strategy_id)
-      ? items
-      : [...items, value])
+    setListVersion(value => value + 1)
     setCreating(false)
     // One create selects the strategy it just saved: its own conversation opens
     // immediately, with no second creation step.
@@ -2967,16 +2973,13 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
   const actionNote = current ? notes[current.user_strategy_id] ?? '' : ''
   // A selected strategy that has neither answered nor failed is still being read;
   // that is a state to say out loud, not an empty selection and not an empty page.
-  const detailFailed = Boolean(userStrategyId) && detailNote?.id === userStrategyId
-  const detailReading = Boolean(userStrategyId) && current === null && !detailFailed
-
-  // The current contract records market venue, not exchange workspace ownership.
-  // Every existing object therefore remains unassigned, including when filtered.
+  const detailFailed = Boolean(requestedId) && detailNote?.id === requestedId
+  const detailReading = Boolean(requestedId) && assistantStrategy === null && !detailFailed
   return <ResearchSplitLayout key={userStrategyId ?? 'list'} storageKey={userStrategyId ?? 'list'}>
     <div className={`strategy-column ${userStrategyId ? 'research-detail-canvas' : 'research-list-canvas'}`}>
       {!userStrategyId && <header className="strategy-heading">
-        <h1>研究</h1>
-        {listState === 'ready' && <span className="strategy-count">{`${strategies.length} 项研究`}</span>}
+        <h1>研究工作台</h1>
+        {listState === 'ready' && <span className="strategy-count">{`${total} 项研究`}</span>}
         {/* The control follows the routed id, not what has been read: a selected
             strategy whose read is still in flight or has failed is still a selected
             route, where the form is not offered. There the one click goes to the
@@ -3007,19 +3010,19 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
           ] as const).map(([icon, title, description]) => <li key={icon}><WorkbenchIcon name={icon} /><div><strong>{title}</strong><span>{description}</span></div></li>)}
         </ol>
       </>}
-      {!userStrategyId && <div className="research-list-controls"><div className="research-scope-row"><div className="scope-switch" role="group" aria-label="研究范围"><button aria-pressed={scope === 'all'} onClick={() => filter({ scope: 'all' })}>全部研究</button><button aria-pressed={scope === 'current'} onClick={() => filter({ scope: 'current' })}>当前交易所</button></div><p className="muted">{scope === 'current' ? platform ? `${platformNames[platform]} · 当前没有归属此交易所的研究。历史未归属研究仍在全部研究。` : '请先从侧栏选择交易所。' : '切换交易所仅改变筛选'}</p></div><div className="list-search"><input type="search" aria-label="搜索研究" placeholder="搜索研究名称、标的或备注" value={search} onChange={e => filter({ search: e.target.value })} /><select aria-label="研究排序" value={sort} onChange={e => filter({ sort: e.target.value })}><option value="updated">最近更新</option><option value="name">名称</option></select></div></div>}
+      {!userStrategyId && <div className="research-list-controls"><div className="research-scope-row"><div className="scope-switch" role="group" aria-label="研究范围"><button aria-pressed={scope === 'all'} onClick={() => filter({ scope: 'all' })}>全部研究</button><button disabled={!platform} aria-pressed={scope === 'current'} onClick={() => filter({ scope: 'current' })}>当前交易所</button></div><p className="muted">{scope === 'current' ? platform ? `${platformNames[platform]} · 按研究归属筛选` : '请先从侧栏选择交易所。' : '切换交易所仅改变筛选'}</p></div><div className="list-search"><input type="search" aria-label="搜索研究" placeholder="搜索研究名称、标的或备注" value={search} onChange={e => filter({ search: e.target.value })} /><select aria-label="研究排序" value={sort} onChange={e => filter({ sort: e.target.value })}><option value="updated">最近更新</option><option value="name">名称</option></select></div></div>}
       {!userStrategyId && (listState === 'reading'
-        ? <p className="muted" role="status" aria-live="polite">正在读取策略…</p>
-        : listState === 'ready' && <StrategyTable api={api} strategies={filtered} selectedId={selectedInList?.user_strategy_id} select={selectInList} filtered={scope === 'current' || !!search} />)}
-      {listNote && <p role="alert" className="notice error">{listNote}</p>}
+        ? <p className="muted" role="status" aria-live="polite">正在读取研究…</p>
+        : listState === 'ready' && <StrategyTable api={api} strategies={strategies} selectedId={selectedInList?.user_strategy_id} select={selectInList} changed={changed} filtered={scope === 'current' || !!search} />)}
+      {listNote && <p role="alert" className="notice error">{listNote}<button onClick={() => setListVersion(value => value + 1)}>重新读取研究</button></p>}
       {!userStrategyId && <div className="research-history-entry">
         <Link to="/backtests#history-records">历史记录 <span aria-hidden="true">→</span></Link>
       </div>}
 
       {showCreate && <CreateStrategy api={api} created={created} value={createDraft} update={setCreateDraft} close={() => { setCreating(false); navigate("/strategies", { replace: true, state: null }) }} />}
-      {detailNote && detailNote.id === userStrategyId &&
+      {detailNote && detailNote.id === requestedId &&
         <p role="alert" className="notice error">{detailNote.text}</p>}
-      {detailReading && <p className="muted" role="status" aria-live="polite">正在读取策略…</p>}
+      {detailReading && <p className="muted" role="status" aria-live="polite">正在读取研究…</p>}
       {current && <>
         {actionNote && <p role="alert" className="notice error">{actionNote}</p>}
         <StrategyDetail
@@ -3075,7 +3078,7 @@ export function StrategiesWorkspace({ api }: { api: ApiAdapter }) {
 }
 
 /** A report uses its recorded research conversation and pins the exact frozen job. */
-export function ReportAssistant({ api, jobId, sources, changed }: { api: ApiAdapter; jobId: string; sources: UserStrategy[] | null; changed: (next: UserStrategy) => void }) {
+export function ReportAssistant({ api, jobId, sources, changed }: { api: ApiAdapter; jobId: string; sources: ResearchReference[] | null; changed: (next: UserStrategy) => void }) {
   const [model, setModel] = useState<ModelConfigurationStatus | null>(null)
   const [reads, setReads] = useState<Record<string, string>>({})
   useEffect(() => {
@@ -3084,8 +3087,20 @@ export function ReportAssistant({ api, jobId, sources, changed }: { api: ApiAdap
     return () => { active = false }
   }, [api])
   const records = (sources ?? []).flatMap(item => item.experiments.filter(experiment => experiment.job_id === jobId).map(() => item))
-  const strategy = records.length === 1 ? records[0] : null
+  const owner = records.length === 1 ? records[0].user_strategy_id : null
+  const [loaded, setLoaded] = useState<{api: ApiAdapter; sources: ResearchReference[] | null; id: string; value: UserStrategy | null; error?: string} | null>(null)
+  useEffect(() => {
+    let active = true
+    if (owner) void (api.getUserStrategy ? api.getUserStrategy(owner) : Promise.reject(new Error('本客户端无法读取研究会话。')))
+      .then(value => {
+        if (value.user_strategy_id !== owner) throw new Error('读取到的研究与报告来源不一致。')
+        if (active) setLoaded({api,sources,id:owner,value})
+      }).catch(error => { if (active) setLoaded({api,sources,id:owner,value:null,error:explain(error)}) })
+    return () => { active = false }
+  }, [api, owner, sources])
+  const observed = loaded?.id === owner && loaded.api === api && loaded.sources === sources ? loaded : null
+  const strategy = observed?.value ?? null
   const selected = strategy?.model_profile_id ? model?.profiles?.find(profile => profile.id === strategy.model_profile_id) : model
-  return strategy ? <ChatPanel key={`${strategy.user_strategy_id}.${strategy.draft.revision}.${strategy.model_profile_id ?? ''}`} api={api} strategy={strategy} strategies={sources ?? []} changed={changed} modelStatus={model} modelSendBlock={selected?.configured ? null : '模型未配置或状态不可读，请前往模型连接。'} completedReads={reads} completed={(_id, job, turn) => setReads(value => ({ ...value, [job]: turn }))} fixedEvidenceJobId={jobId} />
-    : <div className="preview-assistant"><h2>QUINE 研究助手</h2><p>上下文：当前冻结报告</p><p>{!sources ? '正在读取报告的研究来源…' : '这份报告没有唯一可核对的研究会话。可独立阅读报告事实。'}</p><Link to="/strategies">前往研究</Link></div>
+  return strategy ? <ChatPanel key={`${strategy.user_strategy_id}.${strategy.draft.revision}.${strategy.model_profile_id ?? ''}`} api={api} strategy={strategy} strategies={sources ?? []} changed={value => { setLoaded({api,sources,id:value.user_strategy_id,value}); changed(value) }} modelStatus={model} modelSendBlock={selected?.configured ? null : '模型未配置或状态不可读，请前往模型连接。'} completedReads={reads} completed={(_id, job, turn) => setReads(value => ({ ...value, [job]: turn }))} fixedEvidenceJobId={jobId} />
+    : <div className="preview-assistant"><h2>QUINE 研究助手</h2><p>上下文：当前冻结报告</p><p>{!sources ? '正在读取报告的研究来源…' : owner ? observed?.error ? `研究会话读取失败：${observed.error}` : '正在读取来源研究的会话…' : '这份报告没有唯一可核对的研究会话。可独立阅读报告事实。'}</p><Link to="/strategies">前往研究</Link></div>
 }

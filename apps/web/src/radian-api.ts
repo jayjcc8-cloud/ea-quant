@@ -9,39 +9,6 @@ import type { DesktopStatus } from './desktop-settings'
  * financial fact from the numbers shown here.
  */
 
-export type WorkItemKind = 'backtest' | 'batch' | 'holdout' | 'candidate'
-
-export type WorkItem = {
-  id: string
-  kind: WorkItemKind
-  status: string | null
-  created_at: string | null
-  scenario_id?: string | null
-  name?: string | null
-  strategy_id?: string | null
-  instrument?: { venue: string; symbol: string } | null
-  member_count?: number
-  source_job_id?: string | null
-  holdout_job_id?: string | null
-  decision?: string | null
-  link: string
-}
-
-export type AttentionItem = {
-  id: string
-  kind: 'paper' | 'job' | 'alert'
-  severity: string
-  message: string
-  observation?: string
-  observed_at?: string | null
-  run_id?: string
-  job_id?: string
-  status?: string
-  state?: string
-  operator_action?: string
-}
-
-/** The observed ea.paper-health.v1 projection, as re-observed by the reader. */
 export type PaperHealth = {
   schema: string
   run_id?: string
@@ -108,20 +75,6 @@ export type PaperOverview = {
   health?: PaperHealth | HealthUnavailable | null
 }
 
-export type ModelStatus = {
-  configured: boolean
-  provider: string | null
-  model: string | null
-}
-
-export type WorkspaceOverview = {
-  schema: 'radian.workspace-overview.v1'
-  recent_work: WorkItem[]
-  attention: AttentionItem[]
-  paper: PaperOverview
-  model: ModelStatus
-}
-
 export type PaperEvent = {
   event?: string
   operation?: string
@@ -141,20 +94,6 @@ export type PaperEvents = {
   count?: number
   total_lines?: number
   truncated?: boolean
-}
-
-export type SearchResult = {
-  kind: 'scenario' | 'backtest' | 'batch' | 'holdout' | 'candidate'
-  id: string
-  label: string
-  status: string | null
-  link: string
-}
-
-export type SearchResponse = {
-  schema: 'radian.search.v1'
-  query: string
-  results: SearchResult[]
 }
 
 export type SettingsStatus = {
@@ -184,12 +123,10 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const radianApi = {
-  overview: () => apiRequest<WorkspaceOverview>('/api/workspace/overview'),
   paperOverview: (runId?: string) =>
     apiRequest<PaperOverview>(`/api/paper/overview${runId ? `?run_id=${encodeURIComponent(runId)}` : ''}`),
   paperEvents: (runId?: string, limit = 100) =>
     apiRequest<PaperEvents>(`/api/paper/events?limit=${limit}${runId ? `&run_id=${encodeURIComponent(runId)}` : ''}`),
-  search: (query: string) => apiRequest<SearchResponse>(`/api/search?q=${encodeURIComponent(query)}`),
   desktopSettings: () => apiRequest<DesktopStatus>('/api/desktop/settings'),
   saveDesktopSettings: (body: object) => apiRequest<DesktopStatus>('/api/desktop/settings', { method: 'POST', body: JSON.stringify(body) }),
   settingsStatus: () => apiRequest<SettingsStatus>('/api/settings/status'),

@@ -285,3 +285,26 @@ table.strategy-table { border-radius: 9px; border-color: var(--line); }
   .assistant-start-actions > a { min-height: 68px; padding-block: 12px; }
   .assistant-boundary { margin-bottom: 16px; }
 }
+
+/* Four product questions, instead of columns copied from the storage document. */
+.research-collection-table { table-layout: fixed; }
+.research-collection-table th:nth-child(1) { width: 40%; }
+.research-collection-table th:nth-child(2) { width: 21%; }
+.research-collection-table th:nth-child(3) { width: 21%; }
+.research-collection-table th:nth-child(4) { width: 18%; }
+.research-collection-table th, .research-collection-table td { vertical-align: top; overflow-wrap: anywhere; }
+.research-collection-table .research-intent-excerpt { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.7; font-weight: 400; }
+.research-next-step { display: inline-block; margin-top: 8px; color: var(--accent); }
+.research-experiment-status { display: inline-flex; padding: 4px 8px; background: var(--soft); border-radius: 5px; }
+.research-experiment-status.running, .research-experiment-status.accepted { background: var(--notice); color: var(--accent); }
+.research-experiment-status.unknown { background: var(--danger-soft); color: var(--danger); }
+.research-row-updated { display: flex; align-items: start; gap: 6px; }
+.research-row-menu { margin-left: auto; border: 0; background: transparent; padding: 2px 5px; min-width: 28px; min-height: 28px; }
+.research-row-organize { display: grid; gap: 10px; padding-top: 14px; }
+.research-row-organize select { width: 100%; font-size: 12px; padding: 6px; }
+.research-row-organize small { color: var(--muted); font-size: 11px; }
+@media (max-width: 640px) {
+  .research-collection-table th:nth-child(n) { width: auto; }
+  .research-row-updated { justify-content: space-between; }
+  .research-row-organize { grid-column: 1 / -1; }
+}

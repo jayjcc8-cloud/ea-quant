@@ -125,3 +125,26 @@ Old scenarios, reports and jobs retain their original formats and behavior.
 
 Web V4 integer controls reject values outside ±9007199254740991 to preserve exact JSON/browser
 input identity. The CLI retains its original integer contract; no value is silently clamped.
+
+### Research workbench reads
+
+The collection follows the product's four columns: research identity, current draft,
+latest experiment, and update time. `GET /api/research?q=&exchange_id=&sort=` returns
+compact `items`, `total`, and `matched`; the server owns search, exchange filtering,
+ordering, and the next-step projection. It does not return conversations, parameters,
+or revision history. A full research document is read only after explicit selection.
+
+`exchange_id` is optional organization metadata (`binance`, `okx`, or null), separate
+from instrument venue and connection state. Older documents remain unassigned.
+`PATCH /api/research/{id}/exchange` requires `expected_updated_at` and rejects stale
+writes; assigning an exchange does not revise a draft or dispatch work.
+
+`GET /api/research/references?job_id=` returns only identities needed by frozen report
+associations and resource provenance. Duplicate records remain ambiguous. A unique
+report owner must still be read before opening its conversation. Status summaries
+reuse the existing strategy reconciliation and execution owners; they are not a
+second lifecycle store. Report readiness remains separate from dispatch and success.
+
+The former collection `GET /api/user-strategies`, unused workspace overview, and
+workspace-wide search routes are removed. Creation, single-document reads, draft,
+conversation, and experiment commands retain their existing responsibilities.

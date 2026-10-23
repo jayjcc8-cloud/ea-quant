@@ -1,3 +1,4 @@
+import { researchCollection } from '../preview/research-fixtures'
 /**
  * The evidence a user strategy's conversation may be grounded in.
  *
@@ -277,7 +278,8 @@ function scripted(script: Script = {}) {
     getReport: async (jobId) => script.report ? script.report(jobId) : REPORTS[jobId],
     getEquityPath: async () => { throw new Error('no equity path in these fixtures') },
     artifactUrl: (jobId, name) => `/api/backtests/${jobId}/artifacts/${name}`,
-    listUserStrategies: async () => [persisted],
+    listResearch: async query => researchCollection([persisted], query),
+    researchReferences: async () => [persisted],
     getUserStrategy: async () => { calls.get += 1; return persisted },
     previewUserStrategyExperiment: async () => { calls.preview += 1; throw new Error('unused') },
     launchUserStrategyExperiment: async () => { calls.launch += 1; throw new Error('unused') },
@@ -354,7 +356,7 @@ describe('user strategy evidence comparison', () => {
     const { api, calls, sent } = scripted({
       ask: async () => { throw new Error('asking was not approved') },
     })
-    api.listUserStrategies = async () => [strategy({ experiments: [LATEST] })]
+    api.researchReferences = async () => [strategy({ experiments: [LATEST] })]
     api.getUserStrategy = async () => strategy({ experiments: [LATEST] })
     detail(api)
     const region = await openResearch(user)
@@ -849,7 +851,7 @@ describe('evidence address continuity', () => {
     // refuses, and exactly what this panel must not resolve on its own.
     const doubled = strategy({ experiments: [EARLIER, { ...EARLIER, launch_intent_id: 'li-3' }] })
     const { api, calls, sent } = scripted({ ask: async () => { throw new Error('nothing may be asked') } })
-    api.listUserStrategies = async () => [doubled]
+    api.researchReferences = async () => [doubled]
     api.getUserStrategy = async () => doubled
     detailAt(api, '?evidence_a=job-1')
     const region = await openResearch(user)
