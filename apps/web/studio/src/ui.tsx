@@ -621,6 +621,52 @@ export function Chart({
     </section>
   );
 }
+function ReportEvidence({ report }: { report: Report }) {
+  const { navigate } = useStudio();
+  const result = metrics(report);
+  return (
+    <section className="report-evidence" aria-label="报告解读与证据">
+      <div className="report-evidence-heading">
+        <h2>这份报告说明了什么</h2>
+        <small>离线演示 · 按冻结数据汇总 · 未调用模型</small>
+      </div>
+      <div className="report-reading">
+        <p>
+          本场景净收益 <strong>{result.net.toFixed(1)}%</strong>，
+          最大回撤 <strong>{Math.abs(result.drawdown).toFixed(1)}%</strong>。
+        </p>
+        <p>
+          共 {result.count} 笔交易，费用影响 {result.cost.toFixed(2)}%。
+          单次场景不足以判断策略稳健性。
+        </p>
+      </div>
+      <div className="report-evidence-links" aria-label="报告证据">
+        <LinkButton onClick={() => navigate(`/report/${report.id}/overview`)}>
+          [1] {report.id} · 指标与净值
+        </LinkButton>
+        <LinkButton onClick={() => navigate(`/report/${report.id}/inputs`)}>
+          [2] 冻结输入 · r{report.input.revision}
+        </LinkButton>
+        <LinkButton onClick={() => navigate(`/report/${report.id}/trades`)}>
+          [3] 交易明细 · {result.count} 笔
+        </LinkButton>
+      </div>
+      <div className="report-next-step">
+        <h3>下一步检查</h3>
+        <p>先核对交易与成本，再用独立区间继续验证。</p>
+        <div className="button-row">
+          <Button onClick={() => navigate(`/report/${report.id}/trades`)}>
+            检查交易
+          </Button>
+          <Button onClick={() => navigate(`/holdout/new?report=${report.id}`)}>
+            配置留出验证
+          </Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export function AgentPanel({
   objectId,
   context,
@@ -636,11 +682,14 @@ export function AgentPanel({
     action = useAction(),
     buffer = useBuffer(`agent-${objectId}`, "");
   const inputId = useId(),
+    report = state.reports.find((r) => r.id === objectId),
+    hasReport = !!report,
     messages = state.messages.filter((m) => m.objectId === objectId),
     end = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    end.current?.scrollIntoView({ block: "nearest" });
-  }, [messages.length]);
+    if (!hasReport || messages.length > 0)
+      end.current?.scrollIntoView({ block: "nearest" });
+  }, [messages.length, hasReport]);
   const send = async () => {
     const result = await action.execute({
       type: "agent.ask",
@@ -654,7 +703,7 @@ export function AgentPanel({
     }
   };
   return (
-    <aside className="agent-panel">
+    <aside className={`agent-panel${report ? " report-agent" : ""}`}>
       <div className="agent-heading">
         <Logo small />
         <div>
@@ -666,25 +715,31 @@ export function AgentPanel({
         )}
       </div>
       <div className="agent-history">
-        <div className="agent-note">
-          当前上下文已绑定。先检查产物与证据，再决定下一步。
-          <small>演示任务 · 未调用模型</small>
-        </div>
-        <details className="agent-context">
-          <summary>
-            <Icon name="file" />
-            来源与上下文 <span>{references.length} 项</span>
-          </summary>
-          <p>{context}</p>
-          {references.map((r) => (
-            <LinkButton key={r.route} onClick={() => navigate(r.route)}>
-              {r.label}
-            </LinkButton>
-          ))}
-        </details>
+        {report ? (
+          <ReportEvidence report={report} />
+        ) : (
+          <>
+            <div className="agent-note">
+              当前上下文已绑定。先检查产物与证据，再决定下一步。
+              <small>演示任务 · 未调用模型</small>
+            </div>
+            <details className="agent-context">
+              <summary>
+                <Icon name="file" />
+                来源与上下文 <span>{references.length} 项</span>
+              </summary>
+              <p>{context}</p>
+              {references.map((r) => (
+                <LinkButton key={r.route} onClick={() => navigate(r.route)}>
+                  {r.label}
+                </LinkButton>
+              ))}
+            </details>
+          </>
+        )}
         {messages.length === 0 && (
           <div className="suggestions">
-            <small>你可以这样问</small>
+            <small>{report ? "继续与研究助手讨论" : "你可以这样问"}</small>
             <Button
               icon="chart"
               onClick={() => buffer.update("解释当前结果与限制")}
@@ -729,7 +784,7 @@ export function AgentPanel({
         </label>
         <textarea
           id={inputId}
-          placeholder="继续讨论这个研究…"
+          placeholder={report ? "询问这份报告…" : "继续讨论这个研究…"}
           value={buffer.value}
           onChange={(e) => buffer.update(e.target.value)}
           onKeyDown={(e) => {
@@ -767,15 +822,17 @@ export function DetailLayout({
   objectId,
   context,
   references,
+  className = "",
 }: {
   children: ReactNode;
   objectId: string;
   context: string;
   references?: { label: string; route: string }[];
+  className?: string;
 }) {
   const { openAgent } = useStudio();
   return (
-    <div className="detail-layout">
+    <div className={`detail-layout ${className}`}>
       <div className="detail-content">
         <div className="agent-open">
           <Button icon="panel" onClick={openAgent}>

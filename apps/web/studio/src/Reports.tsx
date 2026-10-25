@@ -2,6 +2,7 @@ import { useState } from "react";
 import { download, money, useBuffer, useStudio } from "./context";
 import { metrics } from "./model";
 import type { Report, Trade } from "./model";
+import "./report-overview.css";
 import {
   Button,
   Chart,
@@ -434,7 +435,8 @@ export function ReportView({
         />
       </div>
     );
-  const research = state.researches.find((x) => x.id === r.researchId);
+  const research = state.researches.find((x) => x.id === r.researchId),
+    dataset = state.datasets.find((d) => d.id === r.input.datasetId);
   const content = (
     <>
       <PageHeader
@@ -486,38 +488,33 @@ export function ReportView({
             ]}
           />
           <Panel title="来源与范围">
-            <div className="form-grid three">
+            <dl className="report-sources">
               <div>
-                <small>策略草稿</small>
-                <p>
-                  r{r.input.revision}
-                  <br />
-                  双均线 {r.input.fast}/{r.input.slow}
-                </p>
+                <dt>策略草稿</dt>
+                <dd>
+                  <strong>冻结版本 r{r.input.revision}</strong>
+                  <span>
+                    双均线 {r.input.fast}/{r.input.slow}
+                  </span>
+                </dd>
               </div>
               <div>
-                <small>数据版本</small>
-                <p>
-                  {r.input.datasetId}
-                  <br />
-                  {
-                    state.datasets.find((d) => d.id === r.input.datasetId)
-                      ?.symbol
-                  }{" "}
-                  {
-                    state.datasets.find((d) => d.id === r.input.datasetId)
-                      ?.frequency
-                  }
-                </p>
+                <dt>数据版本</dt>
+                <dd>
+                  <strong>{r.input.datasetId}</strong>
+                  <span>
+                    {dataset?.symbol} · {dataset?.frequency}
+                  </span>
+                </dd>
               </div>
               <div>
-                <small>样本区间</small>
-                <p>
-                  {r.input.start}
-                  <br />— {r.input.end}
-                </p>
+                <dt>样本区间</dt>
+                <dd>
+                  <span>{r.input.start}</span>
+                  <span>至 {r.input.end}</span>
+                </dd>
               </div>
-            </div>
+            </dl>
             <Notice>
               单次演示回测只反映所选场景，不代表稳健性或未来收益。
             </Notice>
@@ -606,6 +603,7 @@ export function ReportView({
   );
   return tab === "overview" ? (
     <DetailLayout
+      className="report-overview"
       objectId={id}
       context={`报告 ${id} · r${r.input.revision} · 只读证据`}
       references={[
