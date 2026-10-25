@@ -1419,10 +1419,6 @@ details li {
 .preview-boundary {
   margin-bottom: 24px;
 }
-.directory-list .button {
-  width: 100%;
-  margin-bottom: 12px;
-}
 .directory-item {
   display: flex;
   align-items: center;

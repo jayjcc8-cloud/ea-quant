@@ -10,6 +10,7 @@ import {
   useUnsaved,
 } from "./context";
 import type { Connection } from "./model";
+import "./model-connections.css";
 import {
   ActionError,
   Button,
@@ -742,6 +743,7 @@ function ConnectionEditor({ connection }: { connection: Connection }) {
   });
   return (
     <Panel
+      className="model-editor"
       title={
         <>
           {buffer.value.name} {dirty && <Status tone="warn">未保存更改</Status>}
@@ -784,7 +786,7 @@ function ConnectionEditor({ connection }: { connection: Connection }) {
           aria-label="密钥演示占位"
         />
       </Field>
-      <details>
+      <details className="connection-options">
         <summary>请求选项</summary>
         <Field label="超时（秒）">
           <input
@@ -804,45 +806,56 @@ function ConnectionEditor({ connection }: { connection: Connection }) {
         />
         设为默认连接
       </label>
-      <Panel title="连接测试">
-        <p className="muted">测试仅验证演示场景，保存后才用于研究上下文。</p>
-        {testMessage && <Notice tone="success">{testMessage}</Notice>}
-        <ActionError error={testError} />
-        <Button
-          disabled={testing}
-          onClick={async () => {
-            setTesting(true);
-            setTestError("");
-            setTestMessage("");
-            const tested = { ...buffer.getCurrent() };
-            try {
-              const message = await adapter.testConnection();
-              if (
-                JSON.stringify(buffer.getCurrent()) === JSON.stringify(tested)
-              ) {
-                setTestMessage(message);
-                buffer.update({ ...tested, tested: true });
-              } else {
-                setTestMessage(
-                  "测试期间配置已更改；新输入已保留，请重新测试当前配置。",
-                );
+      <section className="connection-test" aria-label="连接测试">
+        <div className="connection-test-summary">
+          <div>
+            <h3>连接测试</h3>
+            <p
+              className={testError ? "connection-test-error" : undefined}
+              role={testError ? "alert" : testMessage ? "status" : undefined}
+            >
+              {testError ||
+                testMessage ||
+                "仅测试演示场景，保存后才用于研究上下文。"}
+            </p>
+          </div>
+          <Button
+            disabled={testing}
+            onClick={async () => {
+              setTesting(true);
+              setTestError("");
+              setTestMessage("");
+              const tested = { ...buffer.getCurrent() };
+              try {
+                const message = await adapter.testConnection();
+                if (
+                  JSON.stringify(buffer.getCurrent()) === JSON.stringify(tested)
+                ) {
+                  setTestMessage(message);
+                  buffer.update({ ...tested, tested: true });
+                } else {
+                  setTestMessage(
+                    "测试期间配置已更改；新输入已保留，请重新测试当前配置。",
+                  );
+                }
+              } catch (error) {
+                setTestError((error as Error).message);
+              } finally {
+                setTesting(false);
               }
-            } catch (error) {
-              setTestError((error as Error).message);
-            } finally {
-              setTesting(false);
-            }
-          }}
-        >
-          {testing ? "测试中…" : testError ? "重试连接测试" : "测试连接"}
-        </Button>
-      </Panel>
+            }}
+          >
+            {testing ? "测试中…" : testError ? "重试连接测试" : "测试连接"}
+          </Button>
+        </div>
+      </section>
       <ActionError error={action.error || buffer.bufferError} />
-      <div className="action-footer">
+      <div className="connection-actions">
         <Button
           onClick={() => {
             buffer.update(connection);
             buffer.clear();
+            action.clearError();
             setTestMessage("");
             setTestError("");
           }}
@@ -870,14 +883,14 @@ export function Models({ id }: { id?: string }) {
           state.connections[0] ??
           emptyConnection);
   return (
-    <div className="page">
+    <div className="page model-connections">
       <PageHeader
         title="模型连接"
         subtitle="配置研究助手使用的模型。当前为场景演示。"
       />
       <ResourceTabs active="models" />
-      <div className="connection-layout">
-        <section className="directory-list">
+      <div className="model-layout">
+        <section className="model-directory" aria-label="已保存的模型连接">
           <Button
             kind="primary"
             icon="plus"
@@ -889,16 +902,19 @@ export function Models({ id }: { id?: string }) {
             <button
               key={c.id}
               className={`directory-item ${c.id === selected.id ? "selected" : ""}`}
+              aria-current={c.id === selected.id ? "true" : undefined}
               onClick={() => navigate(`/resources/models/${c.id}`)}
             >
               <Icon name="cube" />
               <span>
-                <strong>{c.name}</strong>
+                <span className="connection-name">
+                  <strong>{c.name}</strong>
+                  {c.isDefault && <Status tone="blue">默认</Status>}
+                </span>
                 <small>
                   {c.tested ? "已保存 · 演示测试成功" : "已保存 · 未测试"}
                 </small>
               </span>
-              {c.isDefault && <Status tone="blue">默认</Status>}
             </button>
           ))}
         </section>
