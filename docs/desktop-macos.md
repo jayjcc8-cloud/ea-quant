@@ -162,3 +162,33 @@ Interactive research grants now authorize at most 24 requests per new task or ex
 continuation. The interface states the new-message allowance and the persisted task's actual
 cumulative authorization, used and remaining counts. Historic approvals and idempotent grant
 replays retain their original values. Request count is not a monetary cap.
+
+## Native CI checks
+
+Two native jobs extend [path routing](../CONTRIBUTING.md#required-checks) without changing
+existing job IDs or the shared E2E policy:
+
+- `rust_core` runs on `ubuntu-latest` when `crates/quine-core/**` (non-Markdown), the root
+  `Cargo.toml`/`Cargo.lock`, `rust-toolchain*`, `.cargo/**`, `scripts/build_desktop.py`,
+  `scripts/ci_routes.py` or `.github/workflows/ci.yml` changes. It installs a minimal stable Rust
+  toolchain and runs
+  `cargo test --locked --manifest-path crates/quine-core/Cargo.toml --lib --test store --test cli --test canonical_identity`.
+  These are the unit, store, CLI and canonical-identity contract tests. `tests/stage2.rs` is the
+  real-engine Python journey and is deliberately excluded; this job does not claim to run the
+  complete Rust integration suite and needs no Python environment.
+- `macos_shell` runs on the official `macos-15` Apple Silicon standard runner when
+  `apps/desktop/**` (non-Markdown), the root Rust inputs above, `scripts/build_desktop.py`,
+  `scripts/ci_routes.py` or `.github/workflows/ci.yml` changes. It asserts `uname -m` is `arm64`,
+  installs minimal stable Rust and runs
+  `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`. This is a compile-only
+  check: it does not build an installable package, launch the app, link the Python runtime or sign
+  anything. The runner label table is authoritative:
+  <https://docs.github.com/en/actions/reference/runners/github-hosted-runners> lists `macos-15` as
+  arm64 and the Intel label separately as `macos-15-intel`.
+
+Both jobs use paths under `.local/` for cargo targets, set a bounded timeout, keep
+`persist-credentials: false` with the same exact event checkout as the other jobs, and fail rather
+than continue on error. Markdown, `docs/**`, ordinary `src/ea/**` Python, `apps/web/**` React,
+plain Python tests and other existing workflows do not trigger them. Unknown paths, an empty diff
+and unsupported Git statuses route conservatively to both checks. Neither native job adds a cargo
+cache action, artifact hash, packaging, signing, publication, frontend build or second E2E suite.

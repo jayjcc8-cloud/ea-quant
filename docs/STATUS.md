@@ -5,13 +5,14 @@
 **QUINE Mac desktop development baseline — unpublished.** Apple Silicon macOS is the sole
 product entry and final acceptance target under [ADR 0050](adr/0050-desktop-only-product-delivery.md).
 Shared React/WebView and loopback HTTP remain internal implementation and test surfaces.
-**main healthy / live unavailable** does not imply a public desktop release or real-money authority.
+**main healthy / live unavailable** describes the merged baseline, not the pending branch CI.
+The independent offline v3 studio has not replaced the native product entry.
 
 ## Phase Objective
 
-Maintain one clean local/remote development baseline for the existing desktop implementation.
-Complete bounded changes in the current PR, commit verified slices, retire integrated branches,
-and reuse acceptance evidence. No new feature, framework integration or release is part of this cleanup.
+Bring the existing `codex/native-ci-and-architecture` changes into one reviewable draft PR,
+synchronize the development branch and follow its exact-head CI. Merge remains a Product Owner
+decision; retire this branch only after integration. No release or live connectivity is authorized.
 
 ## Completed
 
@@ -24,11 +25,19 @@ and reuse acceptance evidence. No new feature, framework integration or release 
 - **Research ownership and lifecycle:** Rust-owned experiments, conversation continuity,
   bounded research grants, retained unknown outcomes, explicit recovery boundaries, cooperative
   native exit and window/text-scaling fixes. Unknown requests are not blindly resent.
-- **Technical acceptance:** one clean source and installed package were identified together.
-  Exact-source PR CI, unchanged local Full, installed lifecycle checks and scoped native
-  input/window/report/quit/reopen checks passed. Hosted Full and integration CI are tracked
-  separately in [PR #261](https://github.com/jayjcc8-cloud/ea-quant/pull/261); only completed,
-  successful runs establish a pass and satisfy the merge gate.
+- **Merged technical acceptance:** [PR #261](https://github.com/jayjcc8-cloud/ea-quant/pull/261)
+  integrated the desktop baseline into main `f684a596c862c98f1c45ec8dc92188c90d65f4fb`.
+  Its PR/main CI, unchanged local Full and hosted Full passed. Scoped native input/window/report/
+  quit/reopen evidence belongs to the frozen `37bfc0f` source; the later clean main package and its
+  installed lifecycle checks are identified in #261. Those results do not validate newer code.
+- **Pending desktop branch:** unsent-draft/storage-failure recovery, isolated wheel builds,
+  path-driven native CI, architecture documentation, research workbench contracts, retained context
+  and report streaming, and shared desktop UI refinements are committed on the current branch.
+- **Independent offline v3:** `apps/web/studio/` implements the 39-view design with resettable
+  synthetic scenarios and browser-local persistence. [v3 documentation](frontend-v3/README.md)
+  links its bounded browser, regression and visual evidence; report and model-editor refinements
+  have subsequent focused checks. It has no real provider, account, exchange or engine integration
+  and has not replaced the native entry. Local ignored screenshots are not hosted CI evidence.
 - **Local simulated Paper:** M1 recovery, M2 risk guards and M3 health/backup/alerts are delivered.
   M4 fault-campaign and gate-preparation tooling exist; see [Paper operations](local-paper-runtime.md).
 - **Cleanup:** #259/#260 were closed after containment was verified. Redundant branches and old
@@ -39,20 +48,25 @@ and reuse acceptance evidence. No new feature, framework integration or release 
 
 ## Incomplete
 
+- Current-branch required remote CI and the Product Owner's merge decision remain separate gates.
+  Local tests and earlier SHA results do not establish a remote pass for the final head.
+- Offline v3 is not connected to real providers, accounts or the engine. Its synthetic results and
+  Chromium input checks do not prove native WebView acceptance or a signed package.
 - Actual same-machine OS-reboot recovery, independent first use with a user-owned CSV and normal
   default-workspace launch remain unverified. Real-provider authentication/calls were not exercised
   in this acceptance; scripted responses do not establish those results. Paid calls are optional.
 - Developer ID signing, notarization, downloaded-copy installation and public distribution are
   not completed or authorized. The retained technical package is ad-hoc signed.
-- Paper 72-hour/7-day soak has no completed pass recorded. External brokers, Live, autonomous
-  optimization/trading and a general untrusted-strategy sandbox remain unavailable.
+- Paper 72-hour/7-day soak has no completed pass recorded; an interrupted run is not continuous
+  acceptance. External brokers, Live, autonomous optimization/trading and a general untrusted-strategy
+  sandbox remain unavailable.
 
 ## Blockers
 
-The candidate's one primary review and bounded repair verification left no qualifying
-implementation blocker. Remaining first-use and distribution gaps limit release claims; they do
-not erase the completed engine, local simulated Paper or scoped native evidence.
-Apply the four-condition finding rule in [WORKFLOW](governance/WORKFLOW.md).
+Existing bounded implementation reviews and report/model-editor visual checks reported no
+qualifying blocker in their reviewed scope. Current integration still requires its own CI outcome;
+do not transfer #261's completed checks to this branch. First-use and distribution gaps continue
+to limit release claims. Apply the four-condition rule in [WORKFLOW](governance/WORKFLOW.md).
 
 ## Effective ADRs
 
@@ -62,11 +76,13 @@ The [ADR index](adr/) preserves accepted decisions. Current entry points are
 [accepted loading](adr/0047-accepted-candidate-loading-v1.md),
 [local Paper](adr/0049-explicit-local-paper-profile.md) and
 [desktop-only delivery](adr/0050-desktop-only-product-delivery.md).
-This cleanup does not rewrite accepted ADR history.
+The offline prototype does not supersede the accepted desktop delivery boundary.
 
 ## Primary Issues
 
-- [#261](https://github.com/jayjcc8-cloud/ea-quant/pull/261): cumulative desktop integration and
+- [Current branch](https://github.com/jayjcc8-cloud/ea-quant/compare/main...codex/native-ci-and-architecture):
+  cumulative desktop fixes/native CI and independent offline v3, pending review and integration.
+- [#261](https://github.com/jayjcc8-cloud/ea-quant/pull/261): merged desktop integration and
   baseline cleanup, including contained and closed #259/#260.
 - [#262](https://github.com/jayjcc8-cloud/ea-quant/pull/262): merged CI-only timeout prerequisite;
   no test, coverage threshold or product behavior change.
@@ -81,21 +97,22 @@ This cleanup does not rewrite accepted ADR history.
 
 ## Last Confirmed
 
-Checked **2026-10-21 (Asia/Shanghai)**. The frozen technical source is
-`37bfc0f2ecb1507f1121f0292b108e01608aa22f`; its installed package was built clean from that commit.
-[Candidate PR CI](https://github.com/jayjcc8-cloud/ea-quant/actions/runs/39588177248) passed.
-[Hosted Full](https://github.com/jayjcc8-cloud/ea-quant/actions/runs/39608960827) checks that exact
-source from trusted main. Package identity, native scope and CI history are maintained in
-[#261](https://github.com/jayjcc8-cloud/ea-quant/pull/261).
-Documentation and ignore-rule reconciliation do not change the frozen production source.
-For merged behavior, the containing `main` commit and its CI are the durable checkpoint.
-A later commit does not silently change the tested application's identity.
+Checked **2026-10-25 (UTC)** against a clean `9603e603e3b50ec1eb81f67cbbb3ba8d0d5bd8ca`
+checkout, remote branch `90e7170e64547db36579f2d7af5d5aad3cc8ce43` and merged main `f684a59`.
+The branch has a linear history; `4b6096e` adds offline v3, `2095afb` refines the report and
+`9603e60` refines model connections. The current PR is the authority for the final pushed head,
+validation and CI outcome after this documentation update. For merged behavior, the containing `main` commit
+and its CI are the durable checkpoint. A later source commit does not change the
+identity of a previously tested installed application.
 
 ## Phase Completion Conditions
 
 - [x] Technical source, installed artifact and completed scoped acceptance are identified together.
 - [x] Technical evidence has one linked entry; any outstanding required CI remains a merge gate.
-- [x] Obsolete development branches/checkouts are retired with unique history preserved.
+- [x] Previously obsolete branches/checkouts were retired with unique history preserved.
+- [x] Independent offline v3 and its integration/acceptance boundaries are explicit.
+- [ ] Current branch required CI passes and the Product Owner chooses integration or closure.
+- [ ] After integration, retire this branch and synchronize local/remote main.
 - [ ] Remaining independent-user/native journeys are performed or explicitly excluded from a release claim.
 - [ ] Public version, signing, notarization and publication receive explicit authorization.
 

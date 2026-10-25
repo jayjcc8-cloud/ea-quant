@@ -242,6 +242,9 @@ jobs:
           npm run typecheck
           npm test
           npm run build
+          npm run typecheck:studio
+          npm run test:studio
+          npm run build:studio
 
   # Internal browser carrier for shared business/API regression, not native acceptance.
   web_e2e:
