@@ -2,17 +2,20 @@
 
 ## Current Phase
 
-**QUINE Mac desktop development baseline — unpublished.** Apple Silicon macOS is the sole
+**QUINE source collaboration preview — desktop candidate unpublished.** Apple Silicon macOS is the sole
 product entry and final acceptance target under [ADR 0050](adr/0050-desktop-only-product-delivery.md).
 Shared React/WebView and loopback HTTP remain internal implementation and test surfaces.
 **main healthy / live unavailable** describes the merged baseline, not the pending branch CI.
-The independent offline v3 studio has not replaced the native product entry.
+The development branch now opens the real local research slice at `/studio`; the independent
+offline v3 studio remains a synthetic design preview. Repository-wide licensing is pending.
 
 ## Phase Objective
 
-Bring the existing `codex/native-ci-and-architecture` changes into one reviewable draft PR,
-synchronize the development branch and follow its exact-head CI. Merge remains a Product Owner
-decision; retire this branch only after integration. No release or live connectivity is authorized.
+Make the source understandable and reproducible for GitHub contributors through forks, Issues and
+draft PRs. Keep the unmerged `feat/v3-real-research` implementation and its acceptance limits clear.
+The Product Owner approved the v3 design; implementation acceptance and merging remain pending.
+Source collaboration does not require signing, notarization, clean-Mac installation or a Paper
+soak. Those remain separate binary/operational claims. No release or live connectivity is authorized.
 
 ## Completed
 
@@ -33,11 +36,17 @@ decision; retire this branch only after integration. No release or live connecti
 - **Pending desktop branch:** unsent-draft/storage-failure recovery, isolated wheel builds,
   path-driven native CI, architecture documentation, research workbench contracts, retained context
   and report streaming, and shared desktop UI refinements are committed on the current branch.
+- **Real v3 research on the development branch:** the native `/studio` entry reuses existing
+  research, CSV, draft, preview/confirmation and frozen-report services, with Rust-owned experiments.
+  It includes report references, retained uncertain requests and next-launch workspace selection.
+  Model connection status is read-only; simulation, Live, batches, holdout and Candidate promotion
+  are not connected in this entry. Development and self-contained local candidate build modes exist.
 - **Independent offline v3:** `apps/web/studio/` implements the 39-view design with resettable
   synthetic scenarios and browser-local persistence. [v3 documentation](frontend-v3/README.md)
   links its bounded browser, regression and visual evidence; report and model-editor refinements
   have subsequent focused checks. It has no real provider, account, exchange or engine integration
-  and has not replaced the native entry. Local ignored screenshots are not hosted CI evidence.
+  of its own. The native slice reuses its visual components with real service contracts.
+  Local ignored screenshots are not hosted CI evidence.
 - **Local simulated Paper:** M1 recovery, M2 risk guards and M3 health/backup/alerts are delivered.
   M4 fault-campaign and gate-preparation tooling exist; see [Paper operations](local-paper-runtime.md).
 - **Cleanup:** #259/#260 were closed after containment was verified. Redundant branches and old
@@ -52,10 +61,15 @@ decision; retire this branch only after integration. No release or live connecti
   Local tests and earlier SHA results do not establish a remote pass for the final head.
 - Offline v3 is not connected to real providers, accounts or the engine. Its synthetic results and
   Chromium input checks do not prove native WebView acceptance or a signed package.
+- The real v3 implementation still needs Product Owner acceptance. A configured model status or
+  scripted adapter test does not prove a successful real-provider call.
+- No tracked LICENSE/LICENCE or third-party NOTICE file was found. `quine-core` declares MIT;
+  Python and application package metadata do not declare a license. The maintainer must confirm
+  repository-wide terms and the copyright notice; no declaration or ownership was changed.
 - Actual same-machine OS-reboot recovery, independent first use with a user-owned CSV and normal
   default-workspace launch remain unverified. Real-provider authentication/calls were not exercised
   in this acceptance; scripted responses do not establish those results. Paid calls are optional.
-- Developer ID signing, notarization, downloaded-copy installation and public distribution are
+- Developer ID signing, notarization, downloaded-copy installation and binary distribution are
   not completed or authorized. The retained technical package is ad-hoc signed.
 - Paper 72-hour/7-day soak has no completed pass recorded; an interrupted run is not continuous
   acceptance. External brokers, Live, autonomous optimization/trading and a general untrusted-strategy
@@ -63,10 +77,11 @@ decision; retire this branch only after integration. No release or live connecti
 
 ## Blockers
 
-Existing bounded implementation reviews and report/model-editor visual checks reported no
-qualifying blocker in their reviewed scope. Current integration still requires its own CI outcome;
-do not transfer #261's completed checks to this branch. First-use and distribution gaps continue
-to limit release claims. Apply the four-condition rule in [WORKFLOW](governance/WORKFLOW.md).
+Existing bounded reviews reported no qualifying blocker in their reviewed scope. Current
+integration still requires applicable exact-head CI and the Product Owner's decision; do not
+transfer #261 or #263 results to a newer head. The licensing gap prevents a consistent project-wide
+open-source license statement. First-use, signing and soak gaps limit their respective binary or
+operational claims, not source contribution. Apply [WORKFLOW](governance/WORKFLOW.md)'s four-condition rule.
 
 ## Effective ADRs
 
@@ -76,12 +91,14 @@ The [ADR index](adr/) preserves accepted decisions. Current entry points are
 [accepted loading](adr/0047-accepted-candidate-loading-v1.md),
 [local Paper](adr/0049-explicit-local-paper-profile.md) and
 [desktop-only delivery](adr/0050-desktop-only-product-delivery.md).
-The offline prototype does not supersede the accepted desktop delivery boundary.
+The source preview and offline prototype do not supersede the accepted desktop delivery boundary.
 
 ## Primary Issues
 
-- [Current branch](https://github.com/jayjcc8-cloud/ea-quant/compare/main...codex/native-ci-and-architecture):
-  cumulative desktop fixes/native CI and independent offline v3, pending review and integration.
+- [Current development branch](https://github.com/jayjcc8-cloud/ea-quant/compare/main...feat/v3-real-research):
+  cumulative desktop work and the real v3 slice, pending implementation acceptance and integration.
+- [#263](https://github.com/jayjcc8-cloud/ea-quant/pull/263) remains a draft for
+  `codex/native-ci-and-architecture` at `f97a4d0`; it does not contain the later real-v3 commits.
 - [#261](https://github.com/jayjcc8-cloud/ea-quant/pull/261): merged desktop integration and
   baseline cleanup, including contained and closed #259/#260.
 - [#262](https://github.com/jayjcc8-cloud/ea-quant/pull/262): merged CI-only timeout prerequisite;
@@ -97,24 +114,25 @@ The offline prototype does not supersede the accepted desktop delivery boundary.
 
 ## Last Confirmed
 
-Checked **2026-10-25 (UTC)** against a clean `9603e603e3b50ec1eb81f67cbbb3ba8d0d5bd8ca`
-checkout, remote branch `90e7170e64547db36579f2d7af5d5aad3cc8ce43` and merged main `f684a59`.
-The branch has a linear history; `4b6096e` adds offline v3, `2095afb` refines the report and
-`9603e60` refines model connections. The current PR is the authority for the final pushed head,
-validation and CI outcome after this documentation update. For merged behavior, the containing `main` commit
-and its CI are the durable checkpoint. A later source commit does not change the
-identity of a previously tested installed application.
+Checked **2026-10-28 (UTC)** from the clean source base
+`92c6fcdf706bad41442aa4d1b791290632e25d9d` on `feat/v3-real-research`, matching its origin ref
+before this documentation edit. [Candidate Full 40638630464](https://github.com/jayjcc8-cloud/ea-quant/actions/runs/40638630464)
+passed Python Full and the ordinary frontend job for that candidate. It is not the complete PR CI
+set and does not validate this later documentation commit. PR #263 remains on its earlier head.
+For merged behavior, the containing `main` commit and its CI are the durable checkpoint.
+A source or documentation commit does not change the identity of a previously tested installed app.
 
 ## Phase Completion Conditions
 
 - [x] Technical source, installed artifact and completed scoped acceptance are identified together.
 - [x] Technical evidence has one linked entry; any outstanding required CI remains a merge gate.
 - [x] Previously obsolete branches/checkouts were retired with unique history preserved.
-- [x] Independent offline v3 and its integration/acceptance boundaries are explicit.
+- [x] Offline design preview and native real-v3 implementation boundaries are explicit.
+- [ ] Repository-wide license terms and copyright notice are confirmed by the maintainer.
 - [ ] Current branch required CI passes and the Product Owner chooses integration or closure.
 - [ ] After integration, retire this branch and synchronize local/remote main.
 - [ ] Remaining independent-user/native journeys are performed or explicitly excluded from a release claim.
-- [ ] Public version, signing, notarization and publication receive explicit authorization.
+- [ ] Any later binary version, signing, notarization and publication receive explicit authorization.
 
 ## Delivery Metrics
 

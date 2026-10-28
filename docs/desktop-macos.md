@@ -10,10 +10,12 @@ existing React application, with a bundled CPython 3.12.13 distribution, locked 
 the current installed EA wheel, and a freshly compiled Rust experiment owner. Python, Node, Cargo,
 a checkout and a virtual environment are not required to run the installed application.
 
-This is a **local technical package**, with an ad-hoc signature only. It is not Developer ID signed
+The ordinary bundled build is a **local technical package**, with an ad-hoc signature only. It is not Developer ID signed
 or notarized, and Gatekeeper acceptance on a downloaded copy has not been established. Do not
 change macOS security settings to run it. Public distribution needs authorized Apple signing and
 notarization as a separate step. Intel, Windows and Linux packages are outside this slice.
+These binary distribution checks are not prerequisites for GitHub source collaboration. The
+development and local-candidate modes below do not invoke distribution signing or archiving.
 
 ## Open and keep your research
 
@@ -29,8 +31,9 @@ The stable data root is `~/Library/Application Support/QUINE`:
 - `core/` contains the existing Rust SQLite owner and its confirmed inputs and official reports.
 - `scenarios/` contains user-editable registered scenarios. First use seeds the two synthetic
   sample files once; an upgrade never overwrites them.
-- `settings.json` is the existing model settings format. It starts absent. Resources → Model connections
-  shows its exact path and provides provider, model ID, Base URL and write-only API key inputs.
+- `settings.json` is the existing model settings format. It starts absent. Native v3's model page
+  reads connection status only. The existing legacy editor supports provider, model ID, Base URL
+  and write-only API key inputs; that editor is not connected to the native v3 page.
   Save checks local format only; it never authenticates or calls a provider. Credentials are
   stored in this existing file with mode 0600, not in WebView storage. Blank key retains the
   current key; changing provider/endpoint requires re-entry or explicit clearing. No developer
@@ -91,13 +94,50 @@ offline studio remains a synthetic design preview and is not the desktop candida
 research/report header, detail layout and assistant surface are shared with that design, while
 all displayed records in `/studio` come from existing service contracts.
 
+### Source build prerequisites
+
+Use the `feat/v3-real-research` branch for the current native v3 slice; it is not yet on `main`.
+From that checkout, prepare:
+
+- Apple Silicon macOS and Apple's Xcode Command Line Tools (including `clang` and
+  `install_name_tool`); see [Tauri's macOS prerequisites](https://v2.tauri.app/start/prerequisites/#macos).
+- Git, Python 3.12, global `uv` at the exact version in [`pyproject.toml`](../pyproject.toml)
+  (currently 0.11.28), and Node.js 24/npm as used by CI.
+- Stable Rust via rustup. [`build_desktop.py`](../scripts/build_desktop.py) explicitly uses
+  `.local/rust/cargo` and `.local/rust/rustup`; a toolchain installed only in the usual home
+  directories will not populate those locations.
+
+For a fresh checkout, install the local Rust toolchain using the
+[official rustup installer and custom homes](https://rust-lang.github.io/rustup/installation/index.html#choosing-where-to-install).
+Run in the repository root; these settings apply to the current shell:
+
+```sh
+export CARGO_HOME="$PWD/.local/rust/cargo"
+export RUSTUP_HOME="$PWD/.local/rust/rustup"
+export PATH="$CARGO_HOME/bin:$PATH"
+mkdir -p .local/rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o .local/rust/rustup-init.sh
+sh .local/rust/rustup-init.sh --profile minimal --default-toolchain stable --no-modify-path -y
+python3 scripts/bootstrap_local.py --web
+venv/bin/ea doctor
+```
+
+Use Python 3.12 for `python3`. Existing local toolchains need no reinstall. The build downloads
+locked dependencies and CPython 3.12.13, builds the shared UI and Rust core, and stages its own
+runtime. It requires network access to the public dependency sources, not a provider API key.
+No Apple Developer account is required for the development mode below.
+
 For a local native development candidate without signing or creating a distribution archive:
 
 ```sh
-venv/bin/python scripts/build_desktop.py --development
+venv/bin/python scripts/build_desktop.py --development --output "$PWD/.local/desktop-dev"
 QUINE_DATA_ROOT=/absolute/path/to/fresh-acceptance-data \
-  .local/desktop/development/QUINE-Development.app/Contents/MacOS/quine-desktop
+  .local/desktop-dev/development/QUINE-Development.app/Contents/MacOS/quine-desktop
 ```
+
+Replace the data-root placeholder with a fresh absolute directory outside the checkout and app.
+Use a different build output if that development candidate is already running. The window opens
+the real `/studio` entry. Saving research and a bundled synthetic experiment require no model key.
 
 Keep the development directory and its `Resources/runtime` target together. The development
 wrapper has only enough metadata for macOS window identification and points to the build runtime;
@@ -140,7 +180,9 @@ payload is explicitly limited to installed Python, core, built UI and two fixtur
 
 The build keeps release stripping disabled: this host's macOS 27 dyld rejected stripped Rust
 proc-macro libraries with `mis-aligned LINKEDIT string pool`. This affects build size, not runtime
-authority. The package preserves dependency license metadata. No third-party source tree,
+authority. Installed Python dependency metadata is retained; the repository currently has no
+consolidated third-party NOTICE file. This build description is not a completed licensing review.
+No third-party source tree,
 private settings, research data, development logs or screenshots are copied into the bundle.
 
 Run the installed lifecycle acceptance using a **fresh** absolute root, outside the app:

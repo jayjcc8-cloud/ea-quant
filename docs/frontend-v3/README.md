@@ -1,8 +1,18 @@
 # QUINE 前端 v3
 
-这是一套依据39幅最终效果图独立实现的前端，入口为 `apps/web/studio/`。它使用可复位的离线场景数据，无真实后端、模型、交易所或账户调用。已有应用与服务保持原入口。
+v3 目前有两个用途不同的入口，均处于开发预览阶段：
 
-从仓库根目录启动：
+| 入口 | 数据与能力 | 启动方式 |
+| --- | --- | --- |
+| 原生真实研究：`apps/web/src/studio-real.tsx`，桌面 `/studio` | 现有研究、CSV、草稿、实验预览/显式确认、冻结报告和工作区选择；使用 Python 服务与 Rust 实验 owner | [从源码构建 Mac 开发候选](../desktop-macos.md#source-build-prerequisites) |
+| 离线设计预览：`apps/web/studio/` | 依据39幅效果图实现的可复位合成场景；不调用真实后端、模型、交易所或账户 | 下方 `dev:studio` 命令 |
+
+原生入口的模型连接页只读；模拟、实盘、批量、留出和候选晋级尚未接入。效果图确认不代表实际实现已验收或合并。
+真实研究使用普通 `npm --prefix apps/web run build` 构建；`build:studio` 只构建设计预览。
+
+## 离线设计预览
+
+使用与 CI 一致的 Node.js 24/npm，从 `feat/v3-real-research` 仓库根目录启动：
 
 ```sh
 npm --prefix apps/web ci
@@ -18,7 +28,7 @@ npm --prefix apps/web run test:studio
 npm --prefix apps/web run build:studio
 ```
 
-构建输出 `.local/frontend-v3/dist/`；缓存和运行证据在同一忽略区。无需启动 Python、数据库或桌面实例。`vite.studio.config.ts` 无后端代理配置，源码不引用旧 `apps/web/src`。
+设计预览构建输出 `.local/frontend-v3/dist/`；缓存和运行证据在同一忽略区。无需启动 Python、数据库或桌面实例。`vite.studio.config.ts` 无后端代理配置，预览源码不引用旧 `apps/web/src`；原生真实研究复用了部分设计组件。
 
 ## 使用与恢复
 
@@ -30,8 +40,12 @@ npm --prefix apps/web run build:studio
 - 读取失败点击就地重试；未知请求查询原 ID。配置保存、候选接受、提案应用都不会自动启动运行。
 - `⌘K` / `Ctrl+K` 搜索，方向键选择，Enter导航，Esc关闭。窄窗 Agent 以抽屉打开，编辑缓冲保留。
 
-[实施方案](plan.md) · [39图覆盖与验收](coverage.md) · [未来后端契约](contract.md)
+[离线预览实施方案](plan.md) · [39图历史覆盖与验收](coverage.md) · [设计期后端契约](contract.md)
 
 ## 验收边界
 
-已验证新前端的浏览器交互与离线数据一致性；未替换原生桌面入口、未构建签名包、未部署、未进行真实研究或交易。中文组合输入通过真实 Chromium 输入协议验证 Enter 不误提交；不把它表述为 macOS 系统拼音候选窗或原生 WebView 已验收。
+上述39图证据验证的是浏览器交互与合成数据一致性，不能用来证明原生真实研究已验收。
+设计预览的中文组合输入通过 Chromium 输入协议验证 Enter 不误提交；这不等于 macOS 系统拼音候选窗或原生 WebView 验收。
+原生开发候选已经接入本地研究引擎，但实现验收和合并仍待用户确认，真实 provider 验收亦未完成。
+签名、公证、干净 Mac 安装和 Paper 长时间运行分别约束安装包或运行声明，不是源码贡献的前置。
+当前提交与 CI 范围见 [STATUS](../STATUS.md)，提交改进见 [CONTRIBUTING](../../CONTRIBUTING.md)。
