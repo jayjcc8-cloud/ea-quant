@@ -88,16 +88,17 @@ and offer reads only. Simulation, Live, batches, holdout and Candidate promotion
 in this entry. Model configuration is read-only here. `/strategies` remains an explicit fallback;
 the standalone offline studio is still a separate synthetic design preview.
 
-For a local native development candidate without signing or creating a distribution bundle:
+For a local native development candidate without signing or creating a distribution archive:
 
 ```sh
 venv/bin/python scripts/build_desktop.py --development
 QUINE_DATA_ROOT=/absolute/path/to/fresh-acceptance-data \
-  .local/desktop/development/MacOS/quine-desktop
+  .local/desktop/development/QUINE-Development.app/Contents/MacOS/quine-desktop
 ```
 
-Keep the development directory and its `Resources/runtime` target together. This executable is
-not an installable or distributable `.app`. It uses the usual native close/Command-Q confirmation
+Keep the development directory and its `Resources/runtime` target together. The development
+wrapper has only enough metadata for macOS window identification and points to the build runtime;
+it is not an installable or distributable package. It uses the native close/Command-Q confirmation
 and cooperative shutdown. The build below remains the separate app-bundle path.
 
 From the selected source checkout, with the repository's local Rust toolchain and locked Python

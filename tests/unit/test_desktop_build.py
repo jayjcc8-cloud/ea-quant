@@ -1,6 +1,7 @@
 """Artifact selection only; external build and install commands are mocked."""
 
 import importlib.util
+import plistlib
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,8 @@ def test_development_shell_uses_current_build_without_signing_or_bundling(
     monkeypatch.setattr(module, "run", lambda *args, **kwargs: calls.append(args))
     candidate = module.stage_development_shell(tmp_path, runtime)
     assert candidate.read_bytes() == binary.read_bytes()
+    with (candidate.parent.parent / "Info.plist").open("rb") as source:
+        assert plistlib.load(source)["CFBundleExecutable"] == candidate.name
     assert (candidate.parent.parent / "Resources/runtime").resolve() == runtime
     assert len(calls) == 1 and calls[0][:3] == ("cargo", "build", "--locked")
     assert "--release" in calls[0]

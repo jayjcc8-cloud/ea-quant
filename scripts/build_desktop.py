@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import platform
+import plistlib
 import shutil
 import subprocess
 import tempfile
@@ -56,7 +57,7 @@ def build_and_install_wheel(out: Path, python: Path) -> None:
 
 
 def stage_development_shell(out: Path, runtime: Path) -> Path:
-    """A local native executable, with no signing, app bundle or distribution archive."""
+    """A native development wrapper; no signing or self-contained distribution archive."""
     run(
         "cargo",
         "build",
@@ -65,9 +66,22 @@ def stage_development_shell(out: Path, runtime: Path) -> Path:
         "--manifest-path",
         ROOT / "apps/desktop/src-tauri/Cargo.toml",
     )
-    stage = out / "development"
+    stage = out / "development/QUINE-Development.app/Contents"
     (stage / "MacOS").mkdir(parents=True, exist_ok=True)
     (stage / "Resources").mkdir(exist_ok=True)
+    with (stage / "Info.plist").open("wb") as output:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "org.quine.research.desktop.development",
+                "CFBundleName": "QUINE Development",
+                "CFBundleDisplayName": "QUINE Development",
+                "CFBundleExecutable": "quine-desktop",
+                "CFBundlePackageType": "APPL",
+                "CFBundleVersion": "1",
+                "NSHighResolutionCapable": True,
+            },
+            output,
+        )
     resources = stage / "Resources/runtime"
     if resources.is_symlink():
         if resources.resolve() != runtime.resolve():
