@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { StudioRoutes } from './studio-real'
 import { scriptedAdapter } from '../preview/first-use-fixtures'
 import type { ApiAdapter, BacktestJob, BacktestReport } from './app'
-import type { UserStrategy, UserStrategyPreview } from './user-strategies-api'
+import { UserStrategyRequestError, type UserStrategy, type UserStrategyPreview } from './user-strategies-api'
 
 const strategy: UserStrategy = {
   schema: 'ea.user-strategy.v1', user_strategy_id: 'real-idea', name: '明确保存的研究', intent: '检验成本',
@@ -96,7 +96,7 @@ it('shows an unreadable real preview as a refusal with no fabricated result', as
 it('uses one explicit scripted model call and applies its proposal without running', async () => {
   const proposal = { proposal_id: 'p', call_id: 'script', base_revision: 1, status: 'open' as const, created_at: '2026-10-28', applied_paths: [], stale_paths: [], items: [{ path: 'parameters.target_quantity', before: 1, after: 2, reason: 'scripted interaction', evidence: [], proposer: 'script' }] }
   const proposed = { ...strategy, proposals: [proposal] }
-  const send = vi.fn(async () => proposed)
+  const send = vi.fn(async (_id: string, input: { call_id: string }) => ({ ...proposed, calls: [{ call_id: input.call_id, status: 'observed', base_revision: 1, route: {}, usage_available: false } as UserStrategy['calls'][number]] }))
   const apply = vi.fn(async () => ({ ...proposed, draft: { ...strategy.draft, revision: 2 }, proposals: [{ ...proposal, status: 'applied' as const }] }))
   const launch = vi.fn()
   const api = adapter({ sendUserStrategyMessage: send, applyUserStrategyProposal: apply, launchUserStrategyExperiment: launch,
@@ -110,4 +110,63 @@ it('uses one explicit scripted model call and applies its proposal without runni
   expect(send).toHaveBeenCalledWith('real-idea', expect.objectContaining({ approved_budget: { max_model_calls: 1, max_backtests: 0 } }))
   expect(apply).toHaveBeenCalledTimes(1)
   expect(launch).not.toHaveBeenCalled()
+})
+
+
+it('clears a definite pre-dispatch rejection and requires a fresh preview and click', async () => {
+  const launch = vi.fn().mockRejectedValue(new UserStrategyRequestError('stale_base_revision', 'preview changed'))
+  const readPreview = vi.fn(async () => preview)
+  open(adapter({ launchUserStrategyExperiment: launch, previewUserStrategyExperiment: readPreview }), '/research/real-idea/confirm')
+  await userEvent.click(await screen.findByRole('button', { name: '确认并运行一次' }))
+  await screen.findByText(/本次未派发/)
+  await userEvent.click(screen.getByRole('button', { name: '重新读取并预览' }))
+  await screen.findByRole('button', { name: '确认并运行一次' })
+  expect(sessionStorage.getItem('quine.studio.confirm.real-idea')).toBeNull()
+  expect(readPreview).toHaveBeenCalledTimes(2)
+  expect(launch).toHaveBeenCalledTimes(1)
+})
+
+it('allows a fresh preview after the owner released an unknown slot without claiming success', async () => {
+  const released = { launch_intent_id: 'released-original', status: 'unknown', owner: 'quine', slot_held: false, recovery: { status: 'released' }, payload: { draft_revision: 1 } }
+  open(adapter({ getUserStrategy: async () => ({ ...strategy, experiments: [released] } as UserStrategy) }), '/research/real-idea/confirm')
+  await screen.findByRole('button', { name: '确认并运行一次' })
+  expect(screen.queryByText(/原请求.*released-original/)).toBeNull()
+})
+
+const configuredModel = async () => ({ configured: true, provider: 'scripted', model: 'no-network', credential_available: false }) as Awaited<ReturnType<NonNullable<ApiAdapter['settingsStatus']>>>
+it('shows a server unknown model call and identity after reopening and permits a separate question', async () => {
+  let doc = structuredClone(strategy)
+  const send = vi.fn(async (_id: string, input: { call_id: string }) => {
+    doc = { ...doc, calls: [{ call_id: input.call_id, status: 'unknown', base_revision: 1, route: {}, message: 'receipt missing', usage_available: false } as UserStrategy['calls'][number]] }
+    return doc
+  })
+  const api = adapter({ getUserStrategy: async () => doc, sendUserStrategyMessage: send, settingsStatus: configuredModel })
+  const view = open(api, '/research/real-idea/overview')
+  await userEvent.type(await screen.findByLabelText('消息'), '检查参数')
+  await userEvent.click(screen.getByRole('button', { name: '发送一次模型请求' }))
+  await screen.findByText(/结果与用量未知/)
+  const identity = send.mock.calls[0][1].call_id
+  view.unmount()
+  open(api, '/research/real-idea/overview')
+  await screen.findByText(identity)
+  await userEvent.click(screen.getByRole('button', { name: '查询模型请求' }))
+  expect(send).toHaveBeenCalledTimes(1)
+  await userEvent.type(screen.getByLabelText('消息'), '另一个独立问题')
+  expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(false)
+})
+
+it('retains transport-unknown model identity across remount and queries without resending', async () => {
+  const send = vi.fn().mockRejectedValue(new Error('transport lost'))
+  const api = adapter({ sendUserStrategyMessage: send, settingsStatus: configuredModel })
+  const view = open(api, '/research/real-idea/overview')
+  await userEvent.type(await screen.findByLabelText('消息'), '检查参数')
+  await userEvent.click(screen.getByRole('button', { name: '发送一次模型请求' }))
+  await screen.findByText(/transport lost/)
+  const identity = send.mock.calls[0][1].call_id
+  view.unmount()
+  open(api, '/research/real-idea/overview')
+  await screen.findByText(identity)
+  await userEvent.click(screen.getByRole('button', { name: '查询模型请求' }))
+  await screen.findByText(/尚未读到此调用/)
+  expect(send).toHaveBeenCalledTimes(1)
 })

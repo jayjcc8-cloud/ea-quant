@@ -85,8 +85,11 @@ The first real v3 slice opens at `/studio` in the native window. It reuses the e
 research, CSV, experiment-preview/confirmation and official report services. Saving and applying
 a proposal do not run an experiment. Unknown confirmation receipts retain their request identity
 and offer reads only. Simulation, Live, batches, holdout and Candidate promotion are unavailable
-in this entry. Model configuration is read-only here. `/strategies` remains an explicit fallback;
-the standalone offline studio is still a separate synthetic design preview.
+in this entry. Model configuration is read-only here. The desktop has one normal entry;
+`/strategies` remains a migration fallback without a parallel navigation link. The standalone
+offline studio remains a synthetic design preview and is not the desktop candidate. The v3
+research/report header, detail layout and assistant surface are shared with that design, while
+all displayed records in `/studio` come from existing service contracts.
 
 For a local native development candidate without signing or creating a distribution archive:
 
