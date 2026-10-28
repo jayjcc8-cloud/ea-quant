@@ -94,7 +94,7 @@ function ResearchDetail({ api, id }: { api: ApiAdapter; id: string }) {
   const draft = strategy.draft
   if (tab === 'confirm') return <div className="page"><PageHeader title="确认实验输入" subtitle="核对冻结输入后，明确启动一次本地引擎实验。" breadcrumb={<Link to={`/research/${encodeURIComponent(id)}/draft`}>{strategy.name} / 新建实验</Link>} /><Confirmation key={`${id}.${draft.revision}`} api={api} strategy={strategy} changed={changed} done={() => navigate(`/research/${encodeURIComponent(id)}/experiments`)} /></div>
   return <DetailSurface className="real-detail" assistant={<Assistant key={id} api={api} strategy={strategy} changed={changed} />}>
-    <PageHeader title={strategy.name} subtitle={`草稿 r${draft.revision} · ${isIntentDraft(draft) ? '等待绑定策略与数据' : `${draft.venue}:${draft.symbol}`}`} breadcrumb={<Link to="/">研究 / {strategy.name}</Link>} actions={<Link className="button primary" to={`/research/${encodeURIComponent(id)}/confirm`}>准备一次实验</Link>} />
+    <PageHeader title={strategy.name} subtitle={`草稿 r${draft.revision} · ${isIntentDraft(draft) ? '等待绑定策略与数据' : `${draft.venue}:${draft.symbol}`}`} breadcrumb={<Link to="/">研究 / {strategy.name}</Link>} actions={tab !== 'draft' && <Link className="button primary" to={`/research/${encodeURIComponent(id)}/confirm`}>准备一次实验</Link>} />
     <Tabs active={tab} items={[{ id: 'overview', label: '概览' }, { id: 'draft', label: '策略草稿' }, { id: 'experiments', label: '实验' }]} onChange={value => navigate(`/research/${encodeURIComponent(id)}/${value}`)} />
     <ErrorNote>{error}</ErrorNote>
     {tab === 'overview' && <>
@@ -139,7 +139,7 @@ function ResearchDraft({ api, strategy, changed }: { api: ApiAdapter; strategy: 
   }, [api, id, revision]))
   const draft = strategy.draft
   if (isIntentDraft(draft)) return null
-  return <><div className="section-heading"><h2>策略草稿 · <span className="status">r{revision}</span></h2><span className="muted">已保存版本</span></div>
+  return <><div className="section-heading"><h2>策略草稿 · <span className="status">r{revision}</span></h2><Link className="button primary" to={`/research/${encodeURIComponent(id)}/confirm`}>准备一次实验</Link></div>
     <DraftSurface source={<><Facts items={[
       ['策略模板', draft.strategy_id], ['数据', draft.dataset_id ?? draft.scenario_id], ['标的', `${draft.venue}:${draft.symbol}`],
       ['样本区间（UTC）', source.value?.data?.start_utc && source.value.data.end_utc ? `${source.value.data.start_utc} — ${source.value.data.end_utc}` : '尚未读到'],
@@ -279,10 +279,10 @@ function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapte
   const selectedModel = strategy.model_profile_id ? model.value?.profiles?.find(item => item.id === strategy.model_profile_id) : model.value
   const inFlight = strategy.calls.some(call => ['pending', 'dispatched'].includes(call.status) || ['running', 'awaiting_budget', 'awaiting_decision'].includes(call.task?.status ?? ''))
   const localUnknown = retained.filter(item => !strategy.calls.some(call => call.call_id === item.call_id))
-  return <AgentSurface context={jobId ? `冻结报告 ${jobId} · 只读证据` : `当前草稿 r${strategy.draft.revision}`} report={!!jobId}
+  return <AgentSurface context={jobId ? `冻结报告 ${jobId.slice(0, 8)} · 只读证据` : `当前草稿 r${strategy.draft.revision}`} report={!!jobId}
     history={<>
       {evidence}
-      <div className="agent-note">{jobId ? '这次讨论只引用所选运行的冻结事实。' : '先检查草稿与数据，再决定下一次实验。'}<small>模型回答为推断；修改提案需要审阅，实验需要独立确认。</small></div>
+      {!evidence && <div className="agent-note">{jobId ? '这次讨论只引用所选运行的冻结事实。' : '先检查草稿与数据，再决定下一次实验。'}<small>模型回答为推断；修改提案需要审阅，实验需要独立确认。</small></div>}
       <details className="agent-context"><summary>来源与上下文</summary><p>研究 {id} · 草稿 r{strategy.draft.revision}</p><Link to={`/research/${encodeURIComponent(id)}/draft`}>查看当前草稿</Link>{jobId && <><p><Link to={`/report/${encodeURIComponent(jobId)}/inputs`}>冻结输入</Link></p><Link to={`/report/${encodeURIComponent(jobId)}/trades`}>交易证据</Link></>}</details>
       {strategy.messages.map(message => <article className={`message ${message.role}`} key={message.message_id}><small>{message.role === 'user' ? '你' : '模型 · 推断'}</small><p>{message.text}</p></article>)}
       {(strategy.calls.length > 0 || localUnknown.length > 0) && <section className="call-history" aria-label="模型调用记录"><h3>调用记录</h3>
@@ -291,11 +291,11 @@ function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapte
         <button className="button" disabled={busy} onClick={() => void query()}>查询模型请求</button>
       </section>}
       {strategy.proposals.filter(p => p.status === 'open').map(p => <section className="real-proposal" key={p.proposal_id}><h3>建议修改 · r{p.base_revision}</h3><p>{p.items.length} 项变更，等待你审阅。</p><Link className="button" to={`/research/${encodeURIComponent(id)}/proposal?proposal=${encodeURIComponent(p.proposal_id)}`}>审阅修改提案</Link><p className="muted">应用只保存新修订，运行仍需独立确认。</p></section>)}
-      {!strategy.messages.length && !strategy.calls.length && !localUnknown.length && <div className="suggestions"><small>你可以这样问</small><button className="button" onClick={() => setText(jobId ? '解释这份报告的结果与限制' : '检查当前草稿的参数与数据')}>检查当前证据</button><button className="button" onClick={() => setText('下一步应该检查哪些证据？')}>检查下一步</button></div>}
+      {!jobId && !strategy.messages.length && !strategy.calls.length && !localUnknown.length && <div className="suggestions"><small>你可以这样问</small><button className="button" onClick={() => setText(jobId ? '解释这份报告的结果与限制' : '检查当前草稿的参数与数据')}>检查当前证据</button><button className="button" onClick={() => setText('下一步应该检查哪些证据？')}>检查下一步</button></div>}
     </>}
     input={<><ErrorNote>{error || model.error}</ErrorNote><label className="sr-only" htmlFor="studio-message">消息</label><textarea id="studio-message" value={text} onChange={e => setText(e.target.value)} placeholder={jobId ? '询问这份报告…' : '继续讨论这个研究…'} />
       <small>{selectedModel?.configured ? `${selectedModel.provider} · ${selectedModel.model}；一次发送授权 1 次模型调用` : '模型未配置或不可读；不会生成替代回答。'}</small>
-      <button className="button primary" disabled={busy || inFlight || localUnknown.some(call => call.text === text.trim()) || !selectedModel?.configured || !text.trim()} onClick={() => void send()}>发送一次模型请求</button>
+      <button aria-label="发送一次模型请求" title="发送一次模型请求" className="button primary real-send" disabled={busy || inFlight || localUnknown.some(call => call.text === text.trim()) || !selectedModel?.configured || !text.trim()} onClick={() => void send()}><Icon name="send" size={22} /></button>
       {localUnknown.length > 0 && <small>同一问题只查询原请求。可以输入不同的新问题，原身份仍保留。</small>}
     </>} />
 }
@@ -337,7 +337,7 @@ function Report({ api, id }: { api: ApiAdapter; id: string }) {
   }, [api, id]))
   const evidence = run?.kind === 'ready' ? <section className="report-evidence" aria-label="报告解读与证据"><div className="report-evidence-heading"><h2>这份报告说明了什么</h2><small>本地引擎 · 已冻结事实 · 未调用模型</small></div><div className="report-reading"><p>净盈亏 <strong>{run.report.economics.net_pnl.amount} {run.report.economics.currency}</strong>；订单 / 成交 {run.report.economics.counts.orders} / {run.report.economics.counts.fills}。</p><p>单次运行不足以判断稳健性。数据与成本需先核对。</p></div><div className="report-evidence-links"><Link to={`/report/${encodeURIComponent(id)}/inputs`}>[1] 冻结输入与来源</Link><Link to={`/report/${encodeURIComponent(id)}/trades`}>[2] 交易明细</Link></div><div className="report-next-step"><h3>下一步检查</h3><p>核对交易与成本，再决定下一次独立实验。</p><Link className="button" to={`/report/${encodeURIComponent(id)}/trades`}>检查交易</Link></div></section> : undefined
   return <DetailSurface className="report-overview" assistant={source.value ? <Assistant api={api} strategy={source.value.owner} jobId={id} evidence={evidence} changed={owner => source.setValue(current => current ? { ...current, owner } : null)} /> : <AgentSurface context="冻结报告 · 只读证据" report history={<>{evidence}<p>未读取到唯一研究来源，会话暂不可用。</p><ErrorNote>{source.error}</ErrorNote></>} input={<small>不会生成替代回答。</small>} />}>
-    <PageHeader title={source.value ? `${source.value.owner.name} · 报告` : "冻结报告"} subtitle={<span title={id}>冻结报告 · {id.slice(0, 8)}{run?.kind === 'ready' ? ' · 已完成' : ''}</span>} breadcrumb={<Link to="/records">回测记录 / {id}</Link>} actions={<><button className="button" onClick={() => setRefresh(n => n + 1)}>重新读取报告</button>{source.value && <Link className="button primary" to={`/research/${encodeURIComponent(source.value.owner.user_strategy_id)}/draft`}>继续研究</Link>}</>} />
+    <PageHeader title={source.value ? `${source.value.owner.name} · 报告` : "冻结报告"} subtitle={<span title={id}>冻结报告 · {id.slice(0, 8)}{run?.kind === 'ready' ? ' · 已完成' : ''}</span>} breadcrumb={<Link to="/records" title={id}>回测记录 / {id.slice(0, 8)}</Link>} actions={<><button className="button" onClick={() => setRefresh(n => n + 1)}>重新读取报告</button>{source.value && <Link className="button primary" to={`/research/${encodeURIComponent(source.value.owner.user_strategy_id)}/draft`}>继续研究</Link>}</>} />
     <Tabs active={tab} items={[{ id: 'overview', label: '概览' }, { id: 'trades', label: '交易' }, { id: 'inputs', label: '冻结输入' }, { id: 'files', label: '文件' }]} onChange={value => navigate(`/report/${encodeURIComponent(id)}/${value}`)} />
     {run?.kind === 'loading' && <p role="status">正在读取正式报告…</p>}{run?.kind === 'unavailable' && <ErrorNote>{run.note}</ErrorNote>}
     {run?.kind === 'ready' && <><FrozenReportFacts job={run.job} report={run.report} revision={source.value?.revision} />

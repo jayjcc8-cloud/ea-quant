@@ -72,6 +72,13 @@
 .real-studio .parameter-form .key-values > div { grid-template-columns: 170px minmax(0, 1fr); border-bottom: 1px solid var(--line); }
 .real-studio .real-data-binding { margin: 20px 0; }
 .real-studio .page-heading h1 { overflow-wrap: anywhere; }
+.real-studio .primary-nav a, .real-studio .tabs button { border: 0; border-radius: 0; box-shadow: none; background: transparent; }
+.real-studio .tabs button { padding: 10px 0; border-bottom: 3px solid transparent; }
+.real-studio .tabs button.selected { border-bottom-color: var(--blue); }
+.real-studio .page-heading .actions { flex-shrink: 0; margin-top: 0; }
+.real-studio .real-send { display: flex; width: 42px; height: 42px; padding: 0; border-radius: 50%; margin-left: auto; }
+.real-studio .real-send:disabled { opacity: .45; }
+.real-studio .real-proposal small, .real-studio td > small { display: block; }
 @media (max-width: 1279px) {
   .real-studio .sidebar-search input { display: none; }
   .real-studio .real-logo .brand > span:nth-child(2) { display: none; }
