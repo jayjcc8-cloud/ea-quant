@@ -38,6 +38,35 @@ def script(name: str) -> Any:
     return module
 
 
+def test_local_candidate_keeps_its_runtime_after_build_stage_moves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = script("build_desktop")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "build-info.json").write_text('{"build_id":"current"}')
+    python = runtime / "python/bin"
+    python.mkdir(parents=True)
+    (python / "python3.12").write_bytes(b"bundled-python")
+    (python / "python3").symlink_to("python3.12")
+    binary = tmp_path / "target/release/quine-desktop"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"current-source-shell")
+    calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(module, "run", lambda *args, **kwargs: calls.append(args))
+    candidate = module.stage_development_shell(tmp_path, runtime, standalone=True)
+    resources = candidate.parent.parent / "Resources/runtime"
+    runtime.rename(tmp_path / "unavailable-build-runtime")
+    assert not resources.is_symlink()
+    assert (resources / "build-info.json").read_text() == '{"build_id":"current"}'
+    assert (resources / "python/bin/python3").read_bytes() == b"bundled-python"
+    with (candidate.parent.parent / "Info.plist").open("rb") as source:
+        assert plistlib.load(source)["CFBundleIdentifier"].endswith(".local")
+    assert len(calls) == 1 and calls[0][:3] == ("cargo", "build", "--locked")
+    with pytest.raises(SystemExit, match="already exists"):
+        module.stage_development_shell(tmp_path, resources, standalone=True)
+
+
 def test_each_build_installs_only_its_own_temporary_wheel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -104,6 +104,26 @@ wrapper has only enough metadata for macOS window identification and points to t
 it is not an installable or distributable package. It uses the native close/Command-Q confirmation
 and cooperative shutdown. The build below remains the separate app-bundle path.
 
+For a self-contained **local candidate** without invoking signing, notarization or archiving:
+
+```sh
+venv/bin/python scripts/build_desktop.py --local-candidate --output "$PWD/.local/desktop-first-use"
+```
+
+This stages `candidate/QUINE-Local.app` with the same native shell and a private copy of the
+runtime inside `Contents/Resources/runtime`. Move the intact app independently of the checkout;
+the build directory is not required to run it. The build refuses an existing candidate rather
+than overwriting an app that may be open. Its separate bundle identifier distinguishes it from
+the development wrapper, but the normal data-root rules remain unchanged: select an isolated
+root for acceptance and never open two instances on one workspace. In v3, click **本地研究空间**
+to inspect or explicitly change the next-launch workspace using the existing settings contract.
+
+This mode does not establish Developer ID signing, notarization, downloaded-copy Gatekeeper
+acceptance or clean-Mac first use. Existing toolchain-produced binary signatures are not a
+distribution signature. If macOS refuses the app, leave that refusal intact; do not change
+quarantine attributes or security settings. Record source revision, `source_dirty` and `build_id`
+from the bundled `build-info.json` with any acceptance results.
+
 From the selected source checkout, with the repository's local Rust toolchain and locked Python
 build environment available:
 

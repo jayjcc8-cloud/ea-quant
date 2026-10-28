@@ -5,6 +5,7 @@ import { browserApi, type ApiAdapter } from './app'
 import { BindScenario, SelectDataset } from './user-strategies'
 import { DraftEditor } from './draft-editor'
 import { DataWorkspace } from './research'
+import { DesktopSettings } from './desktop-settings'
 import { FrozenReportDetails, FrozenReportFacts, FrozenReportMetrics, ReportTrades } from './frozen-report'
 import { EquityCurve } from './equity-path'
 import { useRunRead } from './user-strategy-research'
@@ -372,7 +373,7 @@ function WorkspaceNav({ api }: { api: ApiAdapter }) {
   const rows = recent.value?.items ?? []
   return <><aside className="sidebar" aria-label="工作区导航">
     <Link className="real-logo" to="/"><Logo /></Link>
-    <div className="workspace-select"><span className="button"><Icon name="folder" /><span className="label">本地研究空间</span></span></div>
+    <div className="workspace-select"><Link className="button" to="/settings/workspace" aria-label="工作区位置"><Icon name="folder" /><span className="label">本地研究空间</span></Link></div>
     <Link className="button primary new-button" to="/" title="新建研究"><Icon name="plus" /><span>新建研究</span></Link>
     <label className="sidebar-search"><Icon name="search" /><input aria-label="搜索研究" placeholder="搜索研究" value={query} onChange={e => setQuery(e.target.value)} /></label>
     <div className="recent-heading">{query ? '搜索结果' : '最近研究'}</div>
@@ -382,7 +383,7 @@ function WorkspaceNav({ api }: { api: ApiAdapter }) {
 }
 export function StudioRoutes({ api }: { api: ApiAdapter }) {
   return <div className="studio real-studio" data-theme="light"><WorkspaceNav api={api} />
-    <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/records" element={<Records api={api} />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} />} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="*" element={<Unavailable />} /></Routes></main>
+    <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/records" element={<Records api={api} />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} />} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="/settings/workspace" element={<div className="page"><PageHeader title="工作区" subtitle="核对研究保存位置；更换目录在下次启动生效。" /><DesktopSettings api={api} section="workspace" onSaved={() => {}} /></div>} /><Route path="*" element={<Unavailable />} /></Routes></main>
   </div>
 }
 export default function RealStudio() { return <BrowserRouter basename="/studio"><StudioRoutes api={browserApi} /></BrowserRouter> }

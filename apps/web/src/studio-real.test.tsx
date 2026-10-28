@@ -33,6 +33,23 @@ function open(api: ApiAdapter, path: string) {
 beforeEach(() => { sessionStorage.clear(); localStorage.clear() })
 afterEach(cleanup)
 
+it('opens workspace settings from the real navigation and saves only an explicit next-launch selection', async () => {
+  const status = { workspace: '/fixture/current', next_workspace: '/fixture/current', theme: 'system' as const, startup_error: null,
+    model: { schema: 'radian.settings-status.v1' as const, settings_file: '/fixture/current/settings.json', api_key_env: null, provider: null, model: null, base_url: null, credential_available: false, configured: false, request_validation: 'not_verified' as const } }
+  const save = vi.fn(async () => ({ ...status, next_workspace: '/fixture/new' })), launch = vi.fn()
+  open(adapter({ desktopSettings: async () => status, saveDesktopSettings: save, launchUserStrategyExperiment: launch }), '/')
+  await userEvent.click(screen.getByRole('link', { name: '工作区位置' }))
+  const path = await screen.findByLabelText('工作区绝对路径')
+  await userEvent.clear(path); await userEvent.type(path, '/fixture/new')
+  expect(save).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('button', { name: '保存工作区位置' }))
+  await screen.findByText('已保存下次启动位置；当前工作区未切换。请等待工作结束后退出并重开。')
+  expect(save).toHaveBeenCalledExactlyOnceWith({ next_workspace: '/fixture/new' })
+  expect(screen.getByText('/fixture/current')).toBeTruthy()
+  expect(screen.queryByLabelText('新 API Key')).toBeNull()
+  expect(launch).not.toHaveBeenCalled()
+})
+
 it('saves an idea through the real contract without a model or experiment call', async () => {
   const create = vi.fn(async () => strategy), launch = vi.fn(), message = vi.fn()
   open(adapter({ createUserStrategy: create, launchUserStrategyExperiment: launch, sendUserStrategyMessage: message }), '/')
