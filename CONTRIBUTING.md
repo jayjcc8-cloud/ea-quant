@@ -2,7 +2,8 @@
 
 Help improve this development preview through a fork, an Issue or a draft PR. Start with the
 [README](README.md) and [current state](docs/STATUS.md), then read the code and tests for your
-change. The [licensing gap](README.md#licensing) is awaiting a maintainer decision.
+change. Original code contributions use [MIT](LICENSE); contributors retain their copyright.
+Identify third-party material and preserve its license and notices.
 
 ## Contribution flow
 

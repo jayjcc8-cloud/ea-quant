@@ -7,7 +7,8 @@ product entry and final acceptance target under [ADR 0050](adr/0050-desktop-only
 Shared React/WebView and loopback HTTP remain internal implementation and test surfaces.
 **main healthy / live unavailable** describes the merged baseline, not the pending branch CI.
 The development branch now opens the real local research slice at `/studio`; the independent
-offline v3 studio remains a synthetic design preview. Repository-wide licensing is pending.
+offline v3 studio remains a synthetic design preview. Project original code uses MIT;
+third-party licensing is unchanged.
 
 ## Phase Objective
 
@@ -19,6 +20,8 @@ soak. Those remain separate binary/operational claims. No release or live connec
 
 ## Completed
 
+- **Original code license:** the Product Owner approved MIT with `Copyright (c) 2026 JayJcc`.
+  [LICENSE](../LICENSE) and package metadata record it; third-party rights and notices remain intact.
 - **Engine and evidence:** strict inputs, deterministic funding/costs/risk, reconciliation,
   supported resume, frozen reports and trade analytics; immutable strategies/data, bounded
   batches, comparison, holdout and human Candidate decisions.
@@ -63,9 +66,6 @@ soak. Those remain separate binary/operational claims. No release or live connec
   Chromium input checks do not prove native WebView acceptance or a signed package.
 - The real v3 implementation still needs Product Owner acceptance. A configured model status or
   scripted adapter test does not prove a successful real-provider call.
-- No tracked LICENSE/LICENCE or third-party NOTICE file was found. `quine-core` declares MIT;
-  Python and application package metadata do not declare a license. The maintainer must confirm
-  repository-wide terms and the copyright notice; no declaration or ownership was changed.
 - Actual same-machine OS-reboot recovery, independent first use with a user-owned CSV and normal
   default-workspace launch remain unverified. Real-provider authentication/calls were not exercised
   in this acceptance; scripted responses do not establish those results. Paid calls are optional.
@@ -79,8 +79,7 @@ soak. Those remain separate binary/operational claims. No release or live connec
 
 Existing bounded reviews reported no qualifying blocker in their reviewed scope. Current
 integration still requires applicable exact-head CI and the Product Owner's decision; do not
-transfer #261 or #263 results to a newer head. The licensing gap prevents a consistent project-wide
-open-source license statement. First-use, signing and soak gaps limit their respective binary or
+transfer #261 or #263 results to a newer head. First-use, signing and soak gaps limit their respective binary or
 operational claims, not source contribution. Apply [WORKFLOW](governance/WORKFLOW.md)'s four-condition rule.
 
 ## Effective ADRs
@@ -116,9 +115,9 @@ The source preview and offline prototype do not supersede the accepted desktop d
 
 Checked **2026-10-28 (UTC)** from the clean source base
 `92c6fcdf706bad41442aa4d1b791290632e25d9d` on `feat/v3-real-research`, matching its origin ref
-before this documentation edit. [Candidate Full 40638630464](https://github.com/jayjcc8-cloud/ea-quant/actions/runs/40638630464)
+before the source-collaboration commits. [Candidate Full 40638630464](https://github.com/jayjcc8-cloud/ea-quant/actions/runs/40638630464)
 passed Python Full and the ordinary frontend job for that candidate. It is not the complete PR CI
-set and does not validate this later documentation commit. PR #263 remains on its earlier head.
+set and does not validate later license/documentation commits. PR #263 remains on its earlier head.
 For merged behavior, the containing `main` commit and its CI are the durable checkpoint.
 A source or documentation commit does not change the identity of a previously tested installed app.
 
@@ -128,7 +127,7 @@ A source or documentation commit does not change the identity of a previously te
 - [x] Technical evidence has one linked entry; any outstanding required CI remains a merge gate.
 - [x] Previously obsolete branches/checkouts were retired with unique history preserved.
 - [x] Offline design preview and native real-v3 implementation boundaries are explicit.
-- [ ] Repository-wide license terms and copyright notice are confirmed by the maintainer.
+- [x] MIT for project original code and the JayJcc copyright notice are confirmed by the maintainer.
 - [ ] Current branch required CI passes and the Product Owner chooses integration or closure.
 - [ ] After integration, retire this branch and synchronize local/remote main.
 - [ ] Remaining independent-user/native journeys are performed or explicitly excluded from a release claim.

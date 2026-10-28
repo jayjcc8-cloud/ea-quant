@@ -3,7 +3,7 @@
 QUINE is a work-in-progress Mac research application built on the EA deterministic engine.
 Contributions through **forks, Issues and draft pull requests** are welcome. The current goal is
 source collaboration; this preview is not a mature trading product or a public desktop installer.
-Repository-wide licensing still needs maintainer confirmation; see [Licensing](#licensing).
+Project original code is licensed under [MIT](LICENSE); see [Licensing](#licensing) for scope.
 
 ## What works today
 
@@ -71,12 +71,12 @@ unverified where [STATUS](docs/STATUS.md) says so and must not be advertised as 
 
 ## Licensing
 
-No repository-wide LICENSE/LICENCE or NOTICE file is currently tracked. Only
-[`quine-core`](crates/quine-core/Cargo.toml) declares `MIT`; Python and application package metadata
-do not declare a license. The crate declaration is not a repository-wide licensing decision.
-The maintainer must confirm project terms and the corresponding copyright notice before this
-repository can present a consistent open-source license. Existing declarations remain unchanged.
-Dependency license fields in the npm lockfiles are third-party metadata, not the project license.
+The project's original source code is licensed under the [MIT License](LICENSE),
+Copyright (c) 2026 JayJcc. Third-party code, dependencies and notices retain their original
+licenses and attribution. This source-code license does not relicense third-party material or
+make a blanket MIT declaration for personal writing, images, branding or trademarks.
+Dependency license fields in the npm lockfiles describe those dependencies; this is not a claim
+that a full third-party licensing audit has been completed.
 
 [Current state](docs/STATUS.md) · [Mac development and workspace rules](docs/desktop-macos.md) ·
 [Engineering workflow](docs/governance/WORKFLOW.md) · [Desktop boundary](docs/adr/0050-desktop-only-product-delivery.md)
