@@ -134,7 +134,7 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   // The default entry is the strategy workspace; the legacy pages stay reachable.
   await page.goto('/')
   await expect(page).toHaveURL(/\/strategies$/)
-  await expect(page.getByRole('heading', { name: '研究', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '研究工作台', exact: true })).toBeVisible()
   await expect(page.getByText('还没有策略。')).toBeVisible()
   await expect(page.getByRole('navigation', { name: '主导航' }).getByRole('link', { name: '研究' })).toBeVisible()
 
@@ -432,8 +432,8 @@ test('a confirmed strategy experiment freezes one real run and two strategies st
   const table = page.getByRole('navigation', { name: '策略列表' })
   await expect(table.getByText(`冻结 v${boundRevision}`)).toBeVisible()
   const firstRow = table.locator('tr').filter({ has: page.getByRole('link', { name: 'Trend follow', exact: true }) })
-  await expect(firstRow.getByRole('link', { name: /成功/ }))
-    .toHaveAttribute('href', `/strategies/${firstId}?tab=experiments&evidence_a=${experiment.job_id}`)
+  await expect(firstRow.getByRole('link', { name: '查看正式报告' }))
+    .toHaveAttribute('href', `/backtests/${experiment.job_id}?research=${firstId}`)
   // The one history entry leads to the existing read-only classifications.
   await page.getByRole('link', { name: '历史记录' }).click()
   const history = page.getByRole('navigation', { name: '历史记录分类' })
@@ -641,6 +641,20 @@ test('existing report returns to its persisted strategy without writes', async (
   await expect(page.getByRole('link', { name: 'Download report.json' })).toBeVisible()
   expect(await appearanceInForce(), 'opening the report must not disturb the appearance').toEqual(['dark', 'compact'])
   await page.screenshot({ path: testInfo.outputPath('report-return-1400.png'), fullPage: true })
+
+  // Secondary report tables reuse this already-frozen evidence; viewing them
+  // never creates another experiment or changes the research association.
+  for (const width of [1400, 420]) {
+    await page.setViewportSize({ width, height: 1000 })
+    for (const view of ['complete', 'orders']) {
+      await page.goto(`/backtests/${jobId}?report=${view}`)
+      await expect(page.locator('.report-trade-section')).toBeVisible()
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: testInfo.outputPath(`report-${view}-${width}.png`), fullPage: true })
+    }
+  }
+  await page.setViewportSize({ width: 1400, height: 1000 })
+  await page.goto(`/backtests/${jobId}`)
 
   // Following it lands on the very strategy that froze the run, with its own
   // conversation, evidence and AI column intact and the other one never selected.

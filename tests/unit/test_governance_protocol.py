@@ -102,6 +102,8 @@ def test_ci_keeps_path_aware_quality_and_installed_main_smoke() -> None:
         "main_smoke",
         "frontend",
         "web_e2e",
+        "rust_core",
+        "macos_shell",
     }
     assert "needs.classify.outputs.docs_only == 'true'" in jobs["governance"]["if"]
     assert "github.event_name == 'pull_request'" in jobs["quality"]["if"]

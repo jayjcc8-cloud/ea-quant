@@ -1,3 +1,4 @@
+import { researchCollection } from '../preview/research-fixtures'
 /**
  * User-strategy workspace UI contract.
  *
@@ -303,7 +304,8 @@ function scripted(script: Script = {}) {
     getReport: async () => { throw new Error('unused') },
     getEquityPath: async () => { throw new Error('unused') },
     artifactUrl: (jobId, name) => `/api/backtests/${jobId}/artifacts/${name}`,
-    listUserStrategies: async () => {
+    listResearch: async query => { calls.list += 1; return researchCollection(script.list ? await script.list() : script.strategies ?? [], query) },
+    researchReferences: async () => {
       calls.list += 1
       return script.list ? script.list() : script.strategies ?? []
     },
@@ -461,7 +463,7 @@ describe('user strategy workspace', () => {
     window.history.pushState({}, '', '/strategies')
     render(<App api={api} />)
 
-    expect(await screen.findByRole('heading', { name: '研究' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '研究工作台' })).toBeTruthy()
     expect(await screen.findByText('还没有策略。')).toBeTruthy()
     // The AI column is present before anything is selected, and it says what it
     // will hold rather than pretending to hold a conversation.
@@ -1355,7 +1357,7 @@ describe('user strategy workspace', () => {
     // that a started run succeeded.
     await user.click(screen.getByRole('link', { name: '返回研究列表' }))
     const table = within(screen.getByRole('navigation', { name: '策略列表' }))
-    expect(table.getByText('冻结 v2')).toBeTruthy()
+    expect(table.getByText(/冻结 v2/)).toBeTruthy()
     expect(table.getByText('结果未知')).toBeTruthy()
     expect(table.queryByText(/成功/)).toBeNull()
   })
@@ -1431,7 +1433,7 @@ describe('user strategy workspace', () => {
     render(<App api={api} />)
 
     // Nothing has been read, so there is no count, no empty claim and no form.
-    expect((await screen.findByText('正在读取策略…')).getAttribute('role')).toBe('status')
+    expect((await screen.findByText('正在读取研究…')).getAttribute('role')).toBe('status')
     expect(screen.queryByText('还没有策略。')).toBeNull()
     expect(screen.queryByText('0 个策略')).toBeNull()
     expect(screen.queryByRole('region', { name: '新建研究' })).toBeNull()
@@ -1578,15 +1580,17 @@ describe('user strategy workspace', () => {
     const user = userEvent.setup()
     const frozen = strategy({ experiments: [createdExperiment()] })
     const { api } = scripted({ strategies: [frozen], current: () => frozen })
-    // The run column reads the run's own job; a created dispatch is not a result.
+    // The collection carries the actual job state; a created dispatch is not a result.
+    api.listResearch = async () => { const value = researchCollection([frozen]); value.items[0].latest_experiment!.job_status = 'running'; return value }
     api.getBacktest = async () => runJob
     detail(api)
 
     if (window.location.pathname !== '/strategies') await userEvent.setup().click(await screen.findByRole('link', { name: '返回研究列表' }))
     const table = within(await screen.findByRole('navigation', { name: '策略列表' }))
     // The row carries the job's own state, and not the record it was created from.
-    const runLink = await table.findByRole('link', { name: '运行中' })
-    expect(runLink.getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
+    expect(table.getByText('运行中')).toBeTruthy()
+    const runLink = table.getByRole('link', { name: '查看运行' })
+    expect(runLink.getAttribute('href')).toBe('/backtests/job-1?research=us-1')
     expect(table.queryByText('运行已创建')).toBeNull()
     expect(table.queryByText('运行已启动')).toBeNull()
     expect(table.queryByText(/成功/)).toBeNull()
@@ -1695,38 +1699,27 @@ describe('user strategy workspace', () => {
     expect((within(panel).getByRole('button', { name: '确认并运行一次' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('shows the run’s own job status, and says so when that read fails or is another job', async () => {
+  it('renders the server-owned job status and read failure without per-row job requests', async () => {
     const frozen = strategy({ experiments: [createdExperiment()] })
-    const read = scripted({ strategies: [frozen], current: () => frozen })
-    read.api.getBacktest = async () => runJob
-    detail(read.api)
-    if (window.location.pathname !== '/strategies') await userEvent.setup().click(await screen.findByRole('link', { name: '返回研究列表' }))
-    const table = within(await screen.findByRole('navigation', { name: '策略列表' }))
-    const link = await table.findByRole('link', { name: '运行中' })
-    expect(link.getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
-    expect(table.queryByText(/成功/)).toBeNull()
-
-    cleanup()
-    // A job that is not the one this row asked for is refused, not shown as its run.
-    // The next step honestly reports the same refusal for its own read, so this row
-    // behavior is read inside the list the row lives in; the strip's own rendering is
-    // covered by the maturity tests.
-    const other = scripted({ strategies: [frozen], current: () => frozen })
-    other.api.getBacktest = async () => ({ ...runJob, job_id: 'job-2' })
-    detail(other.api)
-    await userEvent.setup().click(await screen.findByRole('link', { name: '返回研究列表' }))
-    const mismatch = within(await screen.findByRole('navigation', { name: '策略列表' }))
-    expect(await mismatch.findByText(/读取到的任务与这条运行不一致/)).toBeTruthy()
-
-    cleanup()
-    // A read that fails stays unreadable here, and still points at the run itself.
-    const failed = scripted({ strategies: [frozen], current: () => frozen })
-    failed.api.getBacktest = async () => { throw new Error('offline') }
-    detail(failed.api)
-    await userEvent.setup().click(await screen.findByRole('link', { name: '返回研究列表' }))
-    const fallback = within(await screen.findByRole('navigation', { name: '策略列表' }))
-    expect(await fallback.findByText(/运行状态不可读/)).toBeTruthy()
-    expect(fallback.getByRole('link', { name: '打开运行' }).getAttribute('href')).toBe('/strategies/us-1?tab=experiments&evidence_a=job-1')
+    for (const readError of [null, '读取到的任务与这条运行不一致。', '运行状态不可读：offline']) {
+      const { api } = scripted({ strategies: [frozen] })
+      api.listResearch = async () => {
+        const collection = researchCollection([frozen])
+        collection.items[0].latest_experiment = { ...collection.items[0].latest_experiment!, job_status: readError ? null : 'running', read_error: readError }
+        return collection
+      }
+      const jobRead = vi.fn()
+      api.getBacktest = jobRead
+      window.history.pushState({}, '', '/strategies')
+      render(<App api={api} />)
+      const table = within(await screen.findByRole('navigation', { name: '策略列表' }))
+      expect(table.getByText(readError ? '状态未知' : '运行中')).toBeTruthy()
+      if (readError) expect(table.getByText(readError)).toBeTruthy()
+      expect(table.getByRole('link', { name: '查看运行' }).getAttribute('href')).toBe('/backtests/job-1?research=us-1')
+      expect(table.queryByText(/成功/)).toBeNull()
+      expect(jobRead).not.toHaveBeenCalled()
+      cleanup()
+    }
   })
 
   it('keeps a frozen unknown owner run visible and explains the workspace hold without redispatch', async () => {
@@ -2038,6 +2031,7 @@ describe('maturity round 1', () => {
     // The way back to the last strategy names the frozen revision, not a dispatch
     // state that is not the run's own outcome.
     const listed = scripted({ strategies: [frozen] })
+    listed.api.listResearch = async () => { const value = researchCollection([frozen]); value.items[0].latest_experiment!.job_status = 'running'; return value }
     listed.api.getBacktest = async () => runJob
     window.history.pushState({}, '', '/strategies')
     render(<App api={listed.api} />)

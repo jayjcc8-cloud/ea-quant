@@ -187,7 +187,6 @@ test('the local appearance controls are reachable, applied app-wide, and kept ac
 
   // It is honest about the limits of local appearance: no language, timezone or
   // notification switch is offered, and no permission is requested for one.
-  await expect(settings).toContainText('没有语言、时区或通知开关')
   await expect(settings.locator('select')).toHaveCount(0)
   await expect(settings.getByRole('switch')).toHaveCount(0)
   await expect(settings.getByRole('button', { name: /通知|权限|语言|时区/ })).toHaveCount(0)
@@ -211,8 +210,10 @@ test('the local appearance controls are reachable, applied app-wide, and kept ac
   // The workspace this reader actually works on, in that theme. The real catalogue
   // decides which surface is asserted: a real strategy if the workspace has one,
   // the honest empty workspace if it does not.
-  const catalog = await page.request.get('/api/user-strategies').then(response => response.json())
-  const strategies = (catalog.strategies ?? []) as { user_strategy_id: string; name: string }[]
+  const collectionResponse = await page.request.get('/api/research')
+  expect(collectionResponse.ok()).toBe(true)
+  const catalog = await collectionResponse.json()
+  const strategies = (catalog.items ?? []) as { user_strategy_id: string; name: string }[]
   testInfo.annotations.push({
     type: 'workspace',
     description: strategies.length
@@ -220,7 +221,7 @@ test('the local appearance controls are reachable, applied app-wide, and kept ac
       : 'no real strategy exists here; the empty workspace is the surface',
   })
   await page.goto('/strategies')
-  await expect(page.getByRole('heading', { name: '研究', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '研究工作台', exact: true })).toBeVisible()
   for (const selector of ['.strategy-heading h1', '.strategy-subtitle']) {
     ratios[selector] = await contrast(page, selector)
   }
@@ -294,7 +295,7 @@ test('the local appearance controls are reachable, applied app-wide, and kept ac
 
   expect(errors()).toEqual([])
   expect(api.writes(), 'changing the local appearance must not write to the API').toEqual([])
-  expect(api.reads(), 'the pages under test must have read the real workspace').toContain('/api/user-strategies')
+  expect(api.reads(), 'the pages under test must have read the real workspace').toContain('/api/research')
 
   // The evidence: which real sources were read, which run they named, which surfaces
   // were measured, and the fact that nothing was written.

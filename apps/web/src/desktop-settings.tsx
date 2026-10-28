@@ -102,18 +102,19 @@ export function DesktopSettings({ api, onSaved, section = 'all' }: { api: ApiAda
   const cancel = () => { if (status) { reset(status, profileId); setError(''); setMessage('未保存的输入已取消。') } }
   if (!api.desktopSettings || webOnly) return section === 'model' ? <p>模型连接管理仅在 QUINE 桌面应用中可用。</p> : section === 'workspace' ? <p>工作区位置仅在 QUINE 桌面应用中管理；浏览器不会移动任何数据。</p> : <AppearanceSettings />
   return <section className={`panel settings-form settings-form-${section}`} aria-label={section === "model" ? "模型连接管理" : "桌面设置"}>
-    <header><h2>{section === "model" ? "编辑模型连接" : section === "workspace" ? "工作区位置" : section === "appearance" ? "外观" : "桌面设置"}</h2><span>{section === "model" ? `${profileName || "当前连接"} · ${dirty ? "未保存草稿" : "连接未验证"}` : section === "workspace" ? "独立工作区 · 重启生效" : "保存后应用"}</span></header>
+    {section !== 'model' && <header><h2>{section === "workspace" ? "工作区位置" : section === "appearance" ? "外观" : "桌面设置"}</h2><span>{section === "workspace" ? "独立工作区 · 重启生效" : "保存后应用"}</span></header>}
     {error && <p role="alert" className="notice error">{error}</p>}
     {!status && <button onClick={() => { void api.desktopSettings?.().then(reset).catch(() => setError('无法读取设置，请检查文件权限。')) }}>重新读取桌面设置</button>}
     {dirty && <p className="draft-state">未保存草稿</p>}
     {message && <p role="status">{message}</p>}
     {status && <>
       {status.startup_error && <p role="alert">{status.startup_error}</p>}
-      {(section === 'all' || section === 'model') && <fieldset disabled={busy || !!status.model_error}>
+      {(section === 'all' || section === 'model') && <fieldset className="model-connections" disabled={busy || !!status.model_error}>
         <legend>模型连接</legend>
         {status.model_error && <p role="alert">{status.model_error}</p>}
         <p className="model-scope">作用域：当前工作区。已批准轮次保留当时的连接身份。</p>
-        {status.model.profiles && <>
+        <div className="model-connection-layout">
+        {status.model.profiles && <aside className="model-directory" aria-label="已保存连接">
           <p>工作区默认：<strong>{status.model.profiles.find(item => item.id === status.model.default_profile_id)?.name ?? '未设置'}</strong></p>
           <ul className="resource-entries">{status.model.profiles.map(item => <li className="resource-entry" key={item.id}>
             <strong>{item.name}</strong> · {item.provider} · {item.model} · v{item.revision}
@@ -122,8 +123,9 @@ export function DesktopSettings({ api, onSaved, section = 'all' }: { api: ApiAda
             <button disabled={item.id === status.model.default_profile_id} onClick={() => void save({ default_model_profile: item.id }, '工作区默认已更改；历史调用和已批准轮次保持原配置。')}>{item.id === status.model.default_profile_id ? '当前默认' : `设为默认 ${item.name}`}</button>
           </li>)}</ul>
           <button onClick={() => edit(crypto.randomUUID(), { provider: 'deepseek', model: '', base_url: null } as ModelConfigurationStatus, '')}>添加连接</button>
-          <label>连接名称<input value={profileName} onChange={e => setProfileName(e.target.value)} maxLength={100} disabled={profileId === 'legacy'} /></label>
-        </>}
+        </aside>}
+        <div className="model-editor">
+        {status.model.profiles && <label>连接名称<input value={profileName} onChange={e => setProfileName(e.target.value)} maxLength={100} disabled={profileId === 'legacy'} /></label>}
         <p>仅保存本地配置，不发送请求、不验证密钥。回到研究并发送消息后才会调用模型。</p>
         <label>提供方<select value={provider} onChange={e => setProvider(e.target.value)}>
           <option value="deepseek">DeepSeek</option><option value="anthropic">Anthropic</option>
@@ -134,8 +136,9 @@ export function DesktopSettings({ api, onSaved, section = 'all' }: { api: ApiAda
         {endpointError && <p role="alert">{endpointError}</p>}
         <label>新 API Key<input type="password" autoComplete="new-password" value={secret} onChange={e => setSecret(e.target.value)} maxLength={4096} /></label>
         <p className="muted">{editingCredential ? '已有凭据；输入框留空保留当前凭据。' : editingCredential === false ? '尚无凭据。' : '凭据状态不可读。'}密钥只写不回显，不存入浏览器；离开页面会清空未保存密钥。更改提供方或端点需重新输入或清除凭据。</p>
-        <label><input type="checkbox" checked={clearKey} onChange={e => setClearKey(e.target.checked)} />清除已保存凭据</label>
+        <label className="model-key-clear"><input type="checkbox" checked={clearKey} onChange={e => setClearKey(e.target.checked)} />清除已保存凭据</label>
         <button disabled={!!endpointError || !model.trim() || (profileId !== 'legacy' && !profileName.trim()) || (clearKey && !!secret)} onClick={() => void save(profileId === 'legacy' ? { model: { provider, model, base_url: endpoint, api_key: secret, clear_key: clearKey } } : { model_profile: { id: profileId, name: profileName, provider, model, base_url: endpoint, api_key: secret, clear_key: clearKey } }, '模型设置已保存；真实请求认证仍未验证。')}>保存模型设置</button>
+        </div></div>
       </fieldset>}
       {(section === 'all' || section === 'application' || section === 'workspace') && <fieldset disabled={busy}>
         <legend>工作区</legend>

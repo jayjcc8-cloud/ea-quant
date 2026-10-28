@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { SourceLink as Link } from './workspace-navigation'
-import type { UserStrategy } from './user-strategies-api'
+import type { ResearchReference } from './research-workbench-api'
 import type { ApiAdapter } from './app'
 import { experimentRecordsForJob, frozenRevisionText, type StrategyAssociationRecord } from './research-association'
 
@@ -16,7 +16,7 @@ import { experimentRecordsForJob, frozenRevisionText, type StrategyAssociationRe
  * change, a refresh or a late answer can never put another job's strategy on this
  * page.
  */
-export function StrategyAssociation({ api, jobId, onRead, compact = false }: { api: ApiAdapter; jobId: string; onRead?: (items: UserStrategy[]) => void; compact?: boolean }) {
+export function StrategyAssociation({ api, jobId, onRead, compact = false }: { api: ApiAdapter; jobId: string; onRead?: (items: ResearchReference[]) => void; compact?: boolean }) {
   type Association =
     | { kind: 'reading' }
     | { kind: 'none'; note: string }
@@ -30,7 +30,7 @@ export function StrategyAssociation({ api, jobId, onRead, compact = false }: { a
 
   useEffect(() => {
     const read = ++generation.current
-    const list = api.listUserStrategies
+    const list = api.researchReferences
     if (!list) {
       // The optional read settles asynchronously, so a workspace that unmounts or
       // swaps its api never writes this page from a stale answer.
@@ -39,7 +39,7 @@ export function StrategyAssociation({ api, jobId, onRead, compact = false }: { a
       })
       return () => { generation.current += 1 }
     }
-    list().then(strategies => {
+    list(jobId).then(strategies => {
       if (generation.current !== read) return
       onRead?.(strategies)
       const records = experimentRecordsForJob(strategies, jobId)

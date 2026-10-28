@@ -23,6 +23,8 @@ jobs:
       web: ${{ steps.routes.outputs.web }}
       web_e2e: ${{ steps.routes.outputs.web_e2e }}
       ci: ${{ steps.routes.outputs.ci }}
+      rust_core: ${{ steps.routes.outputs.rust_core }}
+      macos_shell: ${{ steps.routes.outputs.macos_shell }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -158,6 +160,60 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: uv run --no-project --python 3.12 python scripts/verify.py --profile quality
 
+  # Rust core unit and contract tests. The real-engine Python journey in
+  # tests/stage2.rs is intentionally excluded from this job.
+  rust_core:
+    needs: classify
+    if: needs.classify.outputs.rust_core == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.local/rust-target
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert event exact checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Select stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Run Rust core unit and contract tests
+        run: >-
+          cargo test --locked --manifest-path crates/quine-core/Cargo.toml
+          --lib --test store --test cli --test canonical_identity
+
+  # Compile-only check of the thin macOS Tauri shell. It does not build an
+  # installable package, launch the app, sign it or link the Python runtime.
+  macos_shell:
+    needs: classify
+    if: needs.classify.outputs.macos_shell == 'true'
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.local/desktop/target
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert event exact checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Assert Apple Silicon runner
+        run: test "$(uname -m)" = "arm64"
+      - name: Select stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Check the macOS Tauri shell compiles
+        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+
   # Shared desktop React/WebView checks; not a separate browser product.
   frontend:
     needs: classify
@@ -186,6 +242,9 @@ jobs:
           npm run typecheck
           npm test
           npm run build
+          npm run typecheck:studio
+          npm run test:studio
+          npm run build:studio
 
   # Internal browser carrier for shared business/API regression, not native acceptance.
   web_e2e:

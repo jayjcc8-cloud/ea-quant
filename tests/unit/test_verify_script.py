@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -49,6 +50,78 @@ def test_ci_routes_and_runs_installed_web_e2e() -> None:
     assert "required_bytes = 15 * 1024**3" in web_steps
 
 
+def _job_commands(job: dict[str, object]) -> str:
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    return " ".join(
+        " ".join(str(step.get("run", "")).split()) for step in steps if isinstance(step, dict)
+    )
+
+
+def test_ci_checks_the_rust_core_with_its_own_path_trigger() -> None:
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    job = yaml.safe_load(workflow)["jobs"]["rust_core"]
+
+    assert job["needs"] == "classify"
+    assert job["if"].strip() == "needs.classify.outputs.rust_core == 'true'"
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 10
+    assert "${{ github.workspace }}/.local/rust-target" in job["env"]["CARGO_TARGET_DIR"]
+    assert "continue-on-error" not in job
+
+    checkout = job["steps"][0]
+    assert checkout["uses"] == "actions/checkout@v7"
+    assert checkout["with"]["persist-credentials"] is False
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+
+    commands = _job_commands(job)
+    assert "rustup toolchain install stable --profile minimal" in commands
+    assert "rustup default stable" in commands
+    assert (
+        "cargo test --locked --manifest-path crates/quine-core/Cargo.toml --lib "
+        "--test store --test cli --test canonical_identity"
+    ) in commands
+    assert "--test stage2" not in commands
+    assert "cargo build" not in commands
+    assert "tauri" not in commands.lower()
+
+
+def test_ci_checks_the_macos_tauri_shell_with_its_own_path_trigger() -> None:
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    job = yaml.safe_load(workflow)["jobs"]["macos_shell"]
+
+    assert job["needs"] == "classify"
+    assert job["if"].strip() == "needs.classify.outputs.macos_shell == 'true'"
+    assert job["runs-on"] == "macos-15"
+    assert job["timeout-minutes"] == 20
+    assert "${{ github.workspace }}/.local/desktop/target" in job["env"]["CARGO_TARGET_DIR"]
+    assert "continue-on-error" not in job
+
+    checkout = job["steps"][0]
+    assert checkout["uses"] == "actions/checkout@v7"
+    assert checkout["with"]["persist-credentials"] is False
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+
+    commands = _job_commands(job)
+    assert 'test "$(uname -m)" = "arm64"' in commands
+    assert "rustup toolchain install stable --profile minimal" in commands
+    assert "rustup default stable" in commands
+    assert "cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml" in commands
+    for forbidden in ("tauri build", "npm run build", "codesign", "notarize", "cargo build"):
+        assert forbidden not in commands
+
+
+def test_ci_native_jobs_keep_pr_and_main_event_semantics() -> None:
+    jobs = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    outputs = jobs["classify"]["outputs"]
+    for name in ("rust_core", "macos_shell"):
+        assert outputs[name] == "${{ steps.routes.outputs." + name + " }}"
+        condition = jobs[name]["if"]
+        assert "${{" not in condition
+        assert "github.event_name" not in condition
+        assert "continue-on-error" not in jobs[name]
+
+
 @pytest.mark.parametrize(
     ("path", "python", "web", "web_e2e"),
     [
@@ -76,6 +149,162 @@ def test_candidate_routes_keep_release_full_and_frontend_gate() -> None:
     assert ci_routes.classify(["apps/web/src/app.tsx"], candidate=True).web is True
     assert ci_routes.classify(["docs/STATUS.md"], candidate=True, release=True).web is True
     assert ci_routes.classify([], candidate=True).web is True
+
+
+@pytest.mark.parametrize(
+    ("path", "rust_core", "macos_shell"),
+    [
+        ("crates/quine-core/src/core.rs", True, False),
+        ("crates/quine-core/Cargo.toml", True, False),
+        ("crates/quine-core/Cargo.lock", True, False),
+        ("crates/quine-core/tests/store.rs", True, False),
+        ("crates/quine-core/README.md", False, False),
+        ("apps/desktop/src-tauri/src/main.rs", False, True),
+        ("apps/desktop/src-tauri/Cargo.toml", False, True),
+        ("apps/desktop/src-tauri/Cargo.lock", False, True),
+        ("apps/desktop/src-tauri/build.rs", False, True),
+        ("apps/desktop/src-tauri/tauri.conf.json", False, True),
+        ("apps/desktop/src-tauri/icons/icon.icns", False, True),
+        ("apps/desktop/loading/index.html", False, True),
+        ("apps/desktop/package.json", False, True),
+        ("apps/desktop/README.md", False, False),
+        ("Cargo.toml", True, True),
+        ("Cargo.lock", True, True),
+        ("rust-toolchain", True, True),
+        ("rust-toolchain.toml", True, True),
+        (".cargo/config.toml", True, True),
+        ("scripts/build_desktop.py", True, True),
+        (".github/workflows/ci.yml", True, True),
+        ("scripts/ci_routes.py", True, True),
+        (".github/workflows/candidate-full.yml", False, False),
+        (".github/workflows/production-runtime.yml", False, False),
+        ("docs/STATUS.md", False, False),
+        ("README.md", False, False),
+        ("NOTES.md", False, False),
+        ("NOTES.MD", False, False),
+        ("design/README.md", False, False),
+        (".cargo/README.md", False, False),
+        ("src/ea/web/service.py", False, False),
+        ("apps/web/src/app.tsx", False, False),
+        ("tests/unit/test_execution_messages.py", False, False),
+        ("unrecognized-build-input", True, True),
+    ],
+)
+def test_ci_routes_target_the_two_rust_builds(
+    path: str, rust_core: bool, macos_shell: bool
+) -> None:
+    routes = ci_routes.classify([path])
+    assert (routes.rust_core, routes.macos_shell) == (rust_core, macos_shell)
+
+
+def test_ci_rust_routes_union_without_relaxing_existing_routes() -> None:
+    routes = ci_routes.classify(
+        [
+            "crates/quine-core/src/store.rs",
+            "apps/desktop/src-tauri/src/main.rs",
+            "docs/STATUS.md",
+        ]
+    )
+    assert (routes.rust_core, routes.macos_shell) == (True, True)
+    assert routes.docs_only is False
+    assert routes.governance is True
+    assert routes.python is True
+    assert routes.web is True
+    assert routes.web_e2e is True
+    assert routes.ci is False
+
+    markdown_only = ci_routes.classify(
+        ["crates/quine-core/README.md", "apps/desktop/README.md", "docs/STATUS.md"]
+    )
+    assert (markdown_only.rust_core, markdown_only.macos_shell) == (False, False)
+
+
+@pytest.mark.parametrize("path", ["NOTES.md", "NOTES.MD", "design/README.md", ".cargo/README.md"])
+def test_ci_known_markdown_keeps_old_routes_without_native_builds(path: str) -> None:
+    routes = ci_routes.classify([path])
+    assert (routes.rust_core, routes.macos_shell) == (False, False)
+    assert routes.docs_only is False
+    assert routes.governance is True
+    assert routes.python is True
+    assert routes.web is True
+    assert routes.web_e2e is True
+    assert routes.ci is False
+
+
+def test_ci_markdown_does_not_mask_a_native_source_change() -> None:
+    core = ci_routes.classify(["crates/quine-core/src/lib.rs", "design/README.md"])
+    assert (core.rust_core, core.macos_shell) == (True, False)
+    cargo = ci_routes.classify([".cargo/config.toml", ".cargo/README.md"])
+    assert (cargo.rust_core, cargo.macos_shell) == (True, True)
+
+
+def test_ci_rust_routes_are_conservative_for_empty_and_unknown_inputs() -> None:
+    empty = ci_routes.classify([])
+    assert (empty.rust_core, empty.macos_shell) == (True, True)
+    assert empty.docs_only is False
+    assert empty.governance is True
+    assert empty.python is True
+    assert empty.web is True
+    assert empty.web_e2e is True
+    assert empty.ci is True
+
+    unknown = ci_routes.classify(["unrecognized-build-input"])
+    assert (unknown.rust_core, unknown.macos_shell) == (True, True)
+
+
+def test_candidate_routes_carry_the_computed_rust_flags() -> None:
+    core = ci_routes.classify(["crates/quine-core/src/lib.rs"], candidate=True)
+    shell = ci_routes.classify(["apps/desktop/src-tauri/src/main.rs"], candidate=True)
+    docs = ci_routes.classify(["docs/STATUS.md"], candidate=True)
+    assert (core.rust_core, core.macos_shell) == (True, False)
+    assert (shell.rust_core, shell.macos_shell) == (False, True)
+    assert (docs.rust_core, docs.macos_shell) == (False, False)
+
+
+def _route_cli_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raw: bytes,
+) -> dict[str, str]:
+    stdin = io.TextIOWrapper(io.BytesIO(raw))
+    monkeypatch.setattr(sys, "argv", ["ci_routes.py"])
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    assert ci_routes.main() == 0
+    return dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines() if line)
+
+
+def test_route_cli_emits_both_new_flags(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = _route_cli_output(
+        monkeypatch,
+        capsys,
+        b"A\0apps/desktop/src-tauri/src/main.rs\0M\0crates/quine-core/src/core.rs\0",
+    )
+    assert output["rust_core"] == "true"
+    assert output["macos_shell"] == "true"
+
+
+def test_route_cli_handles_deletes_and_split_renames(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    deleted = _route_cli_output(monkeypatch, capsys, b"D\0apps/desktop/src-tauri/src/old.rs\0")
+    assert (deleted["rust_core"], deleted["macos_shell"]) == ("false", "true")
+
+    renamed = _route_cli_output(
+        monkeypatch,
+        capsys,
+        b"D\0crates/quine-core/src/old.rs\0A\0crates/quine-core/src/new.rs\0",
+    )
+    assert (renamed["rust_core"], renamed["macos_shell"]) == ("true", "false")
+
+
+def test_route_cli_treats_unsupported_git_status_conservatively(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = _route_cli_output(monkeypatch, capsys, b"T\0docs/STATUS.md\0")
+    assert (output["rust_core"], output["macos_shell"]) == ("true", "true")
 
 
 def test_added_modules_only_skip_browser_when_outside_installed_imports(tmp_path: Path) -> None:

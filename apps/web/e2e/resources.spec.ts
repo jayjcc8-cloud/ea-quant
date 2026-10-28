@@ -26,7 +26,7 @@
  * and `updated_at`. Those three are therefore excluded from the comparison with
  * their before and after values recorded in the attachment; every other field of
  * every task — budget, usage, spent_calls, selection, pinned binding, confirmed
- * spec, jobs — and the whole strategy and job documents must come back
+ * spec, jobs — and the research reference projections and whole job documents must come back
  * identical. So must a frozen reference's identity, before and after a
  * selection, a catalog refresh and a trip to the page a reference links to.
  *
@@ -160,7 +160,7 @@ const readSources = async (request: APIRequestContext): Promise<Sources> => ({
   plugins: (await json(request, '/api/plugins/catalog')).plugins ?? [],
   settings: await json(request, '/api/settings/status'),
   tasks: await json(request, '/api/research/tasks'),
-  strategies: await json(request, '/api/user-strategies'),
+  strategies: await json(request, '/api/research/references'),
   jobs: await json(request, '/api/backtests'),
 })
 
@@ -396,7 +396,7 @@ test('资源中心 repeats the real workspace, composes only on the explicit act
 
     // The reference sources are named as what this read did with each of them.
     for (const [reference, path] of [
-      ['source-strategies', '/api/user-strategies'],
+      ['source-strategies', '/api/research/references'],
       ['source-tasks', '/api/research/tasks'],
       ['source-jobs', '/api/backtests'],
     ] as const) {
@@ -441,7 +441,7 @@ test('资源中心 repeats the real workspace, composes only on the explicit act
     // A workspace whose three reference sources are all empty has no such
     // reference, and that is asserted as its own case rather than waited for.
     const referenceSourcesEmpty = [
-      (before.strategies as { strategies?: unknown[] } | null)?.strategies ?? [],
+      (before.strategies as { items?: unknown[] } | null)?.items ?? [],
       before.tasks?.tasks ?? [],
       (before.jobs as { jobs?: unknown[] } | null)?.jobs ?? [],
     ].every((list) => list.length === 0)
@@ -582,7 +582,7 @@ test('资源中心 repeats the real workspace, composes only on the explicit act
 
     // Nothing above changed anything. The task index is compared with exactly the
     // three reconcile metadata fields excluded, and their before/after values are
-    // recorded; the whole strategy and job documents are compared unchanged.
+    // recorded; the research reference projections and whole job documents are compared unchanged.
     const after = await readSources(request)
     const tasksAfter = splitTasks(after.tasks)
     expect(tasksAfter.reduced, 'no task field but the reconcile metadata may change').toEqual(tasksBefore.reduced)
@@ -614,7 +614,7 @@ test('资源中心 repeats the real workspace, composes only on the explicit act
         api_requests: seen,
         refused_writes: refusedWrites(),
         page_errors: pageErrors,
-        reference_sources_compared: 'tasks modulo operation_generation/operation_completion_generation/updated_at; strategies and jobs whole',
+        reference_sources_compared: 'tasks modulo operation_generation/operation_completion_generation/updated_at; research reference projections and whole jobs',
       }, null, 2),
       contentType: 'application/json',
     })

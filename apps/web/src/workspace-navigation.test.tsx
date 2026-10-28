@@ -12,10 +12,10 @@ it('organizes the shell by research, local simulation and reusable resources', a
   const nav = within(screen.getByRole('navigation', { name: '主导航' }))
   expect(nav.getByRole('link', { name: '研究' }).getAttribute('href')).toBe('/strategies')
   expect(nav.getByRole('link', { name: '模拟运行' }).getAttribute('href')).toBe('/runs')
-  expect(screen.getByRole('link', { name: '资源' }).getAttribute('href')).toBe('/resources/data')
+  expect(screen.getByRole('link', { name: '数据与模型' }).getAttribute('href')).toBe('/resources/data')
   expect(nav.queryByRole('link', { name: '数据' })).toBeNull()
   expect(nav.queryByRole('link', { name: '扩展' })).toBeNull()
-  await screen.findByRole('heading', { name: '研究' })
+  await screen.findByRole('heading', { name: '研究工作台' })
 })
 
 it('keeps a legacy import deep link bound to the same research and revision', async () => {
@@ -59,7 +59,8 @@ it('returns from model management to the exact research evidence after a remount
   window.history.replaceState({}, '', source)
   const api = scriptedAdapter()
   const view = render(<App api={api} />)
-  await user.click(await screen.findByRole('link', { name: '配置模型' }))
+  await user.click(screen.getByRole('link', { name: '数据与模型' }))
+  await user.click(screen.getByRole('link', { name: '模型连接' }))
   await screen.findByRole('heading', { name: '模型连接' })
   view.unmount()
   render(<App api={api} />)
@@ -87,7 +88,7 @@ it('retains a new research idea through cross-section navigation without saving 
   render(<App api={{ ...api, createUserStrategy: create }} />)
   await user.click((await screen.findAllByRole('button', { name: '新建研究' }))[0])
   await user.type(screen.getByLabelText('意图'), '尚未保存的研究想法')
-  await user.click(screen.getByRole('link', { name: '资源' }))
+  await user.click(screen.getByRole('link', { name: '数据与模型' }))
   await user.click(screen.getByRole('link', { name: '返回研究' }))
   await user.click((await screen.findAllByRole('button', { name: '新建研究' }))[0])
   expect((screen.getByLabelText('意图') as HTMLTextAreaElement).value).toBe('尚未保存的研究想法')
@@ -105,11 +106,11 @@ it('keeps model editing in resources and application preferences in settings', a
 })
 
 
-it('opens an unconnected exchange configuration without a business-navigation duplicate', async () => {
+it('opens an unconnected exchange configuration with persistent primary navigation', async () => {
   window.history.replaceState({}, '', '/platform/binance')
   render(<App api={scriptedAdapter()} />)
   expect(screen.getByRole('heading', { name: 'Binance 交易所配置' })).toBeTruthy()
-  expect(screen.queryByRole('navigation', { name: '主导航' })).toBeNull()
+  expect(screen.getAllByRole('navigation', { name: '主导航' })).toHaveLength(1)
   expect(screen.getByRole('link', { name: '返回工作页' }).getAttribute('href')).toBe('/strategies')
 })
 

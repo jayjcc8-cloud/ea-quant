@@ -300,6 +300,13 @@ class UserStrategyCreateRequest(BaseModel):
     scenario_id: str | None = Field(default=None, min_length=1, max_length=200)
     # The user's own criterion in the report's registered vocabulary, or none.
     criterion: dict[str, Any] | None = None
+    exchange_id: Literal["binance", "okx"] | None = None
+
+
+class ResearchExchangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    exchange_id: Literal["binance", "okx"] | None
+    expected_updated_at: str = Field(min_length=1, max_length=100)
 
 
 class UserStrategyBindRequest(BaseModel):
@@ -1447,18 +1454,6 @@ def create_app(settings: WebSettings) -> Any:
 
     from ea.web import radian
 
-    @app.get("/api/workspace/overview")
-    def workspace_overview() -> object:
-        try:
-            return radian.overview(
-                service,
-                runtime_root=settings.runtime_root,
-                alerts_stream=settings.alerts_stream,
-                settings=RadianSettings(RadianSettings.default_path()),
-            )
-        except (WebBoundaryError, ValueError, OSError) as caught:
-            return error(500, "workspace_overview_unavailable", str(caught))
-
     @app.get("/api/paper/instances")
     def paper_instances() -> object:
         if settings.desktop_paper is None:
@@ -1578,13 +1573,6 @@ def create_app(settings: WebSettings) -> Any:
             return radian.paper_events(settings.runtime_root, run_id=run_id, limit=limit)
         except (WebBoundaryError, ValueError, OSError) as caught:
             return error(500, "paper_events_unavailable", str(caught))
-
-    @app.get("/api/search")
-    def search_route(q: str = Query(min_length=2, max_length=200)) -> object:
-        try:
-            return radian.search(service, q)
-        except (WebBoundaryError, ValueError, OSError) as caught:
-            return error(500, "search_unavailable", str(caught))
 
     @app.get("/api/settings/status")
     def settings_status_route() -> object:
@@ -1801,14 +1789,44 @@ def create_app(settings: WebSettings) -> Any:
                 intent=request.intent,
                 scenario_id=request.scenario_id,
                 criterion=request.criterion,
+                exchange_id=request.exchange_id,
             )
             return strategy.document()
         except (UserStrategyError, OSError) as caught:
             return strategy_refusal(caught)
 
-    @app.get("/api/user-strategies")
-    def list_user_strategies() -> object:
-        return {"strategies": [item.document() for item in user_strategy_service.list()]}
+    from ea.web.research_workbench import ResearchWorkbench
+
+    workbench = ResearchWorkbench(user_strategy_service, service)
+
+    @app.get("/api/research")
+    def research_collection(
+        q: str = Query(default="", max_length=200),
+        exchange_id: Literal["binance", "okx"] | None = None,
+        sort: Literal["updated", "name"] = "updated",
+    ) -> object:
+        try:
+            return workbench.collection(q=q, exchange_id=exchange_id, sort=sort)
+        except strategy_failures as caught:
+            return strategy_refusal(caught)
+
+    @app.get("/api/research/references")
+    def research_references(job_id: str | None = Query(default=None, max_length=200)) -> object:
+        try:
+            return workbench.references(job_id)
+        except strategy_failures as caught:
+            return strategy_refusal(caught)
+
+    @app.patch("/api/research/{user_strategy_id}/exchange")
+    def assign_research_exchange(user_strategy_id: str, request: ResearchExchangeRequest) -> object:
+        try:
+            return user_strategy_service.assign_exchange(
+                user_strategy_id,
+                exchange_id=request.exchange_id,
+                expected_updated_at=request.expected_updated_at,
+            ).document()
+        except strategy_failures as caught:
+            return strategy_refusal(caught)
 
     @app.get("/api/user-strategies/{user_strategy_id}")
     def get_user_strategy(user_strategy_id: str) -> object:

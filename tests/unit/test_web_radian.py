@@ -7,10 +7,9 @@ from typing import Any
 
 import pytest
 import yaml
-from fastapi.testclient import TestClient
 
 from ea.web.app import WebSettings, create_app
-from ea.web.radian import overview, paper_events, paper_overview, search
+from ea.web.radian import paper_events, paper_overview
 from ea.web.service import WebService
 from ea.web.settings import RadianSettings, RadianSettingsError
 
@@ -155,68 +154,6 @@ def test_paper_events_reads_tail_and_skips_broken_lines(tmp_path: Path) -> None:
     assert result["run_id"] == "run-1"
     assert [item.get("event") for item in result["events"]] == ["first", "last"]
     assert result["count"] == 2
-
-
-# --- overview and search ----------------------------------------------------
-
-
-def test_overview_empty_workspace_is_honest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("RADIAN_SETTINGS_FILE", str(tmp_path / "settings.json"))
-    service = _service(tmp_path)
-    try:
-        result = overview(service)
-    finally:
-        service.stop()
-    assert result["recent_work"] == []
-    assert result["attention"] == []
-    assert result["paper"] == {"available": False, "reason": "runtime_root_not_configured"}
-    assert result["model"]["configured"] is False
-
-
-def test_search_matches_registered_scenarios(tmp_path: Path) -> None:
-    service = _service(tmp_path)
-    try:
-        result = search(service, "always-flat")
-        kinds = [item["kind"] for item in result["results"]]
-        assert "scenario" in kinds
-        assert any(item["id"] == "flat.yaml" for item in result["results"])
-        empty = search(service, "no-such-object")
-        assert empty["results"] == []
-    finally:
-        service.stop()
-
-
-def test_search_minimum_query_length_is_enforced_by_api(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    app = create_app(settings)
-    client = TestClient(app)
-    with client:
-        # A wrong Host header is rejected by the loopback boundary first.
-        response = client.get("/api/search", params={"q": "a"})
-        assert response.status_code == 400
-        assert response.json()["error"]["code"] == "invalid_host"
-        # With the trusted loopback host, the query bound is enforced.
-        response = client.get("/api/search", params={"q": "a"}, headers={"host": "127.0.0.1:8765"})
-        assert response.status_code == 422
-
-
-def test_workspace_overview_api_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("RADIAN_SETTINGS_FILE", str(tmp_path / "settings.json"))
-    app = create_app(_settings(tmp_path))
-    client = TestClient(app)
-    with client:
-        response = client.get("/api/workspace/overview", headers={"host": "127.0.0.1:8765"})
-        assert response.status_code == 200, response.text
-        document = response.json()
-        assert document["schema"] == "radian.workspace-overview.v1"
-        assert document["paper"]["available"] is False
-        assert document["paper"]["reason"] == "runtime_root_not_configured"
-        assert document["model"]["configured"] is False
-        settings_response = client.get("/api/settings/status", headers={"host": "127.0.0.1:8765"})
-        assert settings_response.status_code == 200
-        assert settings_response.json()["configured"] is False
 
 
 def test_web_settings_accept_runtime_root_and_alerts_stream(tmp_path: Path) -> None:

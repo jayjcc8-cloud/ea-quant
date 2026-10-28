@@ -1,4 +1,6 @@
+import type { ResearchCollection, ResearchQuery, ResearchReference } from './research-workbench-api'
 import { PlatformContext, platformNames, savedPlatform, type PlatformId } from './platform-context'
+import { WorkbenchIcon } from './workbench-icon'
 import { LiveWorkspace } from './live-workspace'
 import { PlatformWorkspace } from './platform-workspace'
 import { SourceLink as Link, WorkspaceNavigation } from './workspace-navigation'
@@ -255,8 +257,11 @@ export type ApiAdapter = {
    * working, and a workspace that serves none of them renders the honest empty
    * state instead. `scenario_id` is absent when a save is a bare intent, and the
    * binding below is the one explicit choice that later gives it a scenario. */
-  listUserStrategies?(): Promise<UserStrategy[]>
+  listResearch?(query?: ResearchQuery): Promise<ResearchCollection>
+  researchReferences?(jobId?: string): Promise<ResearchReference[]>
+  assignResearchExchange?(id: string, exchangeId: PlatformId | null, updatedAt: string): Promise<UserStrategy>
   createUserStrategy?(input: {
+    exchange_id?: PlatformId | null
     name: string
     intent: string
     scenario_id?: string | null
@@ -377,7 +382,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T
 }
 
-const browserApi: ApiAdapter = {
+export const browserApi: ApiAdapter = {
   async listCandidates() { return (await apiRequest<{ candidates: Candidate[] }>('/api/candidates')).candidates },
   getCandidate: id => apiRequest(`/api/candidates/${id}`),
   prepareSimulation: id => apiRequest(`/api/candidates/${id}/simulation-preparation`),
@@ -439,7 +444,9 @@ const browserApi: ApiAdapter = {
   inspectLocalStrategy: (contentBase64, manifest) => researchApi.inspectLocalStrategy(contentBase64, manifest),
   registerLocalStrategy: request => researchApi.registerLocalStrategy(request),
   revokeLocalStrategy: () => researchApi.revokeLocalStrategy(),
-  listUserStrategies: () => userStrategiesApi.list(),
+  listResearch: query => userStrategiesApi.listResearch(query),
+  researchReferences: jobId => userStrategiesApi.references(jobId),
+  assignResearchExchange: (id, exchange, at) => userStrategiesApi.assignExchange(id, exchange, at),
   createUserStrategy: input => userStrategiesApi.create(input),
   getUserStrategy: userStrategyId => userStrategiesApi.get(userStrategyId),
   selectUserStrategyModelProfile: (id, profileId) =>
@@ -568,9 +575,9 @@ function Shell({ api }: { api: ApiAdapter }) {
   }
   const management = /^\/(resources|settings|platform|data|extensions|events)(\/|$)/.test(location.pathname)
   const split = /^\/(strategies|runs|live)(\/|$)/.test(location.pathname) || /^\/backtests\/[^/]+$/.test(location.pathname)
-  const chrome = <><div className="workspace-commandbar"><button className="sidebar-toggle" aria-label="切换侧栏" aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}>☰</button>{!management && <nav aria-label="主导航" className="business-navigation">
+  const chrome = <><div className="workspace-commandbar"><button className="sidebar-toggle" aria-label="切换侧栏" aria-expanded={sidebar} onClick={() => setSidebar(value => !value)}><WorkbenchIcon name="panel" /></button><nav aria-label="主导航" className="business-navigation">
     <NavLink to={primaryPages['/strategies'] ?? '/strategies'} className={() => /^\/(strategies|research|candidates|holdouts)(\/|$)/.test(location.pathname) ? 'active' : undefined}>研究</NavLink><NavLink to={primaryPages['/runs'] ?? '/runs'}>模拟运行</NavLink><NavLink to={primaryPages['/live'] ?? '/live'}>实盘运行</NavLink><NavLink to={primaryPages['/backtests'] ?? '/backtests'}>回测记录</NavLink>
-  </nav>}</div><WorkspaceNavigation /></>
+  </nav></div><WorkspaceNavigation /></>
   const select = (id: PlatformId | null) => {
     setPlatform(id)
     try { if (id) sessionStorage.setItem('quine.platform-filter', id); else sessionStorage.removeItem('quine.platform-filter') } catch { /* scope remains in this window */ }
@@ -578,13 +585,14 @@ function Shell({ api }: { api: ApiAdapter }) {
   return <PlatformContext value={{ platform, select }}><div className="app-shell" data-sidebar-open={sidebar} data-management={management}>
     <aside className="sidebar" aria-label="工作区侧栏">
       <Link className="brand" aria-label="QUINE" to="/strategies"><QuineMark /><span>QUINE</span></Link>
-
+      <p className="sidebar-workspace-label">本地研究工作区</p>
       <nav className="platform-navigation" aria-label="交易所筛选">
+        <button type="button" aria-label="全部交易所" aria-pressed={platform === null} onClick={() => select(null)}><span className="exchange-icon"><WorkbenchIcon name="layers" /></span><span>全部交易所</span></button>
         {(Object.keys(platformNames) as PlatformId[]).map(id => <button key={id} type="button" aria-label={`${platformNames[id]} 未接入`} aria-pressed={platform === id} onClick={() => select(id)}><span aria-hidden="true" className={`exchange-icon ${id}`}>{id === 'binance' ? <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="m12 1 4 4-4 4-4-4Zm-7 7 4 4-4 4-4-4Zm14 0 4 4-4 4-4-4Zm-7 7 4 4-4 4-4-4Zm0-6 3 3-3 3-3-3Z"/></svg> : <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M1 1h7v7H1Zm15 0h7v7h-7ZM8.5 8.5h7v7h-7ZM1 16h7v7H1Zm15 0h7v7h-7Z"/></svg>}</span><span>{platformNames[id]}</span><small>未接入</small></button>)}
       </nav>
 
       <div className="sidebar-bottom">
-        <Link className={`nav-settings${location.pathname.startsWith('/resources') ? ' active' : ''}`} to="/resources/data"><NavIcon name="data" />资源</Link>
+        <Link className={`nav-settings${location.pathname.startsWith('/resources') ? ' active' : ''}`} to="/resources/data"><NavIcon name="data" />数据与模型</Link>
         <Link className={`nav-settings${location.pathname.startsWith('/platform') ? ' active' : ''}`} to="/platform"><NavIcon name="extensions" />交易所配置</Link>
         <Link className={`nav-settings${location.pathname === '/settings' ? ' active' : ''}`} to="/settings"><NavIcon name="settings" />设置</Link>
         <div className="sidebar-footer">未接入 · 本地工作区</div>
@@ -965,8 +973,8 @@ function BacktestDetailRoute({ api }: { api: ApiAdapter }) {
   return <ReportWorkspace key={jobId} api={api} jobId={jobId} />
 }
 function ReportWorkspace({ api, jobId }: { api: ApiAdapter; jobId: string }) {
-  const [sources, setSources] = useState<UserStrategy[] | null>(null)
-  const onRead = useCallback((items: UserStrategy[]) => setSources(items), [])
+  const [sources, setSources] = useState<ResearchReference[] | null>(null)
+  const onRead = useCallback((items: ResearchReference[]) => setSources(items), [])
   const changed = useCallback((next: UserStrategy) => setSources(items => items?.map(item => item.user_strategy_id === next.user_strategy_id ? next : item) ?? null), [])
   const associations = sources ? experimentRecordsForJob(sources, jobId) : []
   const frozenRevision = associations.length === 1 ? associations[0].revision : null
@@ -1229,7 +1237,7 @@ function StrategyComparisonAssociation({ api, leftJobId, rightJobId }: { api: Ap
 
   useEffect(() => {
     const read = ++generation.current
-    const list = api.listUserStrategies
+    const list = api.researchReferences
     if (!list) {
       void Promise.resolve().then(() => {
         if (generation.current === read) setPair({ kind: 'none', note: '这个工作区不提供已保存的用户策略。' })
@@ -1275,7 +1283,7 @@ function StrategyComparisonAssociation({ api, leftJobId, rightJobId }: { api: Ap
   </section>
 }
 
-function BacktestDetail({ api, jobId, onResearchRead, frozenRevision }: { api: ApiAdapter; jobId: string; onResearchRead?: (items: UserStrategy[]) => void; frozenRevision?: number | null }) {
+function BacktestDetail({ api, jobId, onResearchRead, frozenRevision }: { api: ApiAdapter; jobId: string; onResearchRead?: (items: ResearchReference[]) => void; frozenRevision?: number | null }) {
   const [reportParams, setReportParams] = useSearchParams()
   const reportView = reportParams.get('report') ?? 'overview'
   const [job, setJob] = useState<BacktestJob | null>(null)

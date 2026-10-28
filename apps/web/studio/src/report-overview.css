@@ -1,0 +1,149 @@
+.report-overview .breadcrumb {
+  margin-bottom: 16px;
+}
+
+.report-overview .page-heading {
+  margin-bottom: 18px;
+}
+
+.report-overview .tabs {
+  margin-bottom: 18px;
+}
+
+.report-overview .metric-strip {
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+}
+
+.report-overview .chart .section-heading {
+  margin-bottom: 8px;
+}
+
+.report-overview small,
+.report-overview .status,
+.report-overview .chart-legend,
+.report-agent small,
+.report-agent .suggestions small,
+.report-agent .agent-input > small,
+.report-agent .agent-input > div > span {
+  font-size: max(13px, 0.867rem);
+}
+
+.report-overview .report-sources {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+  margin: 0;
+}
+
+.report-sources > div {
+  min-width: 0;
+}
+
+.report-sources > div + div {
+  border-left: 1px solid var(--line);
+  padding-left: 20px;
+}
+
+.report-sources dt {
+  color: var(--muted);
+  font-size: max(13px, 0.867rem);
+  margin-bottom: 8px;
+}
+
+.report-sources dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+
+.report-sources dd span {
+  display: block;
+}
+
+.report-agent .agent-heading {
+  margin-bottom: 18px;
+}
+
+.report-evidence-heading h2 {
+  font-size: 1rem;
+  margin-bottom: 6px;
+}
+
+.report-evidence-heading small {
+  display: block;
+  line-height: 1.6;
+}
+
+.report-reading {
+  border-left: 3px solid var(--blue);
+  padding: 2px 0 2px 13px;
+  margin: 16px 0 10px;
+}
+
+.report-reading p {
+  margin: 0 0 8px;
+  line-height: 1.7;
+}
+
+.report-reading p:last-child {
+  margin: 0;
+  color: var(--muted);
+  font-size: max(13px, 0.867rem);
+}
+
+.report-evidence-links {
+  display: grid;
+  gap: 3px;
+}
+
+.report-evidence-links .text-link {
+  padding: 6px 0;
+  font-size: max(13px, 0.867rem);
+}
+
+.report-next-step {
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+  margin-top: 16px;
+}
+
+.report-next-step h3 {
+  margin-bottom: 6px;
+}
+
+.report-next-step p {
+  margin: 0 0 12px;
+  font-size: max(13px, 0.867rem);
+  color: var(--muted);
+}
+
+.report-next-step .button {
+  flex: 1;
+  padding: 8px 12px;
+  white-space: nowrap;
+}
+
+.report-agent .suggestions {
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+  padding-top: 16px;
+  gap: 8px;
+}
+
+.report-agent .agent-input textarea {
+  font-size: max(15px, 1rem);
+}
+
+@media (max-width: 639px) {
+  .report-overview .report-sources {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .report-sources > div + div {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding: 12px 0 0;
+  }
+}

@@ -17,6 +17,9 @@
  * visual and interaction states, at 1400x1000 and at 420x900.
  */
 import { expect, test, type Page, type Route } from '@playwright/test'
+import { researchCollection } from '../preview/research-fixtures'
+import type { UserStrategy } from '../src/user-strategies-api'
+import type { ResearchQuery } from '../src/research-workbench-api'
 
 const CRITERION = {
   schema: 'radian.report-criterion.v1',
@@ -94,11 +97,20 @@ async function scriptWorkspace(page: Page, strategies: unknown[]) {
   const documents: Record<string, unknown> = Object.fromEntries(
     (strategies as { user_strategy_id: string }[]).map(item => [item.user_strategy_id, item]),
   )
+  await page.route('**/api/research?**', async route => {
+    const query = Object.fromEntries(new URL(route.request().url()).searchParams) as ResearchQuery
+    const result = researchCollection(strategies as UserStrategy[], query)
+    for (const row of result.items) if (row.latest_experiment?.job_id === FIXTURE_JOB.job_id) {
+      row.latest_experiment.job_status = FIXTURE_JOB.status
+      row.next_step = 'inspect'
+    }
+    await route.fulfill({ json: result })
+  })
   await page.route('**/api/user-strategies**', async (route: Route) => {
     const url = new URL(route.request().url())
     const rest = url.pathname.replace('/api/user-strategies', '')
     if (route.request().method() === 'GET' && rest === '') {
-      await route.fulfill({ json: { strategies } })
+      await route.fulfill({ status: 405, json: { error: 'retired collection route' } })
       return
     }
     const id = rest.split('/').filter(Boolean)[0]
@@ -166,7 +178,7 @@ test('the empty workspace keeps the AI column visible and creates inline', async
   await page.setViewportSize({ width: 1400, height: 1000 })
   await page.goto('/strategies')
 
-  await expect(page.getByRole('heading', { name: '研究', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '研究工作台', exact: true })).toBeVisible()
   await expect(page.getByText('0 项研究')).toBeVisible()
   await expect(page.getByText('还没有策略。')).toBeVisible()
   // The create flow is directly completable, and the AI column is on screen before
@@ -184,7 +196,7 @@ test('the empty workspace keeps the AI column visible and creates inline', async
   const nav = page.getByRole('navigation', { name: '主导航' })
   await expect(nav.getByRole('link', { name: '研究' })).toHaveAttribute('href', '/strategies')
   await expect(nav.getByRole('link', { name: '模拟运行' })).toHaveAttribute('href', '/runs')
-  await expect(page.getByRole('complementary', { name: '工作区侧栏' }).getByRole('link', { name: '资源' })).toHaveAttribute('href', '/resources/data')
+  await expect(page.getByRole('complementary', { name: '工作区侧栏' }).getByRole('link', { name: '数据与模型' })).toHaveAttribute('href', '/resources/data')
   await expect(nav.getByRole('link', { name: '回测记录' })).toHaveAttribute('href', '/backtests')
   await expect(page.getByRole('link', { name: '历史记录' })).toHaveAttribute('href', '/backtests#history-records')
   await expect(page.getByRole('link', { name: '历史记录' })).toHaveCount(1)
@@ -207,18 +219,18 @@ test('the collection shows every strategy\'s frozen evidence, and the selected s
   // The collection route owns the table, and the table carries each strategy's own
   // frozen revision and the run its latest confirmation dispatched — a real page
   // read from that job, never a claim that a created dispatch succeeded.
-  await expect(page.getByRole('heading', { name: '研究', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '研究工作台', exact: true })).toBeVisible()
   const table = page.getByRole('navigation', { name: '策略列表' })
   const firstRow = table.locator('tr').filter({ hasText: '点差假设收紧' })
-  await expect(firstRow.getByText('v4 草稿')).toBeVisible()
+  await expect(firstRow.getByText(/v4 · 1 项建议待审阅/)).toBeVisible()
   await expect(firstRow.getByText('冻结 v3')).toBeVisible()
-  await expect(firstRow.getByText('XNAS:AAPL', { exact: true })).toBeVisible()
-  await expect(firstRow.getByRole('link', { name: '运行中' }))
-    .toHaveAttribute('href', '/strategies/fixture-us-1?tab=experiments&evidence_a=fixture-job-1')
+  await expect(firstRow.getByText(/XNAS:AAPL/)).toBeVisible()
+  await expect(firstRow.getByRole('link', { name: '查看运行' }))
+    .toHaveAttribute('href', '/backtests/fixture-job-1?research=fixture-us-1')
   const secondRow = table.locator('tr').filter({ hasText: '黄金突破观察' })
-  await expect(secondRow.getByText('v1 草稿')).toBeVisible()
+  await expect(secondRow.getByText('v1', { exact: true })).toBeVisible()
   await expect(secondRow.getByText(/冻结/)).toHaveCount(0)
-  await expect(secondRow.getByText('未启动')).toBeVisible()
+  await expect(secondRow.getByText('尚未实验')).toBeVisible()
 
   // The selected strategy opens by its exact identity: the collection table gives
   // way to that strategy's own detail.

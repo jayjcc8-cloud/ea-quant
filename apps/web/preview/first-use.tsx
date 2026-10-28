@@ -24,6 +24,7 @@ import { App } from '../src/app'
 import { FIRST_USE_STATES, firstUseStateFor, scriptedAdapter } from './first-use-fixtures'
 // @ts-expect-error Vite resolves stylesheet assets at build time.
 import '../src/styles.css'
+import '../src/workbench.css'
 
 /** Refuse a same-origin API call before it leaves the page. */
 function sealNetwork(): void {

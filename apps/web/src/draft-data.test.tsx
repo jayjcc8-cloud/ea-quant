@@ -1,10 +1,11 @@
 /** Deterministic UI fixtures only; no product model or financial result evidence. */
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { BrowserRouter } from 'react-router-dom'
+import { BrowserRouter, useLocation } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
 import { DraftEditor } from './draft-editor'
 import { DataWorkspace } from './research'
 import { ResearchUploadBinding, importTarget } from './research-upload-binding'
+import { SourceLink } from './workspace-navigation'
 import type { ApiAdapter } from './app'
 import { UserStrategyRequestError, type DraftContract, type SaveDraftRequest, type UserStrategy } from './user-strategies-api'
 import type { UploadVersion } from './research-api'
@@ -17,6 +18,11 @@ const contract: DraftContract = { draft_revision: 1, scenario_id: 'sample.yaml',
 const target = { id: 'a', revision: 1, returnTo: '/strategies/a?tab=strategy' }
 const makeApi = (extra: Partial<ApiAdapter> = {}) => ({ userStrategyDraftContract: async () => contract, getUserStrategy: async () => strategy, ...extra }) as ApiAdapter
 const saved = (request: SaveDraftRequest): UserStrategy => ({ ...strategy, draft: { ...draft, revision: 2 }, changes: [{ kind: 'manual', operation_id: request.operation_id }] as UserStrategy['changes'] })
+function LocationProbe() {
+  const location = useLocation()
+  const state = location.state as { mark?: string } | null
+  return <output aria-label="location">{location.pathname}{location.search}·{state?.mark ?? ''}</output>
+}
 afterEach(() => { cleanup(); sessionStorage.clear(); window.history.replaceState({}, '', '/') })
 
 it('manual cancel writes nothing, save carries typed values and exact revision only once', async () => {
@@ -62,6 +68,136 @@ it('unknown manual submission stays blocked across remount and is resolved by re
   expect((screen.getByText('保存草稿') as HTMLButtonElement).disabled).toBe(true)
   fireEvent.click(screen.getByText('核对保存结果')); await screen.findByText(/已保存为修订 2/)
   expect(save).toHaveBeenCalledTimes(1)
+})
+
+it('storage failure before sending keeps values editable and cancel available without an API call', async () => {
+  const save = vi.fn()
+  render(<DraftEditor api={makeApi({ saveUserStrategyDraft: save })} strategy={strategy} changed={() => {}} />)
+  const cash = await screen.findByLabelText(/初始资金/) as HTMLInputElement
+  fireEvent.change(cash, { target: { value: '12000' } })
+  const write = vi.spyOn(Object.getPrototypeOf(sessionStorage) as Storage, 'setItem')
+    .mockImplementation(() => { throw new DOMException('quota', 'QuotaExceededError') })
+  try {
+    fireEvent.click(screen.getByText('保存草稿'))
+    await screen.findByText(/本次未发送/)
+    expect(write).toHaveBeenCalled()
+    expect(save).not.toHaveBeenCalled()
+    expect(cash.value).toBe('12000')
+    expect((screen.getByText('取消编辑') as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.change(cash, { target: { value: '12100' } })
+    expect(cash.value).toBe('12100')
+    fireEvent.click(screen.getByText('取消编辑'))
+    expect(cash.value).toBe('10000')
+    expect(save).not.toHaveBeenCalled()
+  } finally { write.mockRestore() }
+})
+
+it('draft without a retained buffer guards same-window links in-app and leaves only once', async () => {
+  window.history.replaceState({}, '', '/strategies/a?tab=strategy')
+  const save = vi.fn()
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+  const push = vi.spyOn(window.history, 'pushState')
+  const replace = vi.spyOn(window.history, 'replaceState')
+  try {
+    render(<BrowserRouter>
+      <SourceLink to="/research?tab=data" state={{ mark: 'kept' }} replace>离开草稿</SourceLink>
+      <DraftEditor api={makeApi({ saveUserStrategyDraft: save })} strategy={strategy} changed={() => {}} />
+      <LocationProbe />
+    </BrowserRouter>)
+    const cash = await screen.findByLabelText(/初始资金/) as HTMLInputElement
+    fireEvent.change(cash, { target: { value: '12000' } })
+    const write = vi.spyOn(Object.getPrototypeOf(sessionStorage) as Storage, 'setItem')
+      .mockImplementation(() => { throw new DOMException('quota', 'QuotaExceededError') })
+    try {
+      fireEvent.click(screen.getByText('保存草稿'))
+      await screen.findByText(/本次未发送/)
+      expect(write).toHaveBeenCalled()
+    } finally { write.mockRestore() }
+    expect(save).not.toHaveBeenCalled()
+
+    const link = screen.getByText('离开草稿')
+    fireEvent.click(link)
+    expect(confirm).not.toHaveBeenCalled()
+    const dialog = screen.getByRole('dialog', { name: '离开此页？' })
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(dialog.textContent).toContain('本地缓冲不可用')
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: '继续编辑' }))
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: '放弃并离开' }))
+    fireEvent.keyDown(dialog, { key: 'Tab' })
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: '继续编辑' }))
+
+    fireEvent.click(screen.getByRole('button', { name: '继续编辑' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(cash.value).toBe('12000')
+    expect(document.activeElement).toBe(link)
+    expect(screen.getByLabelText('location').textContent).toBe('/strategies/a?tab=strategy·')
+
+    fireEvent.click(link)
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(cash.value).toBe('12000')
+    expect(screen.getByLabelText('location').textContent).toBe('/strategies/a?tab=strategy·')
+
+    fireEvent.click(link)
+    const pushesBefore = push.mock.calls.length
+    const replacesBefore = replace.mock.calls.length
+    fireEvent.click(screen.getByRole('button', { name: '放弃并离开' }))
+    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/research?tab=data·kept'))
+    expect(confirm).not.toHaveBeenCalled()
+    expect(save).not.toHaveBeenCalled()
+    expect(replace.mock.calls.length).toBe(replacesBefore + 1)
+    expect(push.mock.calls.length).toBe(pushesBefore)
+  } finally { confirm.mockRestore(); push.mockRestore(); replace.mockRestore() }
+})
+
+it('CSV without a retained buffer uses the same in-app guard and publishes nothing', async () => {
+  window.history.replaceState({}, '', '/data?research=a&revision=1')
+  const publish = vi.fn()
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+  const write = vi.spyOn(Object.getPrototypeOf(sessionStorage) as Storage, 'setItem')
+    .mockImplementation(() => { throw new DOMException('quota', 'QuotaExceededError') })
+  try {
+    render(<BrowserRouter>
+      <DataWorkspace api={makeApi({ previewUpload: vi.fn(), publishUpload: publish })} />
+      <LocationProbe />
+    </BrowserRouter>)
+    fireEvent.change(screen.getByLabelText('CSV 内容'), { target: { value: 'retained csv bytes' } })
+    await screen.findByText(/无法完整缓冲/)
+    expect(write).toHaveBeenCalled()
+
+    fireEvent.click(screen.getByText('返回当前研究（保留导入草稿）'))
+    expect(confirm).not.toHaveBeenCalled()
+    const dialog = screen.getByRole('dialog', { name: '离开此页？' })
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(dialog.textContent).toContain('CSV 输入')
+    fireEvent.click(screen.getByRole('button', { name: '放弃并离开' }))
+    await waitFor(() => expect(screen.getByLabelText('location').textContent).toContain('/strategies/a?tab=strategy'))
+    expect(confirm).not.toHaveBeenCalled()
+    expect(publish).not.toHaveBeenCalled()
+  } finally { write.mockRestore(); confirm.mockRestore() }
+})
+
+it('restored storage lets the user explicitly save the preserved draft exactly once', async () => {
+  let request!: SaveDraftRequest
+  const save = vi.fn(async (_id: string, input: SaveDraftRequest) => { request = input; return saved(input) })
+  const changed = vi.fn()
+  render(<DraftEditor api={makeApi({ saveUserStrategyDraft: save })} strategy={strategy} changed={changed} />)
+  fireEvent.change(await screen.findByLabelText(/初始资金/), { target: { value: '12000' } })
+  const write = vi.spyOn(Object.getPrototypeOf(sessionStorage) as Storage, 'setItem')
+    .mockImplementation(() => { throw new DOMException('quota', 'QuotaExceededError') })
+  try {
+    fireEvent.click(screen.getByText('保存草稿'))
+    await screen.findByText(/本次未发送/)
+    expect(write).toHaveBeenCalled()
+    expect(save).not.toHaveBeenCalled()
+  } finally { write.mockRestore() }
+  fireEvent.click(screen.getByText('保存草稿'))
+  await waitFor(() => expect(changed).toHaveBeenCalledTimes(1))
+  expect(save).toHaveBeenCalledTimes(1)
+  expect(request.values).toEqual({ initial_cash: '12000' })
+  expect(screen.getByText(/已保存为修订 2/)).toBeTruthy()
+  expect(sessionStorage.getItem('quine.manual-draft.a')).toBeNull()
 })
 
 it('manual late response does not call the previous page owner', async () => {

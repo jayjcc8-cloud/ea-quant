@@ -10,8 +10,10 @@ import argparse
 import json
 import os
 import platform
+import plistlib
 import shutil
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -24,10 +26,94 @@ def run(*args: str | Path, cwd: Path = ROOT) -> None:
     subprocess.run([str(arg) for arg in args], cwd=cwd, check=True, env=os.environ)
 
 
+def select_wheel(directory: Path) -> Path:
+    wheels = sorted(directory.glob("ea_quant-*.whl"))
+    if len(wheels) != 1:
+        raise SystemExit(
+            f"Expected exactly one ea_quant wheel in {directory}, found {len(wheels)}."
+        )
+    return wheels[0]
+
+
+def build_and_install_wheel(out: Path, python: Path) -> None:
+    # A directory unique to this invocation: no earlier or concurrent build can be selected.
+    out.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="build-wheels-", dir=out) as temporary:
+        wheel_dir = Path(temporary)
+        run("uv", "build", "--wheel", "--out-dir", wheel_dir)
+        wheel = select_wheel(wheel_dir)
+        run(
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            python,
+            "--break-system-packages",
+            "--reinstall-package",
+            "ea-quant",
+            "--no-deps",
+            wheel,
+        )
+
+
+def stage_development_shell(out: Path, runtime: Path, *, standalone: bool = False) -> Path:
+    """Stage the native shell without signing; optionally keep the runtime inside it."""
+    name = "QUINE-Local" if standalone else "QUINE-Development"
+    stage = out / ("candidate" if standalone else "development") / f"{name}.app/Contents"
+    if standalone and stage.parent.exists():
+        raise SystemExit(f"Local candidate already exists; use a fresh output: {stage.parent}")
+    run(
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "--manifest-path",
+        ROOT / "apps/desktop/src-tauri/Cargo.toml",
+    )
+    (stage / "MacOS").mkdir(parents=True, exist_ok=True)
+    (stage / "Resources").mkdir(exist_ok=True)
+    with (stage / "Info.plist").open("wb") as output:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "org.quine.research.desktop."
+                + ("local" if standalone else "development"),
+                "CFBundleName": name,
+                "CFBundleDisplayName": name,
+                "CFBundleExecutable": "quine-desktop",
+                "CFBundlePackageType": "APPL",
+                "CFBundleVersion": "1",
+                "NSHighResolutionCapable": True,
+            },
+            output,
+        )
+    resources = stage / "Resources/runtime"
+    if standalone:
+        shutil.copytree(runtime, resources, symlinks=True)
+    elif resources.is_symlink():
+        if resources.resolve() != runtime.resolve():
+            raise SystemExit("Development runtime points to another build.")
+    else:
+        resources.symlink_to(runtime.resolve(), target_is_directory=True)
+    binary = stage / "MacOS/quine-desktop"
+    shutil.copy2(out / "target/release/quine-desktop", binary)
+    return binary
+
+
 def main() -> None:
     global OUT, RUNTIME
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=OUT)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--development",
+        action="store_true",
+        help="Build a native executable without signing or bundling",
+    )
+    mode.add_argument(
+        "--local-candidate",
+        action="store_true",
+        help="Build a self-contained local app without invoking signing or making an archive",
+    )
     args = parser.parse_args()
     OUT = args.output.resolve()
     RUNTIME = OUT / "runtime"
@@ -75,20 +161,7 @@ def main() -> None:
         "-r",
         requirements,
     )
-    run("uv", "build", "--wheel", "--out-dir", OUT / "wheels")
-    wheel = next((OUT / "wheels").glob("ea_quant-*.whl"))
-    run(
-        "uv",
-        "pip",
-        "install",
-        "--python",
-        python,
-        "--break-system-packages",
-        "--reinstall-package",
-        "ea-quant",
-        "--no-deps",
-        wheel,
-    )
+    build_and_install_wheel(OUT, python)
     # Build-only console scripts carry absolute shebangs. Keep them outside the
     # payload; the app and core use python -I -B -m and need no installed CLI.
     omitted = OUT / "omitted-build-tools"
@@ -148,6 +221,15 @@ def main() -> None:
             }
         )
     )
+    if args.development or args.local_candidate:
+        binary = stage_development_shell(OUT, RUNTIME, standalone=args.local_candidate)
+        label = (
+            "Self-contained local candidate (not signed for distribution)"
+            if args.local_candidate
+            else "Local development executable (not a distributable app)"
+        )
+        print(f"{label}: {binary}")
+        return
     # Ad-hoc local signatures only. No account, certificate, notarization or OS changes.
     for path in RUNTIME.rglob("*"):
         if path.is_file() and not path.is_symlink():

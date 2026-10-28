@@ -8,6 +8,7 @@ import { DesktopSettings } from './desktop-settings'
 import { DesktopAbout, WorkspaceRecoveryGuide } from './desktop-about'
 import { SYNTHETIC_CSV, SYNTHETIC_SOURCE, SYNTHETIC_LICENSE, SYNTHETIC_NOTICE } from './import-example'
 import { GuidedMappingFields, readGuidedDeclaration } from './csv-mapping-form'
+import { StorageFailureGuard } from './storage-failure-guard'
 import { pathPercent } from './equity-path'
 import {
   AVAILABILITY_PROVIDED,
@@ -893,17 +894,6 @@ function DataUploadPanel({ api, target = null, onPublished }: { api: ApiAdapter;
     void Promise.resolve().then(() => { if (active) setBufferError(failed) })
     return () => { active = false }
   }, [cacheKey, content, fileBase64, fileName, mode, mappingText, timeText, policy, latency, sourceReference, licenseReference, declarationEditor, published, unknownPublish, preview, previewedFor, stashed])
-  useEffect(() => {
-    if (!bufferError) return
-    const unload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
-    const leave = (event: MouseEvent) => {
-      if ((event.target as Element).closest?.('a[href]') && !window.confirm('CSV 输入超过本地缓冲容量，离开将丢失输入。放弃并离开？')) {
-        event.preventDefault(); event.stopPropagation()
-      }
-    }
-    window.addEventListener('beforeunload', unload); document.addEventListener('click', leave, true)
-    return () => { window.removeEventListener('beforeunload', unload); document.removeEventListener('click', leave, true) }
-  }, [bufferError])
 
   const mapped = mode === 'explicit-mapping'
   // The declaration on screen, read back as choices for the guided controls. The
@@ -1016,6 +1006,7 @@ function DataUploadPanel({ api, target = null, onPublished }: { api: ApiAdapter;
   const mappedColumns = mappedPreview?.preview ? Object.keys(mappedPreview.preview.rows[0] ?? {}).filter(name => name !== 'record_number') : []
   const discard = () => { fileRead.current += 1; setFileBusy(false); setContent(''); setFileBase64(null); setFileName(''); setMappingText(''); setTimeText(''); setPolicy(''); setLatency('0'); setSourceReference(''); setLicenseReference(''); setMode('strict'); reset(); setStashed(false) }
   const draftActions = <div className="actions"><button disabled={busy !== null || fileBusy || bufferError} onClick={() => setStashed(!stashed)}>{stashed ? '继续导入' : '本次会话暂存'}</button><button disabled={busy !== null || unknownPublish} onClick={discard}>丢弃导入</button><span className="muted">只丢弃导入草稿，不删除已入库数据。</span></div>
+  const leaveGuard = <StorageFailureGuard active={bufferError} message="CSV 输入超过本地缓冲容量，离开将丢失输入。" />
   const sessionNotice = <p className="muted">仅本次会话暂存：页面切换或刷新可继续；退出应用后不保证保留。退出前请发布数据，或保留原 CSV 并复制下方导入记录。</p>
   const draftCopy = <details><summary>查看并复制导入记录</summary><p>在下方全选、复制到本地文本文件。重开后选择原 CSV，按记录填写映射、时间和声明；不要放入密钥。</p><textarea aria-label="可复制的导入记录" rows={6} readOnly value={JSON.stringify({ fileName, mode, mapping: mappingText, time: timeText, policy, latency, sourceReference, licenseReference, csv: fileBase64 === null ? content : '请保留所选原 CSV 文件' }, null, 2)} onFocus={event => event.currentTarget.select()} /></details>
   const example = (mappedExample: boolean) => {
@@ -1025,12 +1016,13 @@ function DataUploadPanel({ api, target = null, onPublished }: { api: ApiAdapter;
     setMode(mappedExample ? 'explicit-mapping' : 'strict'); setMappingText(mappedExample ? MAPPING_EXAMPLE : ''); setTimeText(mappedExample ? TIME_EXAMPLE : '')
     setPolicy(AVAILABILITY_PROVIDED); setLatency('0'); setSourceReference(SYNTHETIC_SOURCE); setLicenseReference(SYNTHETIC_LICENSE)
   }
-  if (stashed) return <div className="upload-panel"><h3>导入草稿已在本次会话暂存</h3><p>{fileName || '粘贴的 CSV'} · {content.length} 字符 · {preview ? preview.valid ? '上次解析通过' : '上次解析有错误' : '尚未解析'}</p>{sessionNotice}{draftCopy}{draftActions}</div>
+  if (stashed) return <div className="upload-panel"><h3>导入草稿已在本次会话暂存</h3><p>{fileName || '粘贴的 CSV'} · {content.length} 字符 · {preview ? preview.valid ? '上次解析通过' : '上次解析有错误' : '尚未解析'}</p>{sessionNotice}{draftCopy}{draftActions}{leaveGuard}</div>
   return <div className="upload-panel">
     {draftActions}
     {sessionNotice}{draftCopy}
     {target && <p className="muted">导入完成后可用于指定研究；发布不会自动绑定。<Link to={target.returnTo}>返回当前研究（保留导入草稿）</Link></p>}
     {bufferError && <p role="alert">CSV 输入无法完整缓冲，离开前请完成发布或保留原文件。</p>}
+    {leaveGuard}
     {unknownPublish && <p role="alert">发布结果尚未确认，不会自动重发。输入已保留，请在数据目录核对已发布版本。</p>}
     <p className="muted">先选择或粘贴 CSV → 核对列与时间 → 检查数据 → 发布版本 → 用于研究。发布会保存一个不可变数据版本，不会自动绑定或运行回测。</p>
     <details className="provenance" open><summary>支持范围与必要字段</summary>
@@ -2301,7 +2293,7 @@ export function ModelConnections({ api }: { api: ApiAdapter }) {
     void load()
     return () => { current = false }
   }, [api, check])
-  return <><PageHeading title="模型连接" subtitle="管理当前工作区共享的模型连接配置。" />
+  return <><header className="resource-subheading"><h2>模型连接</h2><p>管理研究对话使用的模型。配置在当前工作区共享。</p></header>
     <DesktopSettings api={api} section="model" onSaved={() => setCheck(value => value + 1)} />
     <details className="model-diagnostics"><summary>模型连接诊断</summary><button type="button" disabled={!currentRead} onClick={() => setCheck(value => value + 1)}>重新检查模型配置</button><ModelConfigurationPanel status={currentRead?.status ?? null} error={currentRead?.error ?? null} /></details></>
 }
@@ -2356,10 +2348,35 @@ export function DataWorkspace({ api }: { api: ApiAdapter }) {
 
 /** Declarations and validation retain their original, explicit effects. */
 export function ExtensionWorkspace({ api }: { api: ApiAdapter }) {
-  return <section className="panel" aria-label="扩展工具"><h1>扩展</h1>
-    <p className="muted">检查与选择本地策略包；在研究中明确绑定后使用。</p>
-    {(api.localStrategySlot || api.inspectLocalStrategy) && <details><summary>本地策略包</summary><LocalStrategyPanel api={api} /></details>}
-    <p><Link to="/settings?section=diagnostics">资源声明与校验工具</Link></p>
+  const [generation, setGeneration] = useState(0)
+  const [read, setRead] = useState<{ api: ApiAdapter; generation: number; items: ScenarioSummary[]; error: string | null } | null>(null)
+  const current = read?.api === api && read.generation === generation ? read : null
+  useEffect(() => {
+    let active = true
+    const load = async () => {
+      try {
+        if (!api.listScenarios) throw new Error('当前工作区无法读取策略目录。')
+        const items = await api.listScenarios(true)
+        if (active) setRead({ api, generation, items, error: null })
+      } catch (error) {
+        if (active) setRead({ api, generation, items: [], error: messageOf(error, '策略目录读取失败。') })
+      }
+    }
+    void load()
+    return () => { active = false }
+  }, [api, generation])
+  return <section className="strategy-library" aria-label="扩展工具">
+    <header className="resource-subheading"><div><h2>策略与模板</h2><p>查看已支持的策略，在研究草稿中选择并绑定。</p></div><button disabled={!current} onClick={() => setGeneration(value => value + 1)}>刷新策略目录</button></header>
+    {!current && <p role="status">正在读取策略目录…</p>}
+    {current?.error && <p className="notice error" role="alert">{current.error}</p>}
+    {current && !current.error && !current.items.length && <p className="resource-empty">暂无可用策略。可刷新目录，或检查本地策略包。</p>}
+    <div className="template-library">{current?.items.map(item => <article className="template-entry" key={item.scenario_id}>
+      <header><h3>{item.name}</h3><span className="chip">{item.valid ? '已登记' : '需修正'}</span></header>
+      {item.summary ? <><p>{item.summary.venue}:{item.summary.symbol}</p><dl><div><dt>策略</dt><dd>{item.summary.strategy_id}</dd></div><div><dt>数据记录</dt><dd>{item.summary.record_count}</dd></div></dl></> : <p>{item.message ?? '输入信息不可读取。'}</p>}
+      <details><summary>来源</summary><code>{item.scenario_id}</code></details>
+    </article>)}</div>
+    {(api.localStrategySlot || api.inspectLocalStrategy) && <details className="resource-history"><summary>本地策略包</summary><LocalStrategyPanel api={api} /></details>}
+    <p className="resource-footnote"><Link to="/settings?section=diagnostics">资源声明与校验工具</Link></p>
   </section>
 }
 

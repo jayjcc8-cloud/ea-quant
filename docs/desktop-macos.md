@@ -10,10 +10,12 @@ existing React application, with a bundled CPython 3.12.13 distribution, locked 
 the current installed EA wheel, and a freshly compiled Rust experiment owner. Python, Node, Cargo,
 a checkout and a virtual environment are not required to run the installed application.
 
-This is a **local technical package**, with an ad-hoc signature only. It is not Developer ID signed
+The ordinary bundled build is a **local technical package**, with an ad-hoc signature only. It is not Developer ID signed
 or notarized, and Gatekeeper acceptance on a downloaded copy has not been established. Do not
 change macOS security settings to run it. Public distribution needs authorized Apple signing and
 notarization as a separate step. Intel, Windows and Linux packages are outside this slice.
+These binary distribution checks are not prerequisites for GitHub source collaboration. The
+development and local-candidate modes below do not invoke distribution signing or archiving.
 
 ## Open and keep your research
 
@@ -29,8 +31,9 @@ The stable data root is `~/Library/Application Support/QUINE`:
 - `core/` contains the existing Rust SQLite owner and its confirmed inputs and official reports.
 - `scenarios/` contains user-editable registered scenarios. First use seeds the two synthetic
   sample files once; an upgrade never overwrites them.
-- `settings.json` is the existing model settings format. It starts absent. Resources → Model connections
-  shows its exact path and provides provider, model ID, Base URL and write-only API key inputs.
+- `settings.json` is the existing model settings format. It starts absent. Native v3's model page
+  reads connection status only. The existing legacy editor supports provider, model ID, Base URL
+  and write-only API key inputs; that editor is not connected to the native v3 page.
   Save checks local format only; it never authenticates or calls a provider. Credentials are
   stored in this existing file with mode 0600, not in WebView storage. Blank key retains the
   current key; changing provider/endpoint requires re-entry or explicit clearing. No developer
@@ -81,6 +84,86 @@ sandboxed untrusted code.
 
 ## Local build and acceptance
 
+The first real v3 slice opens at `/studio` in the native window. It reuses the existing
+research, CSV, experiment-preview/confirmation and official report services. Saving and applying
+a proposal do not run an experiment. Unknown confirmation receipts retain their request identity
+and offer reads only. Simulation, Live, batches, holdout and Candidate promotion are unavailable
+in this entry. Model configuration is read-only here. The desktop has one normal entry;
+`/strategies` remains a migration fallback without a parallel navigation link. The standalone
+offline studio remains a synthetic design preview and is not the desktop candidate. The v3
+research/report header, detail layout and assistant surface are shared with that design, while
+all displayed records in `/studio` come from existing service contracts.
+
+### Source build prerequisites
+
+Clone current `main` for the native v3 slice, or the exact PR revision you intend to test.
+From the selected checkout, prepare:
+
+- Apple Silicon macOS and Apple's Xcode Command Line Tools (including `clang` and
+  `install_name_tool`); see [Tauri's macOS prerequisites](https://v2.tauri.app/start/prerequisites/#macos).
+- Git, Python 3.12, global `uv` at the exact version in [`pyproject.toml`](../pyproject.toml)
+  (currently 0.11.28), and Node.js 24/npm as used by CI.
+- Stable Rust via rustup. [`build_desktop.py`](../scripts/build_desktop.py) explicitly uses
+  `.local/rust/cargo` and `.local/rust/rustup`; a toolchain installed only in the usual home
+  directories will not populate those locations.
+
+For a fresh checkout, install the local Rust toolchain using the
+[official rustup installer and custom homes](https://rust-lang.github.io/rustup/installation/index.html#choosing-where-to-install).
+Run in the repository root; these settings apply to the current shell:
+
+```sh
+export CARGO_HOME="$PWD/.local/rust/cargo"
+export RUSTUP_HOME="$PWD/.local/rust/rustup"
+export PATH="$CARGO_HOME/bin:$PATH"
+mkdir -p .local/rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o .local/rust/rustup-init.sh
+sh .local/rust/rustup-init.sh --profile minimal --default-toolchain stable --no-modify-path -y
+python3 scripts/bootstrap_local.py --web
+venv/bin/ea doctor
+```
+
+Use Python 3.12 for `python3`. Existing local toolchains need no reinstall. The build downloads
+locked dependencies and CPython 3.12.13, builds the shared UI and Rust core, and stages its own
+runtime. It requires network access to the public dependency sources, not a provider API key.
+No Apple Developer account is required for the development mode below.
+
+For a local native development candidate without signing or creating a distribution archive:
+
+```sh
+venv/bin/python scripts/build_desktop.py --development --output "$PWD/.local/desktop-dev"
+QUINE_DATA_ROOT=/absolute/path/to/fresh-acceptance-data \
+  .local/desktop-dev/development/QUINE-Development.app/Contents/MacOS/quine-desktop
+```
+
+Replace the data-root placeholder with a fresh absolute directory outside the checkout and app.
+Use a different build output if that development candidate is already running. The window opens
+the real `/studio` entry. Saving research and a bundled synthetic experiment require no model key.
+
+Keep the development directory and its `Resources/runtime` target together. The development
+wrapper has only enough metadata for macOS window identification and points to the build runtime;
+it is not an installable or distributable package. It uses the native close/Command-Q confirmation
+and cooperative shutdown. The build below remains the separate app-bundle path.
+
+For a self-contained **local candidate** without invoking signing, notarization or archiving:
+
+```sh
+venv/bin/python scripts/build_desktop.py --local-candidate --output "$PWD/.local/desktop-first-use"
+```
+
+This stages `candidate/QUINE-Local.app` with the same native shell and a private copy of the
+runtime inside `Contents/Resources/runtime`. Move the intact app independently of the checkout;
+the build directory is not required to run it. The build refuses an existing candidate rather
+than overwriting an app that may be open. Its separate bundle identifier distinguishes it from
+the development wrapper, but the normal data-root rules remain unchanged: select an isolated
+root for acceptance and never open two instances on one workspace. In v3, click **本地研究空间**
+to inspect or explicitly change the next-launch workspace using the existing settings contract.
+
+This mode does not establish Developer ID signing, notarization, downloaded-copy Gatekeeper
+acceptance or clean-Mac first use. Existing toolchain-produced binary signatures are not a
+distribution signature. If macOS refuses the app, leave that refusal intact; do not change
+quarantine attributes or security settings. Record source revision, `source_dirty` and `build_id`
+from the bundled `build-info.json` with any acceptance results.
+
 From the selected source checkout, with the repository's local Rust toolchain and locked Python
 build environment available:
 
@@ -97,7 +180,9 @@ payload is explicitly limited to installed Python, core, built UI and two fixtur
 
 The build keeps release stripping disabled: this host's macOS 27 dyld rejected stripped Rust
 proc-macro libraries with `mis-aligned LINKEDIT string pool`. This affects build size, not runtime
-authority. The package preserves dependency license metadata. No third-party source tree,
+authority. Installed Python dependency metadata is retained; the repository currently has no
+consolidated third-party NOTICE file. This build description is not a completed licensing review.
+No third-party source tree,
 private settings, research data, development logs or screenshots are copied into the bundle.
 
 Run the installed lifecycle acceptance using a **fresh** absolute root, outside the app:
@@ -162,3 +247,33 @@ Interactive research grants now authorize at most 24 requests per new task or ex
 continuation. The interface states the new-message allowance and the persisted task's actual
 cumulative authorization, used and remaining counts. Historic approvals and idempotent grant
 replays retain their original values. Request count is not a monetary cap.
+
+## Native CI checks
+
+Two native jobs extend [path routing](../CONTRIBUTING.md#required-checks) without changing
+existing job IDs or the shared E2E policy:
+
+- `rust_core` runs on `ubuntu-latest` when `crates/quine-core/**` (non-Markdown), the root
+  `Cargo.toml`/`Cargo.lock`, `rust-toolchain*`, `.cargo/**`, `scripts/build_desktop.py`,
+  `scripts/ci_routes.py` or `.github/workflows/ci.yml` changes. It installs a minimal stable Rust
+  toolchain and runs
+  `cargo test --locked --manifest-path crates/quine-core/Cargo.toml --lib --test store --test cli --test canonical_identity`.
+  These are the unit, store, CLI and canonical-identity contract tests. `tests/stage2.rs` is the
+  real-engine Python journey and is deliberately excluded; this job does not claim to run the
+  complete Rust integration suite and needs no Python environment.
+- `macos_shell` runs on the official `macos-15` Apple Silicon standard runner when
+  `apps/desktop/**` (non-Markdown), the root Rust inputs above, `scripts/build_desktop.py`,
+  `scripts/ci_routes.py` or `.github/workflows/ci.yml` changes. It asserts `uname -m` is `arm64`,
+  installs minimal stable Rust and runs
+  `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`. This is a compile-only
+  check: it does not build an installable package, launch the app, link the Python runtime or sign
+  anything. The runner label table is authoritative:
+  <https://docs.github.com/en/actions/reference/runners/github-hosted-runners> lists `macos-15` as
+  arm64 and the Intel label separately as `macos-15-intel`.
+
+Both jobs use paths under `.local/` for cargo targets, set a bounded timeout, keep
+`persist-credentials: false` with the same exact event checkout as the other jobs, and fail rather
+than continue on error. Markdown, `docs/**`, ordinary `src/ea/**` Python, `apps/web/**` React,
+plain Python tests and other existing workflows do not trigger them. Unknown paths, an empty diff
+and unsupported Git statuses route conservatively to both checks. Neither native job adds a cargo
+cache action, artifact hash, packaging, signing, publication, frontend build or second E2E suite.

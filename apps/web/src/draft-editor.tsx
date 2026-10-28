@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ApiAdapter } from './app'
 import { DraftEditorForm } from './draft-editor-form'
+import { StorageFailureGuard } from './storage-failure-guard'
 import { UserStrategyRequestError, type DraftContract, type SaveDraftRequest, type UserStrategy } from './user-strategies-api'
 
 type Buffer = { revision: number; values: Record<string, string>; pending?: SaveDraftRequest }
@@ -14,8 +15,8 @@ function readBuffer(id: string): Buffer | null {
 }
 
 /** Local, per-research unsaved input only. The server record remains authoritative. */
-export function DraftEditor({ api, strategy, changed }: {
-  api: ApiAdapter; strategy: UserStrategy; changed: (value: UserStrategy) => void
+export function DraftEditor({ api, strategy, changed, presentation }: {
+  api: ApiAdapter; strategy: UserStrategy; changed: (value: UserStrategy) => void; presentation?: 'studio'
 }) {
   const id = strategy.user_strategy_id
   const [buffer, setBuffer] = useState<Buffer | null>(() => readBuffer(id))
@@ -41,18 +42,6 @@ export function DraftEditor({ api, strategy, changed }: {
       setRetained(true); return true
     } catch { setRetained(false); return false }
   }
-  useEffect(() => {
-    if (!buffer || retained) return
-    const unload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
-    const leave = (event: MouseEvent) => {
-      if ((event.target as Element).closest?.('a[href]') && !window.confirm('本地缓冲不可用，离开将丢失未保存输入。放弃并离开？')) {
-        event.preventDefault(); event.stopPropagation()
-      }
-    }
-    window.addEventListener('beforeunload', unload)
-    document.addEventListener('click', leave, true)
-    return () => { window.removeEventListener('beforeunload', unload); document.removeEventListener('click', leave, true) }
-  }, [buffer, retained])
   const finish = (next: UserStrategy, operation: string) => {
     if (next.user_strategy_id !== id || !next.changes.some(item => item.operation_id === operation && item.kind === 'manual')) {
       throw new Error('保存结果未包含本次修订，请核对后继续。')
@@ -83,6 +72,8 @@ export function DraftEditor({ api, strategy, changed }: {
     const request = { operation_id: `manual-${crypto.randomUUID()}`, expected_revision: buffer.revision, values }
     inFlight.current = true; setBusy(true); setError(null)
     if (!persist({ ...buffer, pending: request })) {
+      // No request was sent: keep the editable draft instead of an unresolvable pending identity.
+      setBuffer(buffer)
       inFlight.current = false; setBusy(false)
       setError('无法保留提交身份，本次未发送。请恢复本地存储后再保存。')
       return
@@ -98,7 +89,7 @@ export function DraftEditor({ api, strategy, changed }: {
   if (!api.userStrategyDraftContract || !api.saveUserStrategyDraft) return <p className="muted">此工作区不提供手工保存入口。</p>
   const currentContract = contract?.draft_revision === strategy.draft.revision ? contract : null
   return <>
-    <DraftEditorForm fields={currentContract?.fields ?? []} values={buffer?.values ?? {}}
+    <DraftEditorForm presentation={presentation} fields={currentContract?.fields ?? []} values={buffer?.values ?? {}}
       revision={buffer?.revision ?? strategy.draft.revision} busy={busy}
       disabled={!currentContract || Boolean(buffer?.pending)} dirty={Boolean(buffer)}
       error={stale ? '草稿已有新修订。输入仍保留，请取消旧编辑并基于当前修订重新修改。' : error}
@@ -106,5 +97,6 @@ export function DraftEditor({ api, strategy, changed }: {
       onChange={(path, value) => { persist({ revision: buffer?.revision ?? strategy.draft.revision, values: { ...buffer?.values, [path]: value } }); setNotice(null); setError(null) }}
       onSave={() => { void save() }} onCancel={() => { persist(null); setError(null); setNotice('已取消编辑，未写入修订。') }} />
     {buffer?.pending && <button type="button" disabled={busy} onClick={() => { void reconcile() }}>核对保存结果</button>}
+    <StorageFailureGuard active={!retained && Boolean(buffer)} message="本地缓冲不可用，离开将丢失未保存输入。" />
   </>
 }

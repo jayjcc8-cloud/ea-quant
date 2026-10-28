@@ -1,3 +1,4 @@
+import { researchCollection } from '../preview/research-fixtures'
 /**
  * The core-owned experiment surface: confirmed progress, stop, unknown and reports.
  *
@@ -121,7 +122,8 @@ function scripted(script: Script) {
     getReport: async () => { throw new Error('unused') },
     getEquityPath: async () => { throw new Error('unused') },
     artifactUrl: (jobId, name) => `/api/backtests/${jobId}/artifacts/${name}`,
-    listUserStrategies: async () => [persisted],
+    listResearch: async query => researchCollection([persisted], query),
+    researchReferences: async () => [persisted],
     getUserStrategy: async () => {
       counts.get += 1
       return script.read ? script.read() : persisted

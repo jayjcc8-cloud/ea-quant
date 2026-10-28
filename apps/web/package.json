@@ -2,6 +2,7 @@
   "name": "ea-quant-web",
   "private": true,
   "version": "0.0.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +10,12 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:e2e": "npm run build && node scripts/run-installed-e2e.mjs"
+    "test:e2e": "npm run build && node scripts/run-installed-e2e.mjs",
+    "dev:studio": "vite --config vite.studio.config.ts",
+    "build:studio": "tsc --noEmit -p tsconfig.studio.json && vite build --config vite.studio.config.ts",
+    "test:studio": "vitest run --config vite.studio.config.ts",
+    "lint:studio": "eslint studio/src",
+    "typecheck:studio": "tsc --noEmit -p tsconfig.studio.json"
   },
   "dependencies": {
     "@vitejs/plugin-react": "6.1.1",
