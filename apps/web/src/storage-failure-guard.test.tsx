@@ -30,6 +30,23 @@ const renderGuard = (active: boolean, message = '未保存输入在本机无法�
 const location = () => screen.getByLabelText('location').textContent
 afterEach(() => { cleanup(); window.history.replaceState({}, '', '/') })
 
+it('coalesces simultaneous uncached inputs into one cancellable leave decision', async () => {
+  window.history.replaceState({}, '', '/start')
+  render(<BrowserRouter><Links /><StorageFailureGuard active message="草稿无法缓冲" />
+    <StorageFailureGuard active message="消息无法缓冲" /><LocationProbe /></BrowserRouter>)
+  fireEvent.click(screen.getByText('first link'))
+  expect(screen.getAllByRole('dialog')).toHaveLength(1)
+  fireEvent.click(screen.getByRole('button', { name: '继续编辑' }))
+  expect(location()).toBe('/start·')
+  expect(screen.queryByRole('dialog')).toBeNull()
+  fireEvent.click(screen.getByText('first link'))
+  fireEvent.click(screen.getByRole('button', { name: '放弃并离开' }))
+  await waitFor(() => expect(location()).toBe('/next?tab=1·kept'))
+  expect(screen.queryByRole('dialog')).toBeNull()
+  fireEvent.click(screen.getByText('second link'))
+  expect(screen.getAllByRole('dialog')).toHaveLength(1)
+})
+
 it('asks in-app, traps focus, and both cancel paths keep the page and restore the link', () => {
   window.history.replaceState({}, '', '/start?tab=old')
   const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)

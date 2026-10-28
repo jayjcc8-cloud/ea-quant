@@ -96,7 +96,7 @@ function ResearchDetail({ api, id }: { api: ApiAdapter; id: string }) {
   if (tab === 'confirm') return <div className="page"><PageHeader title="确认实验输入" subtitle="核对冻结输入后，明确启动一次本地引擎实验。" breadcrumb={<Link to={`/research/${encodeURIComponent(id)}/draft`}>{strategy.name} / 新建实验</Link>} /><Confirmation key={`${id}.${draft.revision}`} api={api} strategy={strategy} changed={changed} done={() => navigate(`/research/${encodeURIComponent(id)}/experiments`)} /></div>
   return <DetailSurface className="real-detail" assistant={<Assistant key={id} api={api} strategy={strategy} changed={changed} />}>
     <PageHeader title={strategy.name} subtitle={`草稿 r${draft.revision} · ${isIntentDraft(draft) ? '等待绑定策略与数据' : `${draft.venue}:${draft.symbol}`}`} breadcrumb={<Link to="/">研究 / {strategy.name}</Link>} actions={tab !== 'draft' && <Link className="button primary" to={`/research/${encodeURIComponent(id)}/confirm`}>准备一次实验</Link>} />
-    <Tabs active={tab} items={[{ id: 'overview', label: '概览' }, { id: 'draft', label: '策略草稿' }, { id: 'experiments', label: '实验' }]} onChange={value => navigate(`/research/${encodeURIComponent(id)}/${value}`)} />
+    <nav className="tabs" aria-label="页面标签">{[['overview', '概览'], ['draft', '策略草稿'], ['experiments', '实验']].map(([value, label]) => <Link key={value} to={`/research/${encodeURIComponent(id)}/${value}`} aria-current={tab === value ? 'page' : undefined}>{label}</Link>)}</nav>
     <ErrorNote>{error}</ErrorNote>
     {tab === 'overview' && <>
       <h2>研究问题</h2><section className="panel"><p>{strategy.intent}</p></section>
@@ -244,11 +244,18 @@ function retainedCalls(key: string): RetainedCall[] {
 }
 function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapter; strategy: UserStrategy; changed: (next: UserStrategy) => void; jobId?: string; evidence?: ReactNode }) {
   const id = strategy.user_strategy_id, key = `quine.studio.calls.${id}`
+  const textKey = `quine.studio.unsent.${id}.${jobId ? `report.${jobId}` : 'draft'}`
   const model = useRead(useCallback(() => api.settingsStatus!(), [api]))
-  const [text, setText] = useState(''), [error, setError] = useState(''), [busy, setBusy] = useState(false)
+  const [text, setText] = useState(() => saved(textKey)), [textRetained, setTextRetained] = useState(true)
+  const [error, setError] = useState(''), [busy, setBusy] = useState(false)
   const [retained, setRetained] = useState(() => retainedCalls(key))
   const sending = useRef(false), alive = useRef(true)
   useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
+  const edit = (value: string) => {
+    setText(value)
+    try { if (value) sessionStorage.setItem(textKey, value); else sessionStorage.removeItem(textKey); setTextRetained(true) }
+    catch { setTextRetained(false) }
+  }
   const remember = (items: RetainedCall[]) => { sessionStorage.setItem(key, JSON.stringify(items)); if (alive.current) setRetained(items) }
   const accept = (next: UserStrategy) => {
     if (next.user_strategy_id !== id) throw new Error('研究身份不匹配')
@@ -275,7 +282,9 @@ function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapte
     const next = await api.sendUserStrategyMessage!(id, { call_id, base_revision: strategy.draft.revision, text, approved_budget: { max_model_calls: 1, max_backtests: 0 }, ...(jobId ? { evidence_job_ids: [jobId] } : {}) })
     if (!next.calls.some(call => call.call_id === call_id)) throw new Error('回执未包含本次模型调用')
     accept(next)
-    if (alive.current) setText('')
+    // A late receipt may clear only the submitted draft, never newer typing or another context.
+    if (saved(textKey) === text) sessionStorage.removeItem(textKey)
+    if (alive.current) setText(current => current === text ? '' : current)
   })
   const selectedModel = strategy.model_profile_id ? model.value?.profiles?.find(item => item.id === strategy.model_profile_id) : model.value
   const inFlight = strategy.calls.some(call => ['pending', 'dispatched'].includes(call.status) || ['running', 'awaiting_budget', 'awaiting_decision'].includes(call.task?.status ?? ''))
@@ -292,9 +301,11 @@ function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapte
         <button className="button" disabled={busy} onClick={() => void query()}>查询模型请求</button>
       </section>}
       {strategy.proposals.filter(p => p.status === 'open').map(p => <section className="real-proposal" key={p.proposal_id}><h3>建议修改 · r{p.base_revision}</h3><p>{p.items.length} 项变更，等待你审阅。</p><Link className="button" to={`/research/${encodeURIComponent(id)}/proposal?proposal=${encodeURIComponent(p.proposal_id)}`}>审阅修改提案</Link><p className="muted">应用只保存新修订，运行仍需独立确认。</p></section>)}
-      {!jobId && !strategy.messages.length && !strategy.calls.length && !localUnknown.length && <div className="suggestions"><small>你可以这样问</small><button className="button" onClick={() => setText(jobId ? '解释这份报告的结果与限制' : '检查当前草稿的参数与数据')}>检查当前证据</button><button className="button" onClick={() => setText('下一步应该检查哪些证据？')}>检查下一步</button></div>}
+      {!jobId && !strategy.messages.length && !strategy.calls.length && !localUnknown.length && <div className="suggestions"><small>你可以这样问</small><button className="button" onClick={() => edit(jobId ? '解释这份报告的结果与限制' : '检查当前草稿的参数与数据')}>检查当前证据</button><button className="button" onClick={() => edit('下一步应该检查哪些证据？')}>检查下一步</button></div>}
     </>}
-    input={<><ErrorNote>{error || model.error}</ErrorNote><label className="sr-only" htmlFor="studio-message">消息</label><textarea id="studio-message" value={text} onChange={e => setText(e.target.value)} placeholder={jobId ? '询问这份报告…' : '继续讨论这个研究…'} />
+    input={<><ErrorNote>{error || model.error}</ErrorNote><label className="sr-only" htmlFor="studio-message">消息</label><textarea id="studio-message" value={text} onChange={e => edit(e.target.value)} placeholder={jobId ? '询问这份报告…' : '继续讨论这个研究…'} />
+      {!textRetained && text && <small>未发送消息无法在本机缓冲，离开前请保留输入。</small>}
+      <StorageFailureGuard active={!textRetained && !!text} message="未发送消息无法在本机保留，离开将丢失输入。" />
       <small>{selectedModel?.configured ? `${selectedModel.provider} · ${selectedModel.model}；一次发送授权 1 次模型调用` : '模型未配置或不可读；不会生成替代回答。'}</small>
       <button aria-label="发送一次模型请求" title="发送一次模型请求" className="button primary real-send" disabled={busy || inFlight || localUnknown.some(call => call.text === text.trim()) || !selectedModel?.configured || !text.trim()} onClick={() => void send()}><Icon name="send" size={22} /></button>
       {localUnknown.length > 0 && <small>同一问题只查询原请求。可以输入不同的新问题，原身份仍保留。</small>}

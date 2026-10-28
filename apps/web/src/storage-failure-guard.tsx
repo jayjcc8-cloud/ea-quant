@@ -1,5 +1,9 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 
+// A confirmed leave applies to every uncached input on this page. The bypass exists
+// only during the synchronous replay, so multiple guards cannot prompt each other.
+let replayedAnchor: HTMLAnchorElement | null = null
+
 /**
  * One cancellable, keyboard-operable leave confirmation for a page whose
  * unsaved input could not be retained in sessionStorage. Nothing navigates
@@ -10,7 +14,6 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 export function StorageFailureGuard({ active, message }: { active: boolean; message: string }) {
   const [pending, setPending] = useState<HTMLAnchorElement | null>(null)
   const pendingAnchor = useRef<HTMLAnchorElement | null>(null)
-  const replayedAnchor = useRef<HTMLAnchorElement | null>(null)
   const dialog = useRef<HTMLDivElement>(null)
   const cancelButton = useRef<HTMLButtonElement>(null)
   const titleId = useId()
@@ -20,6 +23,7 @@ export function StorageFailureGuard({ active, message }: { active: boolean; mess
     if (!active) return
     const unload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
     const leave = (event: MouseEvent) => {
+      if (event.defaultPrevented) return
       if (!(event.target instanceof Element)) return
       const anchor = event.target.closest('a[href]')
       if (!(anchor instanceof HTMLAnchorElement)) return
@@ -36,7 +40,7 @@ export function StorageFailureGuard({ active, message }: { active: boolean; mess
       // A same-document hash link does not leave the page; keep its existing behavior.
       if (url.pathname === window.location.pathname && url.search === window.location.search) return
       // One synchronous bypass for the click replay below, never a lasting exemption.
-      if (replayedAnchor.current === anchor) { replayedAnchor.current = null; return }
+      if (replayedAnchor === anchor) return
       event.preventDefault(); event.stopPropagation()
       // A second click behind the dialog must not replace the chosen destination.
       if (pendingAnchor.current !== null) return
@@ -50,7 +54,6 @@ export function StorageFailureGuard({ active, message }: { active: boolean; mess
       document.removeEventListener('click', leave, true)
       // A guard that becomes inactive, or unmounts, leaves no open confirmation.
       pendingAnchor.current = null
-      replayedAnchor.current = null
       setPending(null)
     }
   }, [active])
@@ -70,9 +73,9 @@ export function StorageFailureGuard({ active, message }: { active: boolean; mess
     setPending(null)
     // A detached link is closed rather than navigating through a stale target.
     if (!anchor || !anchor.isConnected) return
-    replayedAnchor.current = anchor
+    replayedAnchor = anchor
     try { anchor.click() } finally {
-      if (replayedAnchor.current === anchor) replayedAnchor.current = null
+      if (replayedAnchor === anchor) replayedAnchor = null
     }
   }
 
@@ -98,7 +101,7 @@ export function StorageFailureGuard({ active, message }: { active: boolean; mess
       aria-labelledby={titleId} aria-describedby={messageId} tabIndex={-1} onKeyDown={onKeyDown}>
       <h2 id={titleId}>离开此页？</h2>
       <p id={messageId}>{message}</p>
-      <p className="muted">继续编辑会留在本页并保留输入；放弃并离开只导航到你刚才点击的链接。</p>
+      <p className="muted">继续编辑会留在本页并保留输入；放弃并离开会丢弃本页未能缓冲的输入，只导航到你刚才点击的链接。</p>
       <div className="actions">
         <button ref={cancelButton} type="button" onClick={close}>继续编辑</button>
         <button type="button" onClick={confirmLeave}>放弃并离开</button>

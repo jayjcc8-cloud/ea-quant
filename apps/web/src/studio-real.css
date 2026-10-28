@@ -5,8 +5,8 @@
 .real-studio .sidebar-footer { display: grid; gap: 12px; }
 .real-studio .primary-nav a { padding: 20px 16px; color: var(--muted); white-space: nowrap; }
 .real-studio .tabs { display: flex; gap: 26px; border-bottom: 1px solid var(--line); margin-bottom: 24px; }
-.real-studio .tabs a { padding: 12px 0; color: var(--muted); }
-.real-studio .tabs a[aria-current="page"] { color: var(--text); border-bottom: 2px solid var(--text); }
+.real-studio .tabs a { padding: 10px 0; color: var(--muted); white-space: nowrap; border-bottom: 3px solid transparent; }
+.real-studio .tabs a[aria-current="page"] { color: var(--text); border-bottom-color: var(--blue); font-weight: 600; }
 .real-studio .real-research-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 22px 0; border-bottom: 1px solid var(--line); color: var(--text); text-decoration: none; }
 .real-studio .real-research-row:hover { background: var(--soft); }
 .real-studio .real-research-row small { display: block; margin-top: 6px; color: var(--muted); }

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { StrictMode } from 'react'
@@ -32,6 +32,81 @@ function open(api: ApiAdapter, path: string) {
 }
 beforeEach(() => { sessionStorage.clear(); localStorage.clear() })
 afterEach(cleanup)
+
+it.each(['概览', '实验'])('guards uncached draft edits before leaving through the %s tab', async label => {
+  const save = vi.fn(), launch = vi.fn()
+  const api = adapter({ saveUserStrategyDraft: save, launchUserStrategyExperiment: launch,
+    userStrategyDraftContract: async () => ({ draft_revision: 1, scenario_id: 'sample.yaml', source: 'registered',
+      fields: [{ path: 'parameters.target_quantity', kind: 'integer', json_type: 'integer', current: 1, minimum: 0, maximum: 100, editable: true }] }) })
+  const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('quota', 'QuotaExceededError') })
+  try {
+    open(api, '/research/real-idea/draft')
+    fireEvent.change(await screen.findByLabelText('目标持仓数量'), { target: { value: '17' } })
+    await screen.findByText('本地缓冲不可用，离开前请保存或取消。')
+    const tab = () => within(screen.getByRole('navigation', { name: '页面标签' })).getByText(label)
+    await userEvent.click(tab())
+    expect(screen.getByRole('dialog', { name: '离开此页？' })).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: '继续编辑' }))
+    expect((screen.getByLabelText('目标持仓数量') as HTMLInputElement).value).toBe('17')
+    await userEvent.click(tab())
+    await userEvent.click(screen.getByRole('button', { name: '放弃并离开' }))
+    await screen.findByRole('heading', { name: label === '实验' ? '实验记录' : '研究问题' })
+    expect(screen.queryByLabelText('目标持仓数量')).toBeNull()
+    expect(save).not.toHaveBeenCalled(); expect(launch).not.toHaveBeenCalled()
+  } finally { write.mockRestore() }
+})
+
+it('restores an unsent assistant message after experiment preparation without sending it', async () => {
+  const send = vi.fn(), launch = vi.fn()
+  const api = adapter({ sendUserStrategyMessage: send, launchUserStrategyExperiment: launch })
+  const view = open(api, '/research/real-idea/overview')
+  await userEvent.type(await screen.findByLabelText('消息'), '比较费用变化后再决定实验')
+  await userEvent.click(screen.getByRole('link', { name: '准备一次实验' }))
+  await screen.findByRole('heading', { name: '确认一次实验' })
+  await userEvent.click(screen.getByRole('link', { name: '返回修改' }))
+  expect((await screen.findByLabelText('消息') as HTMLTextAreaElement).value).toBe('比较费用变化后再决定实验')
+  view.unmount()
+  const reopened = open(api, '/research/real-idea/overview')
+  expect((await screen.findByLabelText('消息') as HTMLTextAreaElement).value).toBe('比较费用变化后再决定实验')
+  reopened.unmount()
+  open(adapter({ getUserStrategy: async () => ({ ...strategy, user_strategy_id: 'other-idea' }) }), '/research/other-idea/overview')
+  expect((await screen.findByLabelText('消息') as HTMLTextAreaElement).value).toBe('')
+  expect(send).not.toHaveBeenCalled(); expect(launch).not.toHaveBeenCalled()
+})
+
+it('keeps newer unsent typing when an earlier model receipt arrives', async () => {
+  let finish!: (value: UserStrategy) => void
+  const send = vi.fn<NonNullable<ApiAdapter['sendUserStrategyMessage']>>(() => new Promise<UserStrategy>(resolve => { finish = resolve }))
+  const api = adapter({ sendUserStrategyMessage: send, settingsStatus: configuredModel })
+  const view = open(api, '/research/real-idea/overview')
+  const input = await screen.findByLabelText('消息')
+  fireEvent.change(input, { target: { value: '第一个问题' } })
+  await waitFor(() => expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(false))
+  await userEvent.click(screen.getByRole('button', { name: '发送一次模型请求' }))
+  fireEvent.change(input, { target: { value: '尚未发送的下一个问题' } })
+  finish({ ...strategy, calls: [{ call_id: send.mock.calls[0][1].call_id, status: 'observed', base_revision: 1, route: {}, usage_available: false } as UserStrategy['calls'][number]] })
+  await waitFor(() => expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(false))
+  expect((screen.getByLabelText('消息') as HTMLTextAreaElement).value).toBe('尚未发送的下一个问题')
+  view.unmount()
+  open(api, '/research/real-idea/overview')
+  expect((await screen.findByLabelText('消息') as HTMLTextAreaElement).value).toBe('尚未发送的下一个问题')
+  expect(send).toHaveBeenCalledTimes(1)
+})
+
+it('asks before losing an assistant message when its session buffer cannot be written', async () => {
+  const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('quota', 'QuotaExceededError') })
+  try {
+    open(adapter(), '/research/real-idea/overview')
+    await userEvent.type(await screen.findByLabelText('消息'), '保留这个问题')
+    await userEvent.click(screen.getByRole('link', { name: '准备一次实验' }))
+    expect(screen.getByRole('dialog', { name: '离开此页？' })).toBeTruthy()
+    await userEvent.click(screen.getByRole('button', { name: '继续编辑' }))
+    expect((screen.getByLabelText('消息') as HTMLTextAreaElement).value).toBe('保留这个问题')
+    await userEvent.click(screen.getByRole('link', { name: '准备一次实验' }))
+    await userEvent.click(screen.getByRole('button', { name: '放弃并离开' }))
+    await screen.findByRole('heading', { name: '确认一次实验' })
+  } finally { write.mockRestore() }
+})
 
 it('opens workspace settings from the real navigation and saves only an explicit next-launch selection', async () => {
   const status = { workspace: '/fixture/current', next_workspace: '/fixture/current', theme: 'system' as const, startup_error: null,
