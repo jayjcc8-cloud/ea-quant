@@ -180,3 +180,14 @@ it('opens the existing CSV deep link and returns to the same real draft without 
   await screen.findByRole('heading', { name: '策略草稿 · r1' })
   expect(launch).not.toHaveBeenCalled()
 })
+
+it('reads core-owned reports from persisted research references after reopen even when the legacy job list is empty', async () => {
+  const launch = vi.fn(), legacy = vi.fn(async () => [])
+  open(adapter({ listBacktests: legacy, launchUserStrategyExperiment: launch,
+    researchReferences: async () => [{ user_strategy_id: 'real-idea', name: '已有研究', draft: { revision: 4 }, experiments: [{ job_id: 'persisted-core-job', launch_intent_id: 'original' }] }],
+    getBacktest: async () => ({ job_id: 'persisted-core-job', status: 'succeeded', report_ready: true } as BacktestJob),
+  }), '/records')
+  await screen.findByRole('link', { name: /persisted-core-job.*报告可读/ })
+  expect(screen.queryByText('暂无实验记录。')).toBeNull()
+  expect(legacy).not.toHaveBeenCalled(); expect(launch).not.toHaveBeenCalled()
+})

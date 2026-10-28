@@ -262,9 +262,26 @@ function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapte
 }
 
 function Records({ api }: { api: ApiAdapter }) {
-  const jobs = useRead(useCallback(() => api.listBacktests(), [api]))
-  return <div className="page"><h1>回测记录</h1><ErrorNote>{jobs.error}</ErrorNote>{!jobs.value && !jobs.error && <p>正在读取…</p>}{jobs.value?.map(job => <Link className="real-research-row" to={`/report/${encodeURIComponent(job.job_id)}/overview`} key={job.job_id}><span>{job.job_id}</span><span>{job.status} · {job.report_ready ? '报告可读' : '无正式报告'}</span></Link>)}{jobs.value?.length === 0 && <p>暂无实验记录。</p>}<button className="button" onClick={jobs.reload}>重新读取记录</button></div>
+  const records = useRead(useCallback(async () => {
+    const refs = await api.researchReferences!()
+    return Promise.all(refs.flatMap(research => research.experiments.map(async experiment => {
+      if (!experiment.job_id) return { research, experiment, job: null, error: '' }
+      try {
+        const job = await api.getBacktest(experiment.job_id)
+        if (job.job_id !== experiment.job_id) throw new Error('运行身份不一致')
+        return { research, experiment, job, error: '' }
+      } catch (e) { return { research, experiment, job: null, error: reason(e) } }
+    })))
+  }, [api]))
+  return <div className="page"><PageHeader title="回测记录" subtitle="从已保存研究读取实验与正式报告。" actions={<button className="button" onClick={records.reload}>重新读取记录</button>} />
+    <ErrorNote>{records.error}</ErrorNote>{!records.value && !records.error && <p>正在读取…</p>}
+    {records.value?.map(({ research, experiment, job, error }, index) => <div key={`${research.user_strategy_id}.${experiment.launch_intent_id ?? index}`}>
+      {job ? <Link className="real-research-row" to={`/report/${encodeURIComponent(job.job_id)}/overview`}><span><strong>{research.name}</strong><small>{job.job_id}</small></span><span>{job.status} · {job.report_ready ? '报告可读' : '无正式报告'}</span></Link>
+        : <section className="panel"><Link to={`/research/${encodeURIComponent(research.user_strategy_id)}/experiments`}>{research.name} · 查询原实验</Link><p>{experiment.launch_intent_id ?? '确认身份未提供'}</p><p>{experiment.job_id ? '运行暂不可读，未推断为失败或完成。' : '尚未登记运行，请查询原研究。'}</p><ErrorNote>{error}</ErrorNote></section>}
+    </div>)}{records.value?.length === 0 && <p>暂无实验记录。</p>}
+  </div>
 }
+
 function ReportRoute({ api }: { api: ApiAdapter }) { const { id = '' } = useParams(); return <Report key={id} api={api} id={id} /> }
 function Report({ api, id }: { api: ApiAdapter; id: string }) {
   const { tab = 'overview' } = useParams(), [refresh, setRefresh] = useState(0), navigate = useNavigate()
