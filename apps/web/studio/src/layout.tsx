@@ -190,3 +190,11 @@ export function DetailSurface({ children, assistant, openAgent, className = '' }
     <div className="desktop-agent">{!openAgent && expanded && <button className="button agent-close" onClick={() => setExpanded(false)}>收起 Agent</button>}{assistant}</div>
   </div>;
 }
+
+/** The draft and report sections used by the v3 views, with data owned by callers. */
+export function DraftSurface({ source, parameters, costs }: { source: ReactNode; parameters: ReactNode; costs: ReactNode }) {
+  return <section className="panel parameter-form"><h2>来源</h2>{source}<h2>参数</h2>{parameters}<h2>成本与约束</h2>{costs}</section>;
+}
+export function ReportOverviewSurface({ metrics, chart, sources }: { metrics: ReactNode; chart: ReactNode; sources: ReactNode }) {
+  return <>{metrics}{chart}<section className="panel"><h2>来源与范围</h2>{sources}</section></>;
+}

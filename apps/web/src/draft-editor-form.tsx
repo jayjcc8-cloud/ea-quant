@@ -31,6 +31,7 @@ type DraftEditorField = {
 }
 
 export type DraftEditorFormProps = {
+  presentation?: 'studio'
   fields: DraftEditorField[]
   values: Record<string, string>
   revision: number
@@ -47,6 +48,11 @@ export type DraftEditorFormProps = {
 /** The one field the user knows by its own name; every parameter keeps the exact
  * name it was registered under. */
 const pathLabel = (path: string) => (path === 'initial_cash' ? '初始资金' : path)
+const studioLabels: Record<string, string> = {
+  initial_cash: '初始资金', 'parameters.target_quantity': '目标持仓数量',
+  'parameters.entry_delay_bars': '入场等待（行情条数）',
+  'parameters.fast_window': '快均线窗口', 'parameters.slow_window': '慢均线窗口',
+}
 
 /** The value an untouched field shows: its current one, as written. */
 const currentText = (field: DraftEditorField) =>
@@ -68,6 +74,7 @@ function boundNote(field: DraftEditorField): string {
 }
 
 export function DraftEditorForm({
+  presentation,
   fields,
   values,
   revision,
@@ -81,7 +88,7 @@ export function DraftEditorForm({
   onCancel,
 }: DraftEditorFormProps) {
   return <section aria-label="手工编辑草稿" className="draft-editor">
-    <h2 className="draft-editor-title">参数与规则</h2>
+    {!presentation && <h2 className="draft-editor-title">参数与规则</h2>}
     <p className="muted draft-editor-revision" id="draft-editor-revision">
       {`基于草稿修订 ${revision}。保存仅生成新修订；实验需另行预览确认。`}
     </p>
@@ -96,8 +103,8 @@ export function DraftEditorForm({
         const integer = field.json_type === 'integer'
         return <div className="draft-editor-field" key={inputId}>
           <label htmlFor={inputId}>
-            <span className="draft-editor-path">{pathLabel(field.path)}</span>
-            <span className="draft-editor-kind">{`${field.kind} · ${field.json_type}`}</span>
+            <span className="draft-editor-path">{presentation ? studioLabels[field.path] ?? pathLabel(field.path) : pathLabel(field.path)}</span>
+            {!presentation && <span className="draft-editor-kind">{`${field.kind} · ${field.json_type}`}</span>}
           </label>
           <input
             id={inputId}
@@ -121,6 +128,7 @@ export function DraftEditorForm({
     </div>
     <details className="provenance draft-editor-contract">
       <summary>这里能改什么</summary>
+      {presentation && <dl>{fields.map(field => <div key={field.path}><dt>{field.path}</dt><dd>{field.kind} · {field.json_type} · {field.editable ? '可编辑' : '只读'}</dd></div>)}</dl>}
       <p className="muted">
         可以调整的是初始资金与宿主已登记的可编辑参数。策略标识、标的、执行成本与风险模型是已注册场景
         自己的设置：它们在这里不能被自由修改，由场景合同提供，本表单不开放任意经济模型或新的策略语义。

@@ -15,8 +15,8 @@ function readBuffer(id: string): Buffer | null {
 }
 
 /** Local, per-research unsaved input only. The server record remains authoritative. */
-export function DraftEditor({ api, strategy, changed }: {
-  api: ApiAdapter; strategy: UserStrategy; changed: (value: UserStrategy) => void
+export function DraftEditor({ api, strategy, changed, presentation }: {
+  api: ApiAdapter; strategy: UserStrategy; changed: (value: UserStrategy) => void; presentation?: 'studio'
 }) {
   const id = strategy.user_strategy_id
   const [buffer, setBuffer] = useState<Buffer | null>(() => readBuffer(id))
@@ -89,7 +89,7 @@ export function DraftEditor({ api, strategy, changed }: {
   if (!api.userStrategyDraftContract || !api.saveUserStrategyDraft) return <p className="muted">此工作区不提供手工保存入口。</p>
   const currentContract = contract?.draft_revision === strategy.draft.revision ? contract : null
   return <>
-    <DraftEditorForm fields={currentContract?.fields ?? []} values={buffer?.values ?? {}}
+    <DraftEditorForm presentation={presentation} fields={currentContract?.fields ?? []} values={buffer?.values ?? {}}
       revision={buffer?.revision ?? strategy.draft.revision} busy={busy}
       disabled={!currentContract || Boolean(buffer?.pending)} dirty={Boolean(buffer)}
       error={stale ? '草稿已有新修订。输入仍保留，请取消旧编辑并基于当前修订重新修改。' : error}

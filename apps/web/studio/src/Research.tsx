@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { DraftSurface } from "./layout";
 import { adapter } from "./scenario";
 import {
   useAction,
@@ -514,8 +515,7 @@ export function DraftEditor({ research }: { research: Research }) {
           检查并运行实验
         </Button>
       </div>
-      <Panel className="parameter-form">
-        <h2>来源</h2>
+      <DraftSurface source={<>
         <KeyValues
           items={[
             [
@@ -538,7 +538,7 @@ export function DraftEditor({ research }: { research: Research }) {
             修改绑定上下文
           </LinkButton>
         </div>
-        <h2>参数</h2>
+      </>} parameters={<>
         {(
           [
             ["fast", "快均线（周期）"],
@@ -555,7 +555,7 @@ export function DraftEditor({ research }: { research: Research }) {
             />
           </Field>
         ))}
-        <h2>成本与约束</h2>
+      </>} costs={<>
         {(
           [
             ["fee", "手续费（%）"],
@@ -583,7 +583,7 @@ export function DraftEditor({ research }: { research: Research }) {
             ],
           ]}
         />
-      </Panel>
+      </>} />
       <ActionError error={action.error || buffer.bufferError} />
       {dirty && (
         <Notice tone="warn">

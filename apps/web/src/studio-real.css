@@ -34,7 +34,7 @@
 .real-studio .table-scroll { overflow-x: auto; }
 @media (max-width: 760px) { .real-studio .sidebar { display: none; } .real-studio .topbar { left: 0; padding: 0 12px; } .real-studio .main { margin-left: 0; } .real-studio .primary-nav a { padding: 16px 7px; } .real-studio .environment { display: none; } .real-studio .report-key-results dl { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
-.real-studio .real-logo { margin: 0 0 22px; color: var(--text); text-decoration: none; }
+.real-studio .real-logo { margin: 0; color: var(--text); text-decoration: none; }
 .real-studio .call-history { margin: 20px 0; }
 .real-studio .call-history article { padding: 12px 0; border-bottom: 1px solid var(--line); }
 .real-studio .call-history code { overflow-wrap: anywhere; font-size: 11px; }
@@ -42,10 +42,48 @@
 .real-studio .agent-input > small { display: block; margin-top: 8px; }
 .real-studio .report-evidence-links a { padding: 6px 0; }
 .real-studio .agent-close { display: none; }
+.real-studio .sidebar-search input { width: 100%; min-width: 0; padding: 0; border: 0; background: transparent; }
+.real-studio .recent-link { color: inherit; text-decoration: none; }
+.real-studio .recent-link strong { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.real-studio .primary-nav a { position: relative; display: flex; align-items: center; gap: 6px; padding: 0 10px; }
+.real-studio .primary-nav a[aria-current="page"] { color: var(--text); font-weight: 650; border-bottom: 3px solid var(--blue); }
+.real-studio .primary-nav a small { font-size: 10px; font-weight: 400; }
+.real-studio .environment .recent-dot { margin: 0; background: #448557; }
+.real-studio .report-key-results dl { border: 0; border-radius: 0; gap: 0; padding: 12px 0; }
+.real-studio .report-key-results dl > div { border-right: 1px solid var(--line); padding: 0 16px; }
+.real-studio .report-key-results dl > div:first-child { padding-left: 0; }
+.real-studio .report-key-results dl > div:last-child { border: 0; }
+.real-studio .report-key-results dd { font-size: clamp(18px, 2.8cqw, 28px); }
+.real-studio .report-source-line { font-size: 12px; gap: 6px 16px; margin: 0 0 14px; }
+.real-studio .report-supporting-results { font-size: 12px; gap: 8px 16px; }
+.real-studio .equity-path { padding: 16px; }
+.real-studio .curve-header { flex-wrap: wrap; gap: 8px; }
+.real-studio .curve-controls { font-size: 12px; }
+.real-studio .curve-controls .muted { display: none; }
+.real-studio .draft-editor { padding: 0; }
+.real-studio .draft-editor-fields { display: block; }
+.real-studio .draft-editor-field { display: grid; grid-template-columns: 170px minmax(100px, 230px); align-items: center; gap: 8px 20px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.real-studio .draft-editor-path { color: var(--muted); font-size: 14px; font-weight: 400; }
+.real-studio .draft-editor-bound { grid-column: 2; }
+.real-studio .draft-editor-revision { font-size: 12px; }
+.real-studio .draft-editor-actions button { padding: 9px 16px; border: 1px solid var(--line); border-radius: 7px; }
+.real-studio .draft-editor-contract { margin-top: 14px; }
+.real-studio .draft-editor-contract dl { font-size: 12px; }
+.real-studio .parameter-form .key-values > div { grid-template-columns: 170px minmax(0, 1fr); border-bottom: 1px solid var(--line); }
+.real-studio .real-data-binding { margin: 20px 0; }
+.real-studio .page-heading h1 { overflow-wrap: anywhere; }
 @media (max-width: 1279px) {
+  .real-studio .sidebar-search input { display: none; }
   .real-studio .real-logo .brand > span:nth-child(2) { display: none; }
   .real-studio .real-logo .brand { justify-content: center; }
   .real-studio .local-agent-open .desktop-agent { display: flex; flex-direction: column; position: fixed; inset: 56px 0 0 auto; width: min(420px, 100vw); z-index: 30; background: var(--surface); box-shadow: -12px 0 36px #0002; }
   .real-studio .local-agent-open .agent-close { display: block; align-self: flex-end; margin: 8px 12px 0; }
   .real-studio .local-agent-open .agent-panel { flex: 1; min-height: 0; }
+}
+@media (max-width: 760px) {
+  .real-studio .draft-editor-field { grid-template-columns: 1fr; }
+  .real-studio .draft-editor-bound { grid-column: 1; }
+  .real-studio .primary-nav { gap: 12px; }
+  .real-studio .primary-nav a { padding: 0 4px; }
+  .real-studio .primary-nav a small { display: none; }
 }

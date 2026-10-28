@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ReportOverviewSurface } from "./layout";
 import { download, money, useBuffer, useStudio } from "./context";
 import { metrics } from "./model";
 import type { Report, Trade } from "./model";
@@ -477,7 +478,7 @@ export function ReportView({
       />
       {tab === "overview" ? (
         <>
-          <Metrics report={r} />
+          <ReportOverviewSurface metrics={<Metrics report={r} />} chart={
           <Chart
             series={[
               {
@@ -487,7 +488,7 @@ export function ReportView({
               { name: "基准", points: r.benchmark },
             ]}
           />
-          <Panel title="来源与范围">
+          } sources={<>
             <dl className="report-sources">
               <div>
                 <dt>策略草稿</dt>
@@ -518,7 +519,7 @@ export function ReportView({
             <Notice>
               单次演示回测只反映所选场景，不代表稳健性或未来收益。
             </Notice>
-          </Panel>
+          </>} />
           <div className="button-row">
             <Button
               onClick={() => navigate(`/batch/new?research=${r.researchId}`)}

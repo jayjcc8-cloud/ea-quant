@@ -10,7 +10,7 @@ import { EquityCurve } from './equity-path'
 import { useRunRead } from './user-strategy-research'
 import { isIntentDraft, UserStrategyRequestError, type UserStrategy, type UserStrategyExperiment, type UserStrategyPreview } from './user-strategies-api'
 import { StorageFailureGuard } from './storage-failure-guard'
-import { AgentSurface, DetailSurface, PageHeader, Tabs, Logo, Icon } from '../studio/src/layout'
+import { AgentSurface, DetailSurface, DraftSurface, ReportOverviewSurface, PageHeader, Tabs, Logo, Icon } from '../studio/src/layout'
 import '../studio/src/report-overview.css'
 import '../studio/src/model-connections.css'
 
@@ -77,7 +77,7 @@ function Home({ api }: { api: ApiAdapter }) {
 
 function ResearchRoute({ api }: { api: ApiAdapter }) { const { id = '' } = useParams(); return <ResearchDetail key={id} api={api} id={id} /> }
 function ResearchDetail({ api, id }: { api: ApiAdapter; id: string }) {
-  const { tab = 'overview' } = useParams(), navigate = useNavigate()
+  const { tab = 'overview' } = useParams(), navigate = useNavigate(), location = useLocation()
   const read = useCallback(async () => { const next = await api.getUserStrategy!(id); if (next.user_strategy_id !== id) throw new Error('研究身份不一致'); return next }, [api, id])
   const loaded = useRead(read), catalog = useRead(useCallback(() => api.listScenarios(true), [api]))
   const [error, setError] = useState('')
@@ -103,11 +103,50 @@ function ResearchDetail({ api, id }: { api: ApiAdapter; id: string }) {
       <section className="panel"><div className="binding-row"><Icon name="cube" size={25} /><div><strong>策略模板</strong><small>{isIntentDraft(draft) ? '尚未绑定' : draft.strategy_id}</small></div><Link className="button" to={`/research/${encodeURIComponent(id)}/draft`}>检查策略草稿</Link></div><div className="binding-row"><Icon name="data" size={25} /><div><strong>数据</strong><small>{isIntentDraft(draft) ? '尚未绑定' : draft.dataset_id ?? `注册场景 ${draft.scenario_id}`}</small></div><Link className="button" to={`/research/${encodeURIComponent(id)}/draft`}>绑定策略与数据</Link></div></section>
     </>}
     {tab === 'draft' && (isIntentDraft(draft) ? <BindScenario api={api} strategy={strategy} scenarios={catalog.value ?? []} catalogReady={!!catalog.value} catalogError={catalog.error || null} reloadCatalog={catalog.reload} changed={changed} failed={setError} />
-      : <><section className="panel parameter-form"><h2>策略草稿 · r{draft.revision}</h2><DraftEditor api={api} strategy={strategy} changed={changed} /></section><SelectDataset key={draft.revision} api={api} strategy={strategy} changed={changed} failed={setError} /></>)}
+      : <><ResearchDraft api={api} strategy={strategy} changed={changed} /><details className="real-data-binding"><summary>修改绑定数据或导入 CSV</summary><SelectDataset key={draft.revision} api={api} strategy={strategy} changed={changed} failed={setError} /></details></>)}
     {tab === 'experiments' && <Experiments strategy={strategy} refresh={loaded.reload} />}
-    {!['overview', 'draft', 'experiments'].includes(tab) && <Unavailable />}
+    {tab === 'proposal' && <ProposalReview api={api} strategy={strategy} proposalId={new URLSearchParams(location.search).get('proposal')} changed={changed} />}
+    {!['overview', 'draft', 'experiments', 'proposal'].includes(tab) && <Unavailable />}
   </DetailSurface>
 
+}
+function ProposalReview({ api, strategy, proposalId, changed }: { api: ApiAdapter; strategy: UserStrategy; proposalId: string | null; changed: (next: UserStrategy) => void }) {
+  const proposal = strategy.proposals.find(item => item.proposal_id === proposalId)
+  const [busy, setBusy] = useState(false), [error, setError] = useState(''), sending = useRef(false), navigate = useNavigate()
+  const decide = async (apply: boolean) => {
+    if (!proposal || sending.current || proposal.status !== 'open') return
+    sending.current = true; setBusy(true); setError('')
+    try {
+      const next = apply ? await api.applyUserStrategyProposal!(strategy.user_strategy_id, proposal.proposal_id, { operation_id: `apply-${crypto.randomUUID()}`, paths: proposal.items.map(item => item.path) }) : await api.rejectUserStrategyProposal!(strategy.user_strategy_id, proposal.proposal_id)
+      if (next.user_strategy_id !== strategy.user_strategy_id) throw new Error('研究身份不匹配')
+      changed(next); navigate(`/research/${encodeURIComponent(strategy.user_strategy_id)}/draft`)
+    } catch (e) { setError(`${reason(e)}。请重新读取研究核对结果，不会自动重发。`) }
+    finally { sending.current = false; setBusy(false) }
+  }
+  if (!proposal) return <p>未读取到此提案，请从研究助手打开已有提案。</p>
+  return <><h2>审阅修改提案</h2><p>基于草稿 r{proposal.base_revision} · {proposal.status}</p>
+    <div className="table-scroll"><table><thead><tr><th>参数</th><th>当前值</th><th>提案值</th></tr></thead><tbody>{proposal.items.map(item => <tr key={item.path}><td>{item.path}<small className="muted">{item.reason}</small></td><td>{String(item.before)}</td><td className="diff-change">{String(item.after)}</td></tr>)}</tbody></table></div>
+    <p className="notice">应用仅保存草稿的新修订，不会运行实验。提案中的解释属于模型推断。</p><ErrorNote>{error}</ErrorNote>
+    <div className="action-footer"><Link className="button" to={`/research/${encodeURIComponent(strategy.user_strategy_id)}/draft`}>返回草稿</Link><div className="button-row"><button className="button" disabled={busy || proposal.status !== 'open' || !!error || !api.rejectUserStrategyProposal} onClick={() => void decide(false)}>拒绝提案</button><button className="button primary" disabled={busy || proposal.status !== 'open' || !!error || proposal.base_revision !== strategy.draft.revision} onClick={() => void decide(true)}>应用修改到草稿</button></div></div>
+  </>
+}
+function ResearchDraft({ api, strategy, changed }: { api: ApiAdapter; strategy: UserStrategy; changed: (next: UserStrategy) => void }) {
+  const id = strategy.user_strategy_id, revision = strategy.draft.revision
+  const source = useRead(useCallback(async () => {
+    const next = await api.previewUserStrategyExperiment!(id)
+    if (next.owner !== 'quine' || next.draft_revision !== revision) throw new Error('来源修订已改变，请重新读取研究。')
+    return next
+  }, [api, id, revision]))
+  const draft = strategy.draft
+  if (isIntentDraft(draft)) return null
+  return <><div className="section-heading"><h2>策略草稿 · <span className="status">r{revision}</span></h2><span className="muted">已保存版本</span></div>
+    <DraftSurface source={<><Facts items={[
+      ['策略模板', draft.strategy_id], ['数据', draft.dataset_id ?? draft.scenario_id], ['标的', `${draft.venue}:${draft.symbol}`],
+      ['样本区间（UTC）', source.value?.data?.start_utc && source.value.data.end_utc ? `${source.value.data.start_utc} — ${source.value.data.end_utc}` : '尚未读到'],
+    ]} /><ErrorNote>{source.error}</ErrorNote></>}
+      parameters={<DraftEditor presentation="studio" api={api} strategy={strategy} changed={changed} />}
+      costs={<><Facts items={[[ '手续费', source.value?.commission ], ['滑点', source.value?.slippage], ['延迟', source.value?.latency]]} /><p className="muted">成本由所选场景提供，当前只读。保存草稿后，进入独立确认页核对本次执行。</p></>} />
+  </>
 }
 function Experiments({ strategy, refresh }: { strategy: UserStrategy; refresh: () => void }) {
   return <section className="panel"><div className="section-heading"><h2>实验记录</h2><button className="button" onClick={refresh}>重新读取研究</button></div>
@@ -251,7 +290,7 @@ function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapte
         {localUnknown.map(call => <article key={call.call_id}><code>{call.call_id}</code><p>r{call.base_revision} · 回执未知，保留原请求身份。</p></article>)}
         <button className="button" disabled={busy} onClick={() => void query()}>查询模型请求</button>
       </section>}
-      {strategy.proposals.filter(p => p.status === 'open').map(p => <section className="real-proposal" key={p.proposal_id}><h3>建议修改 · r{p.base_revision}</h3>{p.items.map(item => <p key={item.path}>{item.path}：{String(item.before)} → {String(item.after)}<br />{item.reason}</p>)}<button className="button" disabled={busy || p.base_revision !== strategy.draft.revision} onClick={() => void act(async () => accept(await api.applyUserStrategyProposal!(id, p.proposal_id, { operation_id: `apply-${crypto.randomUUID()}`, paths: p.items.map(item => item.path) })))}>应用修改到草稿</button><p className="muted">应用只保存新修订，运行仍需独立确认。</p></section>)}
+      {strategy.proposals.filter(p => p.status === 'open').map(p => <section className="real-proposal" key={p.proposal_id}><h3>建议修改 · r{p.base_revision}</h3><p>{p.items.length} 项变更，等待你审阅。</p><Link className="button" to={`/research/${encodeURIComponent(id)}/proposal?proposal=${encodeURIComponent(p.proposal_id)}`}>审阅修改提案</Link><p className="muted">应用只保存新修订，运行仍需独立确认。</p></section>)}
       {!strategy.messages.length && !strategy.calls.length && !localUnknown.length && <div className="suggestions"><small>你可以这样问</small><button className="button" onClick={() => setText(jobId ? '解释这份报告的结果与限制' : '检查当前草稿的参数与数据')}>检查当前证据</button><button className="button" onClick={() => setText('下一步应该检查哪些证据？')}>检查下一步</button></div>}
     </>}
     input={<><ErrorNote>{error || model.error}</ErrorNote><label className="sr-only" htmlFor="studio-message">消息</label><textarea id="studio-message" value={text} onChange={e => setText(e.target.value)} placeholder={jobId ? '询问这份报告…' : '继续讨论这个研究…'} />
@@ -298,11 +337,11 @@ function Report({ api, id }: { api: ApiAdapter; id: string }) {
   }, [api, id]))
   const evidence = run?.kind === 'ready' ? <section className="report-evidence" aria-label="报告解读与证据"><div className="report-evidence-heading"><h2>这份报告说明了什么</h2><small>本地引擎 · 已冻结事实 · 未调用模型</small></div><div className="report-reading"><p>净盈亏 <strong>{run.report.economics.net_pnl.amount} {run.report.economics.currency}</strong>；订单 / 成交 {run.report.economics.counts.orders} / {run.report.economics.counts.fills}。</p><p>单次运行不足以判断稳健性。数据与成本需先核对。</p></div><div className="report-evidence-links"><Link to={`/report/${encodeURIComponent(id)}/inputs`}>[1] 冻结输入与来源</Link><Link to={`/report/${encodeURIComponent(id)}/trades`}>[2] 交易明细</Link></div><div className="report-next-step"><h3>下一步检查</h3><p>核对交易与成本，再决定下一次独立实验。</p><Link className="button" to={`/report/${encodeURIComponent(id)}/trades`}>检查交易</Link></div></section> : undefined
   return <DetailSurface className="report-overview" assistant={source.value ? <Assistant api={api} strategy={source.value.owner} jobId={id} evidence={evidence} changed={owner => source.setValue(current => current ? { ...current, owner } : null)} /> : <AgentSurface context="冻结报告 · 只读证据" report history={<>{evidence}<p>未读取到唯一研究来源，会话暂不可用。</p><ErrorNote>{source.error}</ErrorNote></>} input={<small>不会生成替代回答。</small>} />}>
-    <PageHeader title="冻结报告" subtitle={id} breadcrumb={<Link to="/records">回测记录 / {id}</Link>} actions={<button className="button" onClick={() => setRefresh(n => n + 1)}>重新读取报告</button>} />
+    <PageHeader title={source.value ? `${source.value.owner.name} · 报告` : "冻结报告"} subtitle={<span title={id}>冻结报告 · {id.slice(0, 8)}{run?.kind === 'ready' ? ' · 已完成' : ''}</span>} breadcrumb={<Link to="/records">回测记录 / {id}</Link>} actions={<><button className="button" onClick={() => setRefresh(n => n + 1)}>重新读取报告</button>{source.value && <Link className="button primary" to={`/research/${encodeURIComponent(source.value.owner.user_strategy_id)}/draft`}>继续研究</Link>}</>} />
     <Tabs active={tab} items={[{ id: 'overview', label: '概览' }, { id: 'trades', label: '交易' }, { id: 'inputs', label: '冻结输入' }, { id: 'files', label: '文件' }]} onChange={value => navigate(`/report/${encodeURIComponent(id)}/${value}`)} />
     {run?.kind === 'loading' && <p role="status">正在读取正式报告…</p>}{run?.kind === 'unavailable' && <ErrorNote>{run.note}</ErrorNote>}
     {run?.kind === 'ready' && <><FrozenReportFacts job={run.job} report={run.report} revision={source.value?.revision} />
-      {tab === 'overview' && <><FrozenReportMetrics report={run.report} path={path.value} /><section className="panel chart"><h2>权益路径</h2>{path.value ? <EquityCurve analysis={path.value} /> : <p>权益曲线未提供。</p>}<ErrorNote>{path.error}</ErrorNote></section><section className="panel"><h2>来源与范围</h2><dl className="report-sources"><div><dt>冻结版本</dt><dd>{source.value?.revision == null ? '未记录' : `r${source.value.revision}`}<span>{run.report.source?.strategy.id ?? run.report.scenario?.strategy_id ?? '未记录'}</span></dd></div><div><dt>数据版本</dt><dd>{run.job.dataset_version?.dataset_id ?? '注册场景冻结数据'}<span>{run.job.input_identity.record_count ?? '未记录'} 条</span></dd></div><div><dt>运行身份</dt><dd>{run.report.run_id}<span>{run.report.schema}</span></dd></div></dl><p className="notice">单次回测只反映冻结场景，不代表未来收益。</p>{source.value && <Link className="button" to={`/research/${encodeURIComponent(source.value.owner.user_strategy_id)}/experiments`}>{source.value.owner.name} · 返回研究</Link>}</section></>}
+      {tab === 'overview' && <ReportOverviewSurface metrics={<FrozenReportMetrics report={run.report} path={path.value} />} chart={<>{path.value ? <EquityCurve analysis={path.value} /> : <p>权益曲线未提供。</p>}<ErrorNote>{path.error}</ErrorNote></>} sources={<><dl className="report-sources"><div><dt>冻结版本</dt><dd>{source.value?.revision == null ? '未记录' : `r${source.value.revision}`}<span>{run.report.source?.strategy.id ?? run.report.scenario?.strategy_id ?? '未记录'}</span></dd></div><div><dt>数据版本</dt><dd>{run.job.dataset_version?.dataset_id ?? '注册场景冻结数据'}<span>{run.job.input_identity.record_count ?? '未记录'} 条</span></dd></div><div><dt>运行身份</dt><dd>{run.report.run_id}<span>{run.report.schema}</span></dd></div></dl><p className="notice">单次回测只反映冻结场景，不代表未来收益。</p>{source.value && <Link className="button" to={`/research/${encodeURIComponent(source.value.owner.user_strategy_id)}/experiments`}>{source.value.owner.name} · 返回研究</Link>}</>} />}
       {tab === 'inputs' && <><p className="notice">冻结输入只读。当前草稿的后续修改不会改变本报告。</p><FrozenReportDetails job={run.job} report={run.report} path={path.value} /></>}
       {tab === 'trades' && <><ErrorNote>{analytics.error}</ErrorNote><ReportTrades report={run.report} analytics={analytics.value} view="complete" /><ReportTrades report={run.report} analytics={analytics.value} view="orders" /></>}
       {tab === 'files' && <section className="panel"><h2>正式产物</h2>{(['report.json', 'summary.txt', 'equity-path.json'] as const).map(name => <p key={name}><a className="button" href={api.artifactUrl(id, name)} download><Icon name="download" />{name}</a></p>)}<p>报告指纹：{run.job.report_sha256 ?? '未提供'}</p></section>}
@@ -327,9 +366,22 @@ function Models({ api }: { api: ApiAdapter }) {
 
 function DataRedirect() { const location = useLocation(); return <Navigate replace to={`/resources/data${location.search}${location.hash}`} /> }
 function LegacyResearchRedirect() { const { id } = useParams(), location = useLocation(); return <Navigate replace to={id ? `/research/${encodeURIComponent(id)}/draft${location.search}` : '/'} /> }
+function WorkspaceNav({ api }: { api: ApiAdapter }) {
+  const location = useLocation(), [query, setQuery] = useState('')
+  const recent = useRead(useCallback(() => /^\/(?:$|research\/|report\/|records$|resources\/|data$|strategies)/.test(location.pathname) ? api.listResearch!({ q: query, sort: 'updated' }) : Promise.resolve(null), [api, query, location.pathname]))
+  const rows = recent.value?.items ?? []
+  return <><aside className="sidebar" aria-label="工作区导航">
+    <Link className="real-logo" to="/"><Logo /></Link>
+    <div className="workspace-select"><span className="button"><Icon name="folder" /><span className="label">本地研究空间</span></span></div>
+    <Link className="button primary new-button" to="/" title="新建研究"><Icon name="plus" /><span>新建研究</span></Link>
+    <label className="sidebar-search"><Icon name="search" /><input aria-label="搜索研究" placeholder="搜索研究" value={query} onChange={e => setQuery(e.target.value)} /></label>
+    <div className="recent-heading">{query ? '搜索结果' : '最近研究'}</div>
+    <div className="recent-list"><ErrorNote>{recent.error}</ErrorNote>{rows.slice(0, 5).map(item => <Link key={item.user_strategy_id} title={item.name} className={`recent-link ${location.pathname.includes(item.user_strategy_id) ? 'selected' : ''}`} to={`/research/${encodeURIComponent(item.user_strategy_id)}/overview`}><i className="recent-dot" /><span><strong>{item.name}</strong><small>草稿 r{item.draft.revision} · {item.draft.pending_proposals ? '待审阅' : item.draft.kind === 'intent' ? '待绑定' : '已绑定'}</small></span></Link>)}{recent.value && !rows.length && <small className="muted">{query ? '没有匹配研究' : '尚无研究'}</small>}</div>
+    <div className="sidebar-footer"><Link className="sidebar-link" to="/resources/data" title="数据资源"><Icon name="data" /><span className="label">数据资源</span></Link><Link className="sidebar-link" to="/resources/models" title="模型连接"><Icon name="cube" /><span className="label">模型连接</span></Link><span className="demo-foot">本地研究候选 · 未发布</span></div>
+  </aside><header className="topbar"><nav className="primary-nav" aria-label="主要导航">{[['/', '研究'], ['/simulations', '模拟运行'], ['/live', '实盘运行'], ['/records', '回测记录']].map(([path, label]) => <Link key={path} aria-current={(path === '/' ? location.pathname === '/' || location.pathname.startsWith('/research/') : path === '/records' ? /\/(records|report)/.test(location.pathname) : location.pathname === path) ? 'page' : undefined} to={path}>{label}{['/simulations', '/live'].includes(path) && <small>未接入</small>}</Link>)}</nav><span className="environment"><i className="recent-dot" />本地</span></header></>
+}
 export function StudioRoutes({ api }: { api: ApiAdapter }) {
-  return <div className="studio real-studio" data-theme="light"><aside className="sidebar" aria-label="工作区导航"><Link className="real-logo" to="/"><Logo /></Link><Link className="button primary new-button" to="/" title="新建研究"><Icon name="plus" /><span>新建研究</span></Link><Link className="sidebar-link" to="/records" title="实验与报告"><Icon name="chart" /><span className="label">实验与报告</span></Link><Link className="sidebar-link" to="/resources/data" title="数据资源"><Icon name="data" /><span className="label">数据资源</span></Link><Link className="sidebar-link" to="/resources/models" title="模型连接"><Icon name="cube" /><span className="label">模型连接</span></Link><div className="sidebar-footer"><span className="demo-foot">v3 本地研究候选</span></div></aside>
-    <header className="topbar"><nav className="primary-nav"><Link to="/">研究</Link><Link to="/records">回测</Link><Link to="/simulations">模拟 · 未接入</Link><Link to="/live">实盘 · 未接入</Link></nav><span className="environment">本地引擎 · 未发布</span></header>
+  return <div className="studio real-studio" data-theme="light"><WorkspaceNav api={api} />
     <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/records" element={<Records api={api} />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} />} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="*" element={<Unavailable />} /></Routes></main>
   </div>
 }
