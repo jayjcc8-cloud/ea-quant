@@ -198,7 +198,7 @@ function Confirmation({ api, strategy, changed, done }: { api: ApiAdapter; strat
 
 }
 
-type RetainedCall = { call_id: string; base_revision: number }
+type RetainedCall = { call_id: string; base_revision: number; text?: string }
 function retainedCalls(key: string): RetainedCall[] {
   try { const value = JSON.parse(saved(key) || '[]'); return Array.isArray(value) ? value.filter(item => typeof item.call_id === 'string' && Number.isInteger(item.base_revision)) : [] } catch { return [] }
 }
@@ -219,7 +219,7 @@ function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapte
     if (sending.current) return
     sending.current = true; setBusy(true); setError('')
     try { await operation() }
-    catch (e) { if (alive.current) setError(`${reason(e)}。保留原请求身份，请读取核对，不会自动重发。`) }
+    catch (e) { if (alive.current) setError(`${reason(e)}。请读取核对，不会自动重发。`) }
     finally { sending.current = false; if (alive.current) setBusy(false) }
   }
   const query = () => act(async () => {
@@ -231,7 +231,7 @@ function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapte
     const call_id = `studio-${crypto.randomUUID()}`
     // A new explicit question is allowed after a classified unknown, as in the
     // existing conversation contract. It never overwrites or replays the old id.
-    remember([...retainedCalls(key), { call_id, base_revision: strategy.draft.revision }])
+    try { remember([...retainedCalls(key), { call_id, base_revision: strategy.draft.revision, text: text.trim() }]) } catch { throw new Error('无法保留请求身份，本次未发送') }
     const next = await api.sendUserStrategyMessage!(id, { call_id, base_revision: strategy.draft.revision, text, approved_budget: { max_model_calls: 1, max_backtests: 0 }, ...(jobId ? { evidence_job_ids: [jobId] } : {}) })
     if (!next.calls.some(call => call.call_id === call_id)) throw new Error('回执未包含本次模型调用')
     accept(next)
@@ -256,8 +256,8 @@ function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapte
     </>}
     input={<><ErrorNote>{error || model.error}</ErrorNote><label className="sr-only" htmlFor="studio-message">消息</label><textarea id="studio-message" value={text} onChange={e => setText(e.target.value)} placeholder={jobId ? '询问这份报告…' : '继续讨论这个研究…'} />
       <small>{selectedModel?.configured ? `${selectedModel.provider} · ${selectedModel.model}；一次发送授权 1 次模型调用` : '模型未配置或不可读；不会生成替代回答。'}</small>
-      <button className="button primary" disabled={busy || inFlight || !selectedModel?.configured || !text.trim()} onClick={() => void send()}>发送一次模型请求</button>
-      {localUnknown.length > 0 && <small>新发送是独立问题，不是补发上方未知请求；原身份仍可查询。</small>}
+      <button className="button primary" disabled={busy || inFlight || localUnknown.some(call => call.text === text.trim()) || !selectedModel?.configured || !text.trim()} onClick={() => void send()}>发送一次模型请求</button>
+      {localUnknown.length > 0 && <small>同一问题只查询原请求。可以输入不同的新问题，原身份仍保留。</small>}
     </>} />
 }
 
@@ -308,11 +308,12 @@ function Models({ api }: { api: ApiAdapter }) {
   </div>
 }
 
+function DataRedirect() { const location = useLocation(); return <Navigate replace to={`/resources/data${location.search}${location.hash}`} /> }
 function LegacyResearchRedirect() { const { id } = useParams(), location = useLocation(); return <Navigate replace to={id ? `/research/${encodeURIComponent(id)}/draft${location.search}` : '/'} /> }
 export function StudioRoutes({ api }: { api: ApiAdapter }) {
   return <div className="studio real-studio" data-theme="light"><aside className="sidebar" aria-label="工作区导航"><Link className="real-logo" to="/"><Logo /></Link><Link className="button primary new-button" to="/" title="新建研究"><Icon name="plus" /><span>新建研究</span></Link><Link className="sidebar-link" to="/records" title="实验与报告"><Icon name="chart" /><span className="label">实验与报告</span></Link><Link className="sidebar-link" to="/resources/data" title="数据资源"><Icon name="data" /><span className="label">数据资源</span></Link><Link className="sidebar-link" to="/resources/models" title="模型连接"><Icon name="cube" /><span className="label">模型连接</span></Link><div className="sidebar-footer"><span className="demo-foot">v3 本地研究候选</span></div></aside>
     <header className="topbar"><nav className="primary-nav"><Link to="/">研究</Link><Link to="/records">回测</Link><Link to="/simulations">模拟 · 未接入</Link><Link to="/live">实盘 · 未接入</Link></nav><span className="environment">本地引擎 · 未发布</span></header>
-    <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/records" element={<Records api={api} />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="*" element={<Unavailable />} /></Routes></main>
+    <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/records" element={<Records api={api} />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} />} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="*" element={<Unavailable />} /></Routes></main>
   </div>
 }
 export default function RealStudio() { return <BrowserRouter basename="/studio"><StudioRoutes api={browserApi} /></BrowserRouter> }

@@ -162,6 +162,7 @@ it('retains transport-unknown model identity across remount and queries without 
   await userEvent.type(await screen.findByLabelText('消息'), '检查参数')
   await userEvent.click(screen.getByRole('button', { name: '发送一次模型请求' }))
   await screen.findByText(/transport lost/)
+  expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(true)
   const identity = send.mock.calls[0][1].call_id
   view.unmount()
   open(api, '/research/real-idea/overview')
@@ -169,4 +170,13 @@ it('retains transport-unknown model identity across remount and queries without 
   await userEvent.click(screen.getByRole('button', { name: '查询模型请求' }))
   await screen.findByText(/尚未读到此调用/)
   expect(send).toHaveBeenCalledTimes(1)
+})
+
+it('opens the existing CSV deep link and returns to the same real draft without running', async () => {
+  const launch = vi.fn()
+  open(adapter({ launchUserStrategyExperiment: launch }), '/data?research=real-idea&revision=1&return=%2Fresearch%2Freal-idea%2Fdraft#data-upload')
+  await screen.findByRole('heading', { name: '数据资源' })
+  await userEvent.click(await screen.findByRole('link', { name: '返回当前研究（保留导入草稿）' }))
+  await screen.findByRole('heading', { name: '策略草稿 · r1' })
+  expect(launch).not.toHaveBeenCalled()
 })
