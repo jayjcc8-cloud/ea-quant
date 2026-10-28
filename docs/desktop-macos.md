@@ -96,8 +96,8 @@ all displayed records in `/studio` come from existing service contracts.
 
 ### Source build prerequisites
 
-Use the `feat/v3-real-research` branch for the current native v3 slice; it is not yet on `main`.
-From that checkout, prepare:
+Clone current `main` for the native v3 slice, or the exact PR revision you intend to test.
+From the selected checkout, prepare:
 
 - Apple Silicon macOS and Apple's Xcode Command Line Tools (including `clang` and
   `install_name_tool`); see [Tauri's macOS prerequisites](https://v2.tauri.app/start/prerequisites/#macos).

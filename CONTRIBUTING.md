@@ -13,8 +13,8 @@ Identify third-party material and preserve its license and notices.
 2. Use the existing Issue form. State scope/non-goals, acceptance and checks in plain language.
    Name yourself as implementer and the repository maintainer as Product Owner; propose the
    closest risk tier and let the maintainer confirm it. You do not need to recruit internal roles.
-3. Fork the repository and create one branch per change. Start ordinary fixes from `main`;
-   coordinate v3 work against `feat/v3-real-research` while it remains unmerged. Record the base
+3. Fork the repository and create one branch per change from current `main`.
+   Coordinate dependent work with its maintainer before choosing another base. Record the base
    commit and target branch in the PR so reviewers can reproduce the correct implementation.
 4. Make the smallest useful change, add a regression test for behavior changes and run relevant
    checks below. Open a **draft PR** early, targeting the agreed upstream branch. Link the Issue,

@@ -5,16 +5,16 @@
 **QUINE source collaboration preview — desktop candidate unpublished.** Apple Silicon macOS is the sole
 product entry and final acceptance target under [ADR 0050](adr/0050-desktop-only-product-delivery.md).
 Shared React/WebView and loopback HTTP remain internal implementation and test surfaces.
-**main healthy / live unavailable** describes the merged baseline, not the pending branch CI.
-The development branch now opens the real local research slice at `/studio`; the independent
+**main healthy / live unavailable** describes the last confirmed merged baseline; each containing
+commit and its CI record the next checkpoint. The source opens the real local research slice at `/studio`; the independent
 offline v3 studio remains a synthetic design preview. Project original code uses MIT;
 third-party licensing is unchanged.
 
 ## Phase Objective
 
-Make the source understandable and reproducible for GitHub contributors through forks, Issues and
-draft PRs. Keep the unmerged `feat/v3-real-research` implementation and its acceptance limits clear.
-The Product Owner approved the v3 design; implementation acceptance and merging remain pending.
+Maintain an understandable, reproducible source preview for GitHub contributors through forks,
+Issues and draft PRs. On 2026-10-28 the Product Owner explicitly authorized integration and cleanup
+of the fully incorporated development branches. This does not record hands-on user acceptance.
 Source collaboration does not require signing, notarization, clean-Mac installation or a Paper
 soak. Those remain separate binary/operational claims. No release or live connectivity is authorized.
 
@@ -36,10 +36,10 @@ soak. Those remain separate binary/operational claims. No release or live connec
   Its PR/main CI, unchanged local Full and hosted Full passed. Scoped native input/window/report/
   quit/reopen evidence belongs to the frozen `37bfc0f` source; the later clean main package and its
   installed lifecycle checks are identified in #261. Those results do not validate newer code.
-- **Pending desktop branch:** unsent-draft/storage-failure recovery, isolated wheel builds,
+- **Desktop engineering:** unsent-draft/storage-failure recovery, isolated wheel builds,
   path-driven native CI, architecture documentation, research workbench contracts, retained context
-  and report streaming, and shared desktop UI refinements are committed on the current branch.
-- **Real v3 research on the development branch:** the native `/studio` entry reuses existing
+  and report streaming, and shared desktop UI refinements are included in the source integration.
+- **Real v3 research:** the native `/studio` entry reuses existing
   research, CSV, draft, preview/confirmation and frozen-report services, with Rust-owned experiments.
   It includes report references, retained uncertain requests and next-launch workspace selection.
   Model connection status is read-only; simulation, Live, batches, holdout and Candidate promotion
@@ -60,12 +60,12 @@ soak. Those remain separate binary/operational claims. No release or live connec
 
 ## Incomplete
 
-- Current-branch required remote CI and the Product Owner's merge decision remain separate gates.
-  Local tests and earlier SHA results do not establish a remote pass for the final head.
+- Integration and subsequent changes require their applicable exact-head CI. Local tests and
+  earlier SHA results do not establish a remote pass for a new head; the containing PR records it.
 - Offline v3 is not connected to real providers, accounts or the engine. Its synthetic results and
   Chromium input checks do not prove native WebView acceptance or a signed package.
-- The real v3 implementation still needs Product Owner acceptance. A configured model status or
-  scripted adapter test does not prove a successful real-provider call.
+- Hands-on user acceptance of real v3 is not recorded by the merge authorization. A configured
+  model status or scripted adapter test does not prove a successful real-provider call.
 - Actual same-machine OS-reboot recovery, independent first use with a user-owned CSV and normal
   default-workspace launch remain unverified. Real-provider authentication/calls were not exercised
   in this acceptance; scripted responses do not establish those results. Paid calls are optional.
@@ -77,9 +77,9 @@ soak. Those remain separate binary/operational claims. No release or live connec
 
 ## Blockers
 
-Existing bounded reviews reported no qualifying blocker in their reviewed scope. Current
-integration still requires applicable exact-head CI and the Product Owner's decision; do not
-transfer #261 or #263 results to a newer head. First-use, signing and soak gaps limit their respective binary or
+Existing bounded reviews reported no qualifying blocker in their reviewed scope. The integration
+PR records its primary review and applicable exact-head CI under the Product Owner's merge
+authorization; do not transfer #261 or #263 results to a newer head. First-use, signing and soak gaps limit their respective binary or
 operational claims, not source contribution. Apply [WORKFLOW](governance/WORKFLOW.md)'s four-condition rule.
 
 ## Effective ADRs
@@ -94,10 +94,11 @@ The source preview and offline prototype do not supersede the accepted desktop d
 
 ## Primary Issues
 
-- [Current development branch](https://github.com/jayjcc8-cloud/ea-quant/compare/main...feat/v3-real-research):
-  cumulative desktop work and the real v3 slice, pending implementation acceptance and integration.
-- [#263](https://github.com/jayjcc8-cloud/ea-quant/pull/263) remains a draft for
-  `codex/native-ci-and-architecture` at `f97a4d0`; it does not contain the later real-v3 commits.
+- [Main history](https://github.com/jayjcc8-cloud/ea-quant/commits/main/) links the cumulative
+  integration PR, its CI and branch-cleanup result. Source integration preserves original commits.
+- [#263](https://github.com/jayjcc8-cloud/ea-quant/pull/263) records the earlier
+  `codex/native-ci-and-architecture` scope at `f97a4d0`, fully contained in the cumulative v3 work;
+  use its final PR state for closure rather than merging that scope a second time.
 - [#261](https://github.com/jayjcc8-cloud/ea-quant/pull/261): merged desktop integration and
   baseline cleanup, including contained and closed #259/#260.
 - [#262](https://github.com/jayjcc8-cloud/ea-quant/pull/262): merged CI-only timeout prerequisite;
@@ -117,7 +118,8 @@ Checked **2026-10-28 (UTC)** from the clean source base
 `92c6fcdf706bad41442aa4d1b791290632e25d9d` on `feat/v3-real-research`, matching its origin ref
 before the source-collaboration commits. [Candidate Full 40638630464](https://github.com/jayjcc8-cloud/ea-quant/actions/runs/40638630464)
 passed Python Full and the ordinary frontend job for that candidate. It is not the complete PR CI
-set and does not validate later license/documentation commits. PR #263 remains on its earlier head.
+set and does not validate later license/documentation commits. The cumulative integration PR
+records final-head CI and review; #263's older evidence remains limited to its earlier head.
 For merged behavior, the containing `main` commit and its CI are the durable checkpoint.
 A source or documentation commit does not change the identity of a previously tested installed app.
 
@@ -128,8 +130,8 @@ A source or documentation commit does not change the identity of a previously te
 - [x] Previously obsolete branches/checkouts were retired with unique history preserved.
 - [x] Offline design preview and native real-v3 implementation boundaries are explicit.
 - [x] MIT for project original code and the JayJcc copyright notice are confirmed by the maintainer.
-- [ ] Current branch required CI passes and the Product Owner chooses integration or closure.
-- [ ] After integration, retire this branch and synchronize local/remote main.
+- [x] The Product Owner authorized source integration and cleanup of fully incorporated branches.
+- Applicable final-head/main CI and completed branch retirement are recorded in the integration PR.
 - [ ] Remaining independent-user/native journeys are performed or explicitly excluded from a release claim.
 - [ ] Any later binary version, signing, notarization and publication receive explicit authorization.
 

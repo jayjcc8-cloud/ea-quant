@@ -7,8 +7,8 @@ Project original code is licensed under [MIT](LICENSE); see [Licensing](#licensi
 
 ## What works today
 
-The development branch `feat/v3-real-research` contains the current v3 research implementation.
-It has not been merged into `main`; design approval does not mean implementation acceptance.
+The source includes the v3 research implementation described below.
+Source integration does not establish hands-on native acceptance or a distributable binary.
 The Apple Silicon Mac desktop is the product target. Browser previews support development.
 
 | Surface | Available | Limits |
@@ -28,7 +28,7 @@ Use Git and **Node.js 24 with npm** (the version family used in CI). No model ke
 is needed for this synthetic preview:
 
 ```sh
-git clone --branch feat/v3-real-research https://github.com/jayjcc8-cloud/ea-quant.git quine
+git clone --branch main https://github.com/jayjcc8-cloud/ea-quant.git quine
 cd quine
 npm --prefix apps/web ci
 npm --prefix apps/web run dev:studio
@@ -41,7 +41,7 @@ reset, persistence and focused checks. This preview does not run real research.
 For the **real local research path**, follow the [source build prerequisites and development
 command](docs/desktop-macos.md#source-build-prerequisites) on Apple Silicon macOS. The native
 window opens `/studio`, using the existing Python services and Rust experiment owner. Build from
-the branch above and select a fresh data root; an older installed app does not acquire new code.
+the checkout above and select a fresh data root; an older installed app does not acquire new code.
 No paid model call is needed to save research or run a bundled synthetic engine experiment.
 
 ## Work with research evidence

@@ -7,12 +7,12 @@ v3 目前有两个用途不同的入口，均处于开发预览阶段：
 | 原生真实研究：`apps/web/src/studio-real.tsx`，桌面 `/studio` | 现有研究、CSV、草稿、实验预览/显式确认、冻结报告和工作区选择；使用 Python 服务与 Rust 实验 owner | [从源码构建 Mac 开发候选](../desktop-macos.md#source-build-prerequisites) |
 | 离线设计预览：`apps/web/studio/` | 依据39幅效果图实现的可复位合成场景；不调用真实后端、模型、交易所或账户 | 下方 `dev:studio` 命令 |
 
-原生入口的模型连接页只读；模拟、实盘、批量、留出和候选晋级尚未接入。效果图确认不代表实际实现已验收或合并。
+原生入口的模型连接页只读；模拟、实盘、批量、留出和候选晋级尚未接入。源码整合不等于用户亲自验收或安装包发行。
 真实研究使用普通 `npm --prefix apps/web run build` 构建；`build:studio` 只构建设计预览。
 
 ## 离线设计预览
 
-使用与 CI 一致的 Node.js 24/npm，从 `feat/v3-real-research` 仓库根目录启动：
+使用与 CI 一致的 Node.js 24/npm，从当前 `main` 或待测试 PR 的仓库根目录启动：
 
 ```sh
 npm --prefix apps/web ci
@@ -46,6 +46,6 @@ npm --prefix apps/web run build:studio
 
 上述39图证据验证的是浏览器交互与合成数据一致性，不能用来证明原生真实研究已验收。
 设计预览的中文组合输入通过 Chromium 输入协议验证 Enter 不误提交；这不等于 macOS 系统拼音候选窗或原生 WebView 验收。
-原生开发候选已经接入本地研究引擎，但实现验收和合并仍待用户确认，真实 provider 验收亦未完成。
+原生开发候选已经接入本地研究引擎；用户已授权源码合并，但未据此记录用户亲自验收 PASS，真实 provider 验收亦未完成。
 签名、公证、干净 Mac 安装和 Paper 长时间运行分别约束安装包或运行声明，不是源码贡献的前置。
 当前提交与 CI 范围见 [STATUS](../STATUS.md)，提交改进见 [CONTRIBUTING](../../CONTRIBUTING.md)。
