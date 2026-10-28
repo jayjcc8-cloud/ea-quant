@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 def line(process: subprocess.Popen[str], timeout: float = 40) -> dict[str, Any]:
@@ -104,7 +105,8 @@ def main() -> None:
         child = start()
         ready = line(child)
         assert ready["status"] == "ready", ready
-        origin = ready["url"].removesuffix("/strategies")
+        assert urlsplit(ready["url"]).path == "/studio", ready
+        origin = ready["url"].removesuffix("/studio")
         request(origin, "/api/health")
         duplicate = start()
         assert line(duplicate) == {"status": "error", "code": "desktop_already_running"}
@@ -165,7 +167,8 @@ def main() -> None:
         child = start()
         ready = line(child)
         assert ready["status"] == "ready"
-        origin = ready["url"].removesuffix("/strategies")
+        assert urlsplit(ready["url"]).path == "/studio", ready
+        origin = ready["url"].removesuffix("/studio")
         assert request(origin, path)["experiments"][-1]["job_id"] == job_id
         assert request(origin, f"/api/backtests/{job_id}/report") == report
         evidence["checks"].append("reopen preserved strategy and byte-equivalent report document")

@@ -1,0 +1,45 @@
+/* v3 composition over the shared real research controls. Loaded only by /studio. */
+.real-studio { --accent: #3568a8; --border: var(--line); color: var(--text); }
+.real-studio .real-logo { display: block; margin: 18px 12px 30px; color: var(--text); font-size: 22px; font-weight: 650; letter-spacing: 2px; text-decoration: none; }
+.real-logo small { display: block; font-size: 11px; color: var(--muted); font-weight: 400; letter-spacing: 1px; }
+.real-studio .sidebar a, .real-studio .topbar a, .real-studio .tabs a { text-decoration: none; }
+.real-studio .sidebar-link { padding: 12px; color: var(--text); }
+.real-studio .sidebar-footer { display: grid; gap: 12px; }
+.real-studio .primary-nav a { padding: 20px 16px; color: var(--muted); white-space: nowrap; }
+.real-studio .tabs { display: flex; gap: 26px; border-bottom: 1px solid var(--line); margin-bottom: 24px; }
+.real-studio .tabs a { padding: 12px 0; color: var(--muted); }
+.real-studio .tabs a[aria-current="page"] { color: var(--text); border-bottom: 2px solid var(--text); }
+.real-studio .real-research-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 22px 0; border-bottom: 1px solid var(--line); color: var(--text); text-decoration: none; }
+.real-studio .real-research-row:hover { background: var(--soft); }
+.real-studio .real-research-row small { display: block; margin-top: 6px; color: var(--muted); }
+.real-studio .real-detail-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 28px; align-items: start; }
+.real-studio .real-detail-grid > section { min-width: 0; }
+.real-studio .panel, .real-studio .strategy-panel { padding: 22px; margin-bottom: 20px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.real-studio h2 { font-size: 18px; font-weight: 600; }
+.real-studio .panel h2:first-child { margin-top: 0; }
+.real-studio .real-assistant { background: #fafbfc; }
+.real-studio .real-messages article { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.real-studio .real-messages p { white-space: pre-wrap; }
+.real-studio .real-messages { max-height: 48vh; overflow: auto; }
+.real-studio .real-proposal { margin: 18px 0; padding: 12px; background: var(--blue-soft); border-radius: 6px; }
+.real-studio .real-experiment { border-top: 1px solid var(--line); padding: 18px 0; }
+.real-studio .real-confirm { max-width: 900px; }
+.real-studio pre, .real-studio small, .real-studio dd { overflow-wrap: anywhere; }
+.real-studio pre { white-space: pre-wrap; padding: 12px; background: var(--soft); font-size: 12px; max-height: 400px; overflow: auto; }
+.real-studio .field { margin: 14px 0; display: grid; gap: 6px; }
+.real-studio .field label { color: var(--muted); }
+.real-studio .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0; }
+.real-studio .strategy-panel button, .real-studio .data-resource button { border: 1px solid var(--line); border-radius: 7px; padding: 8px 14px; }
+.real-studio button.primary { background: var(--primary); color: var(--on-primary); }
+.real-studio .notice.error { color: var(--error); background: var(--error-soft); }
+.real-studio .report-key-results { margin: 20px 0; }
+.real-studio .report-key-results dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.real-studio .report-key-results dd { font-size: 22px; margin: 10px 0; }
+.real-studio .report-supporting-results, .real-studio .report-source-line { display: flex; flex-wrap: wrap; gap: 18px; color: var(--muted); }
+.real-studio .report-source-line { margin: 16px 0 24px; }
+.real-studio .curve-plot svg { width: 100%; height: 230px; }
+.real-studio .summary-list > div, .real-studio .key-values > div { display: grid; grid-template-columns: 130px minmax(0, 1fr); padding: 8px 0; gap: 12px; }
+.real-studio dd { margin: 0; }
+.real-studio .table-scroll { overflow-x: auto; }
+@media (max-width: 1150px) { .real-studio .real-detail-grid { grid-template-columns: minmax(0, 1fr); } .real-studio .real-assistant { max-width: none; } }
+@media (max-width: 760px) { .real-studio .sidebar { display: none; } .real-studio .topbar { left: 0; padding: 0 12px; } .real-studio .main { margin-left: 0; } .real-studio .primary-nav a { padding: 16px 7px; } .real-studio .environment { display: none; } .real-studio .report-key-results dl { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

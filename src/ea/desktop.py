@@ -325,7 +325,7 @@ async def workspace_session(
                             emit(
                                 {
                                     "status": "ready",
-                                    "url": f"http://127.0.0.1:{port}/strategies",
+                                    "url": f"http://127.0.0.1:{port}/studio",
                                     "root": str(root),
                                     "core_pid": core.pid,
                                     "pid": os.getpid(),

@@ -845,7 +845,7 @@ const TEMPLATE_LABELS: Record<string, string> = {
   policy: '撮合方式', commission: '佣金',
 }
 
-function BindScenario({ api, strategy, scenarios, catalogReady, catalogError, reloadCatalog, changed, failed }: {
+export function BindScenario({ api, strategy, scenarios, catalogReady, catalogError, reloadCatalog, changed, failed }: {
   api: ApiAdapter
   strategy: UserStrategy
   scenarios: ScenarioSummary[]
@@ -1029,7 +1029,7 @@ type SelectableDataset = {
  * refused instead of silently run. This panel writes no field itself, calls no
  * model and starts no run.
  */
-function SelectDataset({ api, strategy, changed, failed }: {
+export function SelectDataset({ api, strategy, changed, failed }: {
   api: ApiAdapter
   strategy: UserStrategy
   changed: (strategy: UserStrategy) => void

@@ -55,10 +55,39 @@ def build_and_install_wheel(out: Path, python: Path) -> None:
         )
 
 
+def stage_development_shell(out: Path, runtime: Path) -> Path:
+    """A local native executable, with no signing, app bundle or distribution archive."""
+    run(
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "--manifest-path",
+        ROOT / "apps/desktop/src-tauri/Cargo.toml",
+    )
+    stage = out / "development"
+    (stage / "MacOS").mkdir(parents=True, exist_ok=True)
+    (stage / "Resources").mkdir(exist_ok=True)
+    resources = stage / "Resources/runtime"
+    if resources.is_symlink():
+        if resources.resolve() != runtime.resolve():
+            raise SystemExit("Development runtime points to another build.")
+    else:
+        resources.symlink_to(runtime.resolve(), target_is_directory=True)
+    binary = stage / "MacOS/quine-desktop"
+    shutil.copy2(out / "target/release/quine-desktop", binary)
+    return binary
+
+
 def main() -> None:
     global OUT, RUNTIME
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=OUT)
+    parser.add_argument(
+        "--development",
+        action="store_true",
+        help="Build a native executable without signing or bundling",
+    )
     args = parser.parse_args()
     OUT = args.output.resolve()
     RUNTIME = OUT / "runtime"
@@ -166,6 +195,10 @@ def main() -> None:
             }
         )
     )
+    if args.development:
+        binary = stage_development_shell(OUT, RUNTIME)
+        print(f"Local development executable (not a distributable app): {binary}")
+        return
     # Ad-hoc local signatures only. No account, certificate, notarization or OS changes.
     for path in RUNTIME.rglob("*"):
         if path.is_file() and not path.is_symlink():

@@ -382,7 +382,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T
 }
 
-const browserApi: ApiAdapter = {
+export const browserApi: ApiAdapter = {
   async listCandidates() { return (await apiRequest<{ candidates: Candidate[] }>('/api/candidates')).candidates },
   getCandidate: id => apiRequest(`/api/candidates/${id}`),
   prepareSimulation: id => apiRequest(`/api/candidates/${id}/simulation-preparation`),

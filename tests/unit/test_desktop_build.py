@@ -9,6 +9,24 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_development_shell_uses_current_build_without_signing_or_bundling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = script("build_desktop")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    binary = tmp_path / "target/release/quine-desktop"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"current-source-shell")
+    calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(module, "run", lambda *args, **kwargs: calls.append(args))
+    candidate = module.stage_development_shell(tmp_path, runtime)
+    assert candidate.read_bytes() == binary.read_bytes()
+    assert (candidate.parent.parent / "Resources/runtime").resolve() == runtime
+    assert len(calls) == 1 and calls[0][:3] == ("cargo", "build", "--locked")
+    assert "--release" in calls[0]
+
+
 def script(name: str) -> Any:
     spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
     assert spec and spec.loader
