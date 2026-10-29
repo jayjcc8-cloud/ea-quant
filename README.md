@@ -1,31 +1,32 @@
-# QUINE — Local Quantitative Research (Preview)
+# QUINE — 本地量化研究（预览版）
 
-QUINE is a work-in-progress Mac research application built on the EA deterministic engine.
-Contributions through **forks, Issues and draft pull requests** are welcome. The current goal is
-source collaboration; this preview is not a mature trading product or a public desktop installer.
-Project original code is licensed under [MIT](LICENSE); see [Licensing](#licensing) for scope.
+[中文](README.md) | [English](README.en.md)
 
-## What works today
+QUINE 是基于 EA 确定性引擎构建、仍在开发中的本地优先 Mac 量化研究应用。
+欢迎通过 **fork、Issue 和 draft PR** 参与改进。当前目标是源码协作；此预览版尚不是
+成熟的交易产品，也不是公开发行的桌面安装包。项目原创代码采用 [MIT](LICENSE) 许可，
+适用范围见[许可说明](#许可说明)。
 
-The source includes the v3 research implementation described below.
-Source integration does not establish hands-on native acceptance or a distributable binary.
-The Apple Silicon Mac desktop is the product target. Browser previews support development.
+## 当前可用范围
 
-| Surface | Available | Limits |
+源码已包含下述 v3 研究实现。源码合入不代表已完成用户亲自操作的原生应用验收，
+也不代表已有可分发的安装包。产品目标是 Apple Silicon Mac 桌面应用；浏览器预览用于辅助开发。
+
+| 入口或功能 | 已有能力 | 当前限制 |
 | --- | --- | --- |
-| Native v3 `/studio` (`apps/web/src/studio-real.tsx`) | Save research, import/check CSV, bind strategy/data, edit drafts, preview and explicitly confirm local engine experiments, read frozen reports, select next-launch workspace | Development candidate; final native acceptance is pending |
-| Research assistant | Uses the existing model service when explicitly configured; draft changes and experiment confirmation remain separate | v3 model connections are read-only; real-provider calls have not been accepted |
-| Offline design preview (`apps/web/studio/`) | Resettable synthetic scenes for layout and interaction work | No real engine, provider, account or exchange calls; demo results are not research evidence |
-| Simulation, Live, batches, holdout, Candidate promotion | Older engine/Paper tooling remains in the repository | These flows are **not connected in native v3**; external brokers and real-money trading are unavailable |
+| 原生 v3 `/studio`（`apps/web/src/studio-real.tsx`） | 保存研究、导入和检查 CSV、绑定策略与数据、编辑草稿、预览并明确确认本地引擎实验、读取冻结报告、选择下次启动的工作空间 | 开发候选版本；最终原生应用验收尚未完成 |
+| 研究助手 | 显式配置后使用已有模型服务；草稿修改与实验确认保持分离 | v3 中的模型连接配置只读；真实模型服务调用尚未完成验收 |
+| 离线设计预览（`apps/web/studio/`） | 可重置的合成场景，用于布局和交互开发 | 不调用真实引擎、模型服务、账户或交易所；演示结果不是研究证据 |
+| 模拟、Live、批量实验、holdout、Candidate 晋级 | 仓库保留已有的引擎与 Paper 工具 | 这些流程**尚未接入原生 v3**；不支持外部券商或实盘交易 |
 
-Historical EA **0.2.0** is the package version and an earlier offline prerelease, not a new QUINE
-release. No real-time coverage, profitability, investment suitability or real-money trading is
-promised. A backtest describes its frozen inputs, not future returns.
+历史 EA **0.2.0** 是当前软件包版本，也是早期离线预发布版本，不是新的 QUINE 发行版。
+项目不承诺实时行情覆盖、盈利、投资适用性或实盘交易能力。回测只描述其冻结输入下的结果，
+不保证未来收益。
 
-## Try the design from source
+## 从源码体验设计预览
 
-Use Git and **Node.js 24 with npm** (the version family used in CI). No model key or Python service
-is needed for this synthetic preview:
+准备 Git 和 **Node.js 24 / npm**（与 CI 使用的版本系列一致）。这个合成数据预览
+不需要模型密钥或 Python 服务：
 
 ```sh
 git clone --branch main https://github.com/jayjcc8-cloud/ea-quant.git quine
@@ -34,49 +35,42 @@ npm --prefix apps/web ci
 npm --prefix apps/web run dev:studio
 ```
 
-Open <http://127.0.0.1:4176/>. Stop with Ctrl-C. If the port is occupied, the command fails rather
-than replacing another service. [v3 preview instructions](docs/frontend-v3/README.md) describe
-reset, persistence and focused checks. This preview does not run real research.
+打开 <http://127.0.0.1:4176/>，按 Ctrl-C 停止。端口被占用时命令会失败，不会替换已有服务。
+[v3 预览说明](docs/frontend-v3/README.md)介绍了重置、持久化和定向检查。
+此预览不执行真实研究。
 
-For the **real local research path**, follow the [source build prerequisites and development
-command](docs/desktop-macos.md#source-build-prerequisites) on Apple Silicon macOS. The native
-window opens `/studio`, using the existing Python services and Rust experiment owner. Build from
-the checkout above and select a fresh data root; an older installed app does not acquire new code.
-No paid model call is needed to save research or run a bundled synthetic engine experiment.
+要体验**真实本地研究流程**，请在 Apple Silicon macOS 上按照[源码构建要求与开发命令](docs/desktop-macos.md#source-build-prerequisites)操作。
+原生窗口打开 `/studio`，复用已有 Python 服务，由 Rust 管理实验执行。
+请从上述源码目录构建并选择新的数据根目录；旧的已安装应用不会自动获得新代码。
+保存研究或运行仓库自带的合成数据引擎实验，不需要付费模型调用。
 
-## Work with research evidence
+## 使用研究证据
 
-1. Save an idea, then bind a registered strategy and data in its draft. For your own CSV, declare
-   provenance and usage rights, preview it, then explicitly publish and select its immutable version.
-2. Review parameters, funding, currency and cost assumptions. Applying a proposal edits the draft
-   only. Preview the inputs and explicitly confirm one local experiment.
-3. Read the frozen report and its source identity. For an unknown outcome, query the original
-   request; do not blindly resend it. A report or Candidate decision is not trading authorization.
+1. 保存研究想法，在草稿中绑定已注册的策略与数据。使用自己的 CSV 时，说明来源及使用权，
+   先预览，再明确发布并选择其不可变版本。
+2. 检查参数、资金费率、币种和成本假设。应用提案只修改草稿。预览输入后，明确确认一次本地实验。
+3. 阅读冻结报告及其来源标识。结果未知时查询原请求，不要盲目重发。
+   报告或 Candidate 决策不构成交易授权。
 
-Keep private datasets, credentials, workspace databases, logs and screenshots with private
-content out of Git and public Issues. Use the bundled synthetic fixtures for reproductions.
-Never paste API keys into research text or commit model settings. Local Python strategy plugins
-are trusted executable code; there is no general sandbox for untrusted strategies.
+不要将私有数据集、凭据、工作空间数据库，以及含私密内容的日志和截图提交到 Git 或公开 Issue。
+复现问题请使用仓库自带的合成测试数据。不要把 API 密钥粘贴到研究文本中，也不要提交模型设置。
+本地 Python 策略插件属于受信任的可执行代码；项目没有用于运行不受信任策略的通用沙箱。
 
-## Improve QUINE
+## 参与改进 QUINE
 
-Start with [CONTRIBUTING](CONTRIBUTING.md): choose one small problem, reproduce it, run the
-relevant checks and open a draft PR from your fork. Useful work includes clearer first use,
-accessibility, reproducible bugs, tests and documentation. Maintainers handle integration and
-required reviews; community contribution does not grant direct write access to `main`.
+从[贡献指南](CONTRIBUTING.md)开始：选择一个小问题，复现问题，运行相关检查，
+再从你的 fork 提交 draft PR。欢迎改进首次使用体验、无障碍支持、可复现缺陷、测试与文档。
+维护者负责集成和必要审查；参与社区贡献不代表获得 `main` 的直接写入权限。
 
-Signing, notarization, clean-Mac installation and Paper 72-hour/7-day soak are separate binary or
-operational acceptance work. They are **not prerequisites for source contributions**. They remain
-unverified where [STATUS](docs/STATUS.md) says so and must not be advertised as completed.
+签名、公证、全新 Mac 安装和 Paper 连续 72 小时／7 天运行属于独立的安装包或运行验收工作，
+**不是贡献源码的前置条件**。[STATUS](docs/STATUS.md)中仍未验证的项目，不应被宣传为已完成。
 
-## Licensing
+## 许可说明
 
-The project's original source code is licensed under the [MIT License](LICENSE),
-Copyright (c) 2026 JayJcc. Third-party code, dependencies and notices retain their original
-licenses and attribution. This source-code license does not relicense third-party material or
-make a blanket MIT declaration for personal writing, images, branding or trademarks.
-Dependency license fields in the npm lockfiles describe those dependencies; this is not a claim
-that a full third-party licensing audit has been completed.
+项目原创源代码采用 [MIT 许可证](LICENSE)，Copyright (c) 2026 JayJcc。
+第三方代码、依赖及声明保留原有许可和署名。本源码许可不会重新授权第三方素材，
+也不代表将个人文案、图片、品牌或商标一概声明为 MIT。
+npm 锁文件中的依赖许可字段描述的是对应依赖，不代表已完成全面的第三方许可审计。
 
-[Current state](docs/STATUS.md) · [Mac development and workspace rules](docs/desktop-macos.md) ·
-[Engineering workflow](docs/governance/WORKFLOW.md) · [Desktop boundary](docs/adr/0050-desktop-only-product-delivery.md)
+[当前状态](docs/STATUS.md) · [Mac 开发与工作空间规则](docs/desktop-macos.md) ·
+[工程流程](docs/governance/WORKFLOW.md) · [桌面产品边界](docs/adr/0050-desktop-only-product-delivery.md)
