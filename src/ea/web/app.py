@@ -1343,6 +1343,8 @@ def create_app(settings: WebSettings) -> Any:
                     ),
                 ),
             )
+        except InputChangedError as caught:
+            return error(409, "input_conflict", str(caught))
         except (JobNotFoundError, ScenarioNotFoundError) as caught:
             return error(404, "not_found", str(caught))
         except ServiceBusyError as caught:

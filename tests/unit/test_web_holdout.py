@@ -474,8 +474,8 @@ def test_a_supplied_holdout_identity_is_enforced(tmp_path: Path) -> None:
         offered = listed.json()["scenarios"][0]["input_identity"]
 
         refused = _request(client, source, input_identity={**offered, "scenario_sha256": "0" * 64})
-        assert refused.status_code == 422, refused.text
-        assert refused.json()["error"]["code"] == "holdout_invalid"
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["error"]["code"] == "input_conflict"
         assert len(client.get("/api/backtests").json()["jobs"]) == 1
         assert client.get("/api/holdouts").json()["holdouts"] == []
 
