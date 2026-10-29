@@ -15,6 +15,9 @@
 .real-studio .panel h2:first-child { margin-top: 0; }
 .real-studio .real-proposal { margin: 18px 0; padding: 12px; background: var(--blue-soft); border-radius: 6px; }
 .real-studio .real-experiment { border-top: 1px solid var(--line); padding: 18px 0; }
+.real-studio .real-experiment strong { overflow-wrap: anywhere; }
+.real-studio .real-experiment-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
+.real-studio .real-experiment .notice button { border: 1px solid var(--line); border-radius: 7px; padding: 8px 14px; white-space: normal; }
 .real-studio pre, .real-studio small, .real-studio dd { overflow-wrap: anywhere; }
 .real-studio pre { white-space: pre-wrap; padding: 12px; background: var(--soft); font-size: 12px; max-height: 400px; overflow: auto; }
 .real-studio .field { margin: 14px 0; display: grid; gap: 6px; }

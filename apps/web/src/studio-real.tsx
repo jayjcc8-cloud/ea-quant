@@ -2,10 +2,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type SetStateAction } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { browserApi, type ApiAdapter } from './app'
-import { BindScenario, SelectDataset } from './user-strategies'
+import { BindScenario, SelectDataset, UnknownRecoveryControls } from './user-strategies'
 import { DraftEditor } from './draft-editor'
 import { DataWorkspace } from './research'
 import { DesktopSettings } from './desktop-settings'
+import { DesktopAbout } from './desktop-about'
 import { FrozenReportDetails, FrozenReportFacts, FrozenReportMetrics, ReportTrades } from './frozen-report'
 import { EquityCurve } from './equity-path'
 import { useRunRead } from './user-strategy-research'
@@ -105,7 +106,7 @@ function ResearchDetail({ api, id }: { api: ApiAdapter; id: string }) {
     </>}
     {tab === 'draft' && (isIntentDraft(draft) ? <BindScenario api={api} strategy={strategy} scenarios={catalog.value ?? []} catalogReady={!!catalog.value} catalogError={catalog.error || null} reloadCatalog={catalog.reload} changed={changed} failed={setError} />
       : <><ResearchDraft api={api} strategy={strategy} changed={changed} /><details className="real-data-binding"><summary>修改绑定数据或导入 CSV</summary><SelectDataset key={draft.revision} api={api} strategy={strategy} changed={changed} failed={setError} /></details></>)}
-    {tab === 'experiments' && <Experiments strategy={strategy} refresh={loaded.reload} />}
+    {tab === 'experiments' && <Experiments api={api} strategy={strategy} changed={changed} refresh={loaded.reload} />}
     {tab === 'proposal' && <ProposalReview api={api} strategy={strategy} proposalId={new URLSearchParams(location.search).get('proposal')} changed={changed} />}
     {!['overview', 'draft', 'experiments', 'proposal'].includes(tab) && <Unavailable />}
   </DetailSurface>
@@ -149,11 +150,37 @@ function ResearchDraft({ api, strategy, changed }: { api: ApiAdapter; strategy: 
       costs={<><Facts items={[[ '手续费', source.value?.commission ], ['滑点', source.value?.slippage], ['延迟', source.value?.latency]]} /><p className="muted">成本由所选场景提供，当前只读。保存草稿后，进入独立确认页核对本次执行。</p></>} />
   </>
 }
-function Experiments({ strategy, refresh }: { strategy: UserStrategy; refresh: () => void }) {
+function ExperimentControls({ api, strategyId, item, changed }: { api: ApiAdapter; strategyId: string; item: UserStrategyExperiment; changed: (next: UserStrategy) => void }) {
+  const [busy, setBusy] = useState(false), [error, setError] = useState('')
+  const sending = useRef(false), active = useRef(true)
+  useEffect(() => { active.current = true; return () => { active.current = false } }, [])
+  const stop = async () => {
+    if (sending.current || !api.cancelUserStrategyExperiment) return
+    sending.current = true; setBusy(true); setError('')
+    try {
+      const next = await api.cancelUserStrategyExperiment(strategyId, item.launch_intent_id)
+      if (next.user_strategy_id !== strategyId) throw new Error('研究身份不一致')
+      if (active.current) changed(next)
+    } catch (e) {
+      if (active.current) setError(`${reason(e)}。请重新读取研究核对停止结果；不会自动重试或重跑。`)
+    } finally { sending.current = false; if (active.current) setBusy(false) }
+  }
+  if (item.owner !== 'quine') return null
+  return <>
+    {['confirmed', 'running', 'stopping'].includes(item.status) && <div className="real-experiment-controls">
+      <button className="button" disabled={busy || item.status === 'stopping' || !api.cancelUserStrategyExperiment} onClick={() => void stop()}>{busy ? '正在请求停止…' : '停止这次运行'}</button>
+      <p className="muted" role="status">{item.status === 'stopping' ? '停止请求已受理，尚未证实停止；等待运行所有者记录终态。' : '停止请求由运行所有者处理，以返回的状态为准。'}</p>
+    </div>}
+    <ErrorNote>{error}</ErrorNote>
+    {item.status === 'unknown' && <UnknownRecoveryControls strategyId={strategyId} item={item} changed={changed} recover={api.recoverUserStrategyExperiment} diagnosticsHref="/settings/about" />}
+  </>
+}
+function Experiments({ api, strategy, changed, refresh }: { api: ApiAdapter; strategy: UserStrategy; changed: (next: UserStrategy) => void; refresh: () => void }) {
   return <section className="panel"><div className="section-heading"><h2>实验记录</h2><button className="button" onClick={refresh}>重新读取研究</button></div>
     {!strategy.experiments.length && <p className="muted">尚无实验；保存草稿不会自动执行。</p>}
     {strategy.experiments.map(item => <article className="real-experiment" key={item.launch_intent_id}><strong>{item.launch_intent_id}</strong><p>冻结 r{item.payload.draft_revision} · {item.status}{item.phase ? ` · ${item.phase}` : ''}</p>
       {item.message && <p>{item.message}</p>}{item.status === 'unknown' && <p>结果未知。只查询原请求，不重新派发。</p>}
+      <ExperimentControls api={api} strategyId={strategy.user_strategy_id} item={item} changed={changed} />
       {item.job_id && <Link className="button" to={`/report/${encodeURIComponent(item.job_id)}/overview`}>{item.report_ready ? '打开冻结报告' : '查看运行与报告状态'}</Link>}
     </article>)}
   </section>
@@ -393,7 +420,7 @@ function WorkspaceNav({ api }: { api: ApiAdapter }) {
 }
 export function StudioRoutes({ api }: { api: ApiAdapter }) {
   return <div className="studio real-studio" data-theme="light"><WorkspaceNav api={api} />
-    <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/records" element={<Records api={api} />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} />} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="/settings/workspace" element={<div className="page"><PageHeader title="工作区" subtitle="核对研究保存位置；更换目录在下次启动生效。" /><DesktopSettings api={api} section="workspace" onSaved={() => {}} /></div>} /><Route path="*" element={<Unavailable />} /></Routes></main>
+    <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/records" element={<Records api={api} />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} />} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="/settings/workspace" element={<div className="page"><PageHeader title="工作区" subtitle="核对研究保存位置；更换目录在下次启动生效。" /><DesktopSettings api={api} section="workspace" onSaved={() => {}} /></div>} /><Route path="/settings/about" element={<div className="page"><PageHeader title="诊断与备份" /><DesktopAbout api={api} /></div>} /><Route path="*" element={<Unavailable />} /></Routes></main>
   </div>
 }
 export default function RealStudio() { return <BrowserRouter basename="/studio"><StudioRoutes api={browserApi} /></BrowserRouter> }

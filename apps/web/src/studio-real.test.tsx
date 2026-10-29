@@ -380,3 +380,114 @@ it('keeps the research selection and historical call identity when the workspace
   expect(picker.value).toBe('')
   expect(screen.getByText('当次连接：历史连接名称 · v1')).toBeTruthy()
 })
+
+// These are owner projections, not simulated engine or OS-stop evidence.
+function controlRecord(overrides: Partial<UserStrategy['experiments'][number]> = {}): UserStrategy['experiments'][number] {
+  return {
+    launch_intent_id: 'original-control', request_id: 'request-control', payload_sha256: 'frozen',
+    payload: { draft_revision: 1, scenario_id: 'sample.yaml', parameters: { target_quantity: 1 },
+      preview_identity: 'original-preview', approved_budget: { max_model_calls: 0, max_backtests: 1 } },
+    task_id: null, job_id: null, status: 'running', created_at: '2026-10-29', owner: 'quine',
+    attempt_id: 'attempt-original', core_revision: 4, slot_held: true, ...overrides,
+  }
+}
+
+it('requests stop once and renders stopping until an owner terminal receipt is read', async () => {
+  let current = { ...strategy, experiments: [controlRecord()] }
+  let finish!: (value: UserStrategy) => void
+  const cancel = vi.fn(() => new Promise<UserStrategy>(resolve => { finish = resolve })), launch = vi.fn()
+  open(adapter({ getUserStrategy: async () => current, cancelUserStrategyExperiment: cancel, launchUserStrategyExperiment: launch }), '/research/real-idea/experiments')
+  const stop = await screen.findByRole('button', { name: '停止这次运行' })
+  fireEvent.click(stop); fireEvent.click(stop)
+  expect(cancel).toHaveBeenCalledExactlyOnceWith('real-idea', 'original-control')
+  current = { ...strategy, experiments: [controlRecord({ status: 'stopping' })] }
+  finish(current)
+  await screen.findByText(/停止请求已受理.*尚未证实停止/)
+  expect((screen.getByRole('button', { name: '停止这次运行' }) as HTMLButtonElement).disabled).toBe(true)
+  current = { ...strategy, experiments: [controlRecord({ status: 'cancelled', slot_held: false })] }
+  await userEvent.click(screen.getByRole('button', { name: '重新读取研究' }))
+  await screen.findByText(/冻结 r1 · cancelled/)
+  expect(screen.queryByRole('button', { name: '停止这次运行' })).toBeNull()
+  expect(current.experiments[0].payload).toEqual(controlRecord().payload)
+  expect(launch).not.toHaveBeenCalled()
+})
+
+it('keeps the last owner state and exposes a refused stop without retry or redispatch', async () => {
+  const cancel = vi.fn().mockRejectedValue(new UserStrategyRequestError('late_cancel_refused', 'owner already committed')), launch = vi.fn()
+  open(adapter({ getUserStrategy: async () => ({ ...strategy, experiments: [controlRecord()] }), cancelUserStrategyExperiment: cancel, launchUserStrategyExperiment: launch }), '/research/real-idea/experiments')
+  await userEvent.click(await screen.findByRole('button', { name: '停止这次运行' }))
+  await screen.findByRole('alert')
+  expect(screen.getByRole('alert').textContent).toContain('owner already committed')
+  expect(screen.getByText(/冻结 r1 · running/)).toBeTruthy()
+  expect(cancel).toHaveBeenCalledTimes(1); expect(launch).not.toHaveBeenCalled()
+})
+
+it('prepares recovery explicitly, queries across reopen, then releases only a ready owner receipt', async () => {
+  const recovery = { status: 'prepare_required' as const, preparation_id: null, prepared_at: null, released_at: null }
+  const original = controlRecord({ status: 'unknown', recovery })
+  let current: UserStrategy = { ...strategy, experiments: [original] }
+  const recover = vi.fn(async (_id: string, _intent: string, input: { action: string; preparation_id: string }) => {
+    current = { ...current, experiments: [{ ...current.experiments[0], core_revision: input.action === 'prepare' ? 5 : 7,
+      slot_held: input.action !== 'release', recovery: { ...recovery, status: input.action === 'prepare' ? 'restart_required' : 'released', preparation_id: input.preparation_id } }] }
+    return current
+  })
+  const launch = vi.fn(), readPreview = vi.fn(async () => preview)
+  const api = adapter({ getUserStrategy: async () => current, recoverUserStrategyExperiment: recover,
+    launchUserStrategyExperiment: launch, previewUserStrategyExperiment: readPreview })
+  const view = open(api, '/research/real-idea/experiments')
+  const prepare = await screen.findByRole('button', { name: '记录恢复准备（需重启 Mac）' })
+  expect(recover).not.toHaveBeenCalled()
+  fireEvent.click(prepare); fireEvent.click(prepare)
+  await screen.findByText(/恢复准备已保存/)
+  expect(recover).toHaveBeenCalledExactlyOnceWith('real-idea', 'original-control', {
+    action: 'prepare', attempt_id: 'attempt-original', expected_revision: 4, preparation_id: expect.any(String),
+  })
+  expect(screen.queryByRole('button', { name: '保留未知结果并释放运行名额' })).toBeNull()
+  view.unmount()
+  open(api, '/research/real-idea/experiments')
+  await screen.findByText(/恢复准备已保存/)
+  expect(recover).toHaveBeenCalledTimes(1)
+  current = { ...current, experiments: [{ ...current.experiments[0], core_revision: 6, recovery: { ...current.experiments[0].recovery!, status: 'ready' } }] }
+  await userEvent.click(screen.getByRole('button', { name: '重新读取研究' }))
+  await userEvent.click(await screen.findByRole('button', { name: '保留未知结果并释放运行名额' }))
+  await screen.findByText(/结果仍未知；核心已验证旧计算停止并释放运行名额/)
+  expect(recover).toHaveBeenLastCalledWith('real-idea', 'original-control', {
+    action: 'release', attempt_id: 'attempt-original', expected_revision: 6, preparation_id: recover.mock.calls[0][2].preparation_id,
+  })
+  expect(current.experiments[0].status).toBe('unknown')
+  expect(current.experiments[0].payload).toEqual(original.payload)
+  expect(launch).not.toHaveBeenCalled(); expect(readPreview).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('link', { name: '准备一次实验' }))
+  await screen.findByRole('button', { name: '确认并运行一次' })
+  expect(readPreview).toHaveBeenCalledExactlyOnceWith('real-idea'); expect(launch).not.toHaveBeenCalled()
+})
+
+it.each([
+  { recovery: null },
+  { recovery: { status: 'unavailable' as const, preparation_id: null, prepared_at: null, released_at: null } },
+  { slot_held: null }, { attempt_id: null }, { core_revision: null },
+])('does not invent recovery authority from an unknown record: %j', async missing => {
+  const recover = vi.fn(), launch = vi.fn()
+  const item = controlRecord({ status: 'unknown', recovery: { status: 'ready', preparation_id: 'prep', prepared_at: 1, released_at: null }, ...missing })
+  open(adapter({ getUserStrategy: async () => ({ ...strategy, experiments: [item] }), recoverUserStrategyExperiment: recover, launchUserStrategyExperiment: launch }), '/research/real-idea/experiments')
+  await screen.findByLabelText('未知运行恢复')
+  expect(screen.queryByRole('button', { name: '保留未知结果并释放运行名额' })).toBeNull()
+  expect(screen.queryByRole('button', { name: '记录恢复准备（需重启 Mac）' })).toBeNull()
+  expect(recover).not.toHaveBeenCalled(); expect(launch).not.toHaveBeenCalled()
+})
+
+it('retains unknown after a failed recovery and rereads the same request on reopen', async () => {
+  const recover = vi.fn().mockRejectedValue(new Error('receipt lost')), launch = vi.fn()
+  const current = { ...strategy, experiments: [controlRecord({ status: 'unknown', recovery: { status: 'prepare_required' as const, preparation_id: null, prepared_at: null, released_at: null } })] }
+  const api = adapter({ getUserStrategy: async () => current, recoverUserStrategyExperiment: recover, launchUserStrategyExperiment: launch })
+  const view = open(api, '/research/real-idea/experiments')
+  await userEvent.click(await screen.findByRole('button', { name: '记录恢复准备（需重启 Mac）' }))
+  expect((await screen.findByRole('alert')).textContent).toContain('不会自动重试或重跑')
+  view.unmount(); open(api, '/research/real-idea/experiments')
+  await userEvent.click(await screen.findByRole('button', { name: '重新读取研究' }))
+  await screen.findByText('original-control')
+  expect(recover).toHaveBeenCalledTimes(1); expect(launch).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('link', { name: '查看脱敏诊断与备份说明' }))
+  await screen.findByRole('heading', { name: '关于 QUINE' })
+  expect(screen.getByText('手动备份、恢复与升级')).toBeTruthy()
+})

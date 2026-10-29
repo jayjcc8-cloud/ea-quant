@@ -46,7 +46,10 @@ soak. Those remain separate binary/operational claims. No release or live connec
   the assistant can explicitly select a research connection or follow the workspace default.
   Saving never calls a provider; selection affects future sends and preserves historical call
   identities and approved rounds. Simulation, Live, batches, holdout and Candidate promotion
-  are not connected in this entry. Development and self-contained local candidate build modes exist.
+  are not connected in this entry. Experiment records expose owner-confirmed stop requests and
+  the existing explicit unknown recovery preparation/release controls. A stopping receipt is not
+  a confirmed stop; releasing a verified slot retains the unknown result and frozen budget/input.
+  Development and self-contained local candidate build modes exist.
 - **Independent offline v3:** `apps/web/studio/` implements the 39-view design with resettable
   synthetic scenarios and browser-local persistence. [v3 documentation](frontend-v3/README.md)
   links its bounded browser, regression and visual evidence; report and model-editor refinements
