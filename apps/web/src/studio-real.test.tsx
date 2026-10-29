@@ -286,3 +286,97 @@ it('reads core-owned reports from persisted research references after reopen eve
   expect(screen.queryByText('暂无实验记录。')).toBeNull()
   expect(legacy).not.toHaveBeenCalled(); expect(launch).not.toHaveBeenCalled()
 })
+
+const modelProfile = (id: string, name: string) => ({
+  schema: 'radian.settings-status.v1' as const, settings_file: '/fixture/settings.json', api_key_env: null,
+  id, name, revision: 1, route_version: id, provider: 'openai-chat-completions-compatible', model: `${id}-model`,
+  base_url: 'http://127.0.0.1:9999/v1', configured: true, credential_available: true,
+})
+
+it('edits connections from v3, cancels without saving and retains ordinary inputs on save failure', async () => {
+  const first = modelProfile('first', '本地连接')
+  const status = { workspace: '/fixture/current', next_workspace: '/fixture/current', theme: 'system' as const, startup_error: null,
+    model: { ...first, default_profile_id: 'first', profiles: [first] } }
+  const save = vi.fn().mockRejectedValue(new Error('保存失败；原设置保留。')), send = vi.fn(), launch = vi.fn()
+  open(adapter({ desktopSettings: async () => status, saveDesktopSettings: save, sendUserStrategyMessage: send, launchUserStrategyExperiment: launch }), '/')
+  await userEvent.click(screen.getByRole('link', { name: '模型连接' }))
+  const key = await screen.findByLabelText('新 API Key') as HTMLInputElement
+  expect(key.value).toBe('')
+  fireEvent.change(screen.getByLabelText('模型 ID'), { target: { value: 'cancelled-model' } })
+  fireEvent.change(key, { target: { value: 'synthetic-test-only' } })
+  await userEvent.click(screen.getByRole('button', { name: '取消未保存的修改' }))
+  expect((screen.getByLabelText('模型 ID') as HTMLInputElement).value).toBe('first-model')
+  expect(key.value).toBe('')
+  expect(save).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('button', { name: '添加连接' }))
+  fireEvent.change(screen.getByLabelText('连接名称'), { target: { value: '新连接' } })
+  fireEvent.change(screen.getByLabelText('模型 ID'), { target: { value: 'new-model' } })
+  fireEvent.change(key, { target: { value: 'synthetic-test-only' } })
+  expect(JSON.stringify(sessionStorage)).not.toContain('synthetic-test-only')
+  expect(JSON.stringify(localStorage)).not.toContain('synthetic-test-only')
+  await userEvent.click(screen.getByRole('button', { name: '保存模型设置' }))
+  await screen.findByText('保存失败；原设置保留。')
+  expect((screen.getByLabelText('连接名称') as HTMLInputElement).value).toBe('新连接')
+  expect((screen.getByLabelText('模型 ID') as HTMLInputElement).value).toBe('new-model')
+  expect(key.value).toBe('')
+  expect(save).toHaveBeenCalledTimes(1)
+  expect(save.mock.calls[0][0].model_profile).toMatchObject({ name: '新连接', model: 'new-model', api_key: 'synthetic-test-only' })
+  expect(send).not.toHaveBeenCalled(); expect(launch).not.toHaveBeenCalled()
+})
+
+it('configures a fresh workspace through v3 and explicitly selects its connection before one send', async () => {
+  const first = modelProfile('first', '本地连接')
+  let model = { ...first, configured: false, default_profile_id: 'legacy', profiles: [] as ReturnType<typeof modelProfile>[] }
+  const desktop = () => ({ workspace: '/fixture/fresh', next_workspace: '/fixture/fresh', theme: 'system' as const, startup_error: null, model })
+  let doc = { ...strategy, model_profile_id: 'legacy' }
+  const save = vi.fn(async (body: { model_profile?: { id: string; name: string }; default_model_profile?: string }) => {
+    if (body.model_profile) model = { ...model, profiles: [{ ...first, ...body.model_profile }] }
+    if (body.default_model_profile) model = { ...model, configured: true, default_profile_id: body.default_model_profile }
+    return desktop()
+  })
+  const select = vi.fn(async (_id: string, profileId: string | null) => { doc = { ...doc, model_profile_id: profileId ?? '' }; return doc })
+  const send = vi.fn(async (_id: string, body: { call_id: string }) => ({ ...doc, calls: [{ call_id: body.call_id, status: 'observed', base_revision: 1, route: {}, usage_available: false } as UserStrategy['calls'][number]] }))
+  const api = adapter({ getUserStrategy: async () => doc, desktopSettings: async () => desktop(), saveDesktopSettings: save,
+    settingsStatus: async () => model, selectUserStrategyModelProfile: select, sendUserStrategyMessage: send })
+  open(api, '/research/real-idea/overview')
+  fireEvent.change(await screen.findByLabelText('消息'), { target: { value: '检查草稿' } })
+  expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(true)
+  await userEvent.click(screen.getByRole('link', { name: '管理模型连接' }))
+  await userEvent.click(await screen.findByRole('button', { name: '添加连接' }))
+  fireEvent.change(screen.getByLabelText('连接名称'), { target: { value: '本地连接' } })
+  fireEvent.change(screen.getByLabelText('模型 ID'), { target: { value: 'first-model' } })
+  await userEvent.click(screen.getByRole('button', { name: '保存模型设置' }))
+  await userEvent.click(await screen.findByRole('button', { name: '设为默认 本地连接' }))
+  await screen.findByText('工作区默认已更改；历史调用和已批准轮次保持原配置。')
+  expect(send).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('link', { name: '新建研究' }))
+  // Re-open the persisted research with the existing direct route contract.
+  cleanup()
+  open(api, '/research/real-idea/overview')
+  const picker = await screen.findByLabelText('本研究模型连接')
+  expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(true)
+  await userEvent.selectOptions(picker, model.profiles[0].id)
+  expect(select).toHaveBeenCalledExactlyOnceWith('real-idea', model.profiles[0].id)
+  const button = screen.getByRole('button', { name: '发送一次模型请求' })
+  await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false))
+  fireEvent.click(button); fireEvent.click(button)
+  await screen.findByRole('heading', { name: '调用记录' })
+  expect(send).toHaveBeenCalledTimes(1)
+  expect(send.mock.calls[0][1]).toMatchObject({ approved_budget: { max_model_calls: 1, max_backtests: 0 } })
+})
+
+it('keeps the research selection and historical call identity when the workspace default changes', async () => {
+  const first = modelProfile('first', '原连接'), second = modelProfile('second', '新默认')
+  const historical = { call_id: 'old', status: 'observed', base_revision: 1, route: {}, usage_available: false,
+    model_profile: { id: 'first', name: '历史连接名称', revision: 1, route_version: 'old' } } as UserStrategy['calls'][number]
+  let doc = { ...strategy, model_profile_id: 'first' as string | null, calls: [historical] }
+  const select = vi.fn(async (_id: string, profileId: string | null) => { doc = { ...doc, model_profile_id: profileId }; return doc })
+  open(adapter({ getUserStrategy: async () => doc, settingsStatus: async () => ({ ...second, default_profile_id: 'second', profiles: [first, second] }), selectUserStrategyModelProfile: select }), '/research/real-idea/overview')
+  const picker = await screen.findByLabelText('本研究模型连接') as HTMLSelectElement
+  expect(picker.value).toBe('first')
+  expect(screen.getByText('当次连接：历史连接名称 · v1')).toBeTruthy()
+  await userEvent.selectOptions(picker, '')
+  expect(select).toHaveBeenCalledExactlyOnceWith('real-idea', null)
+  expect(picker.value).toBe('')
+  expect(screen.getByText('当次连接：历史连接名称 · v1')).toBeTruthy()
+})

@@ -32,8 +32,11 @@ The stable data root is `~/Library/Application Support/QUINE`:
 - `scenarios/` contains user-editable registered scenarios. First use seeds the two synthetic
   sample files once; an upgrade never overwrites them.
 - `settings.json` is the existing model settings format. It starts absent. Native v3's model page
-  reads connection status only. The existing legacy editor supports provider, model ID, Base URL
-  and write-only API key inputs; that editor is not connected to the native v3 page.
+  reuses the desktop editor to create/edit/cancel/save named connections, including provider,
+  model ID, Base URL and write-only API key inputs. Set a workspace default here; in the research
+  assistant, explicitly choose a connection or follow that default. Existing fixed research
+  selections do not change when the default changes. Historical calls and approved rounds keep
+  their recorded connection identity.
   Save checks local format only; it never authenticates or calls a provider. Credentials are
   stored in this existing file with mode 0600, not in WebView storage. Blank key retains the
   current key; changing provider/endpoint requires re-entry or explicit clearing. No developer
@@ -88,7 +91,9 @@ The first real v3 slice opens at `/studio` in the native window. It reuses the e
 research, CSV, experiment-preview/confirmation and official report services. Saving and applying
 a proposal do not run an experiment. Unknown confirmation receipts retain their request identity
 and offer reads only. Simulation, Live, batches, holdout and Candidate promotion are unavailable
-in this entry. Model configuration is read-only here. The desktop has one normal entry;
+in this entry. Model connections can be configured here; saving does not test authentication.
+Return to a research and explicitly send a message to authorize one model call and zero backtests.
+The desktop has one normal entry;
 `/strategies` remains a migration fallback without a parallel navigation link. The standalone
 offline studio remains a synthetic design preview and is not the desktop candidate. The v3
 research/report header, detail layout and assistant surface are shared with that design, while

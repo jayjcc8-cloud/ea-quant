@@ -94,3 +94,25 @@
   .real-studio .primary-nav a { padding: 0 4px; }
   .real-studio .primary-nav a small { display: none; }
 }
+
+/* Keep the existing desktop settings editor in v3's directory/editor layout. */
+.real-studio .settings-form-model.panel { padding: 0; border: 0; max-width: none; }
+.real-studio .settings-form-model .model-connection-layout { grid-template-columns: 280px minmax(0, 1fr); gap: 24px; }
+.real-studio .settings-form-model .model-directory { padding-right: 0; border: 0; }
+.real-studio .settings-form-model .resource-entries { display: block; padding: 0; list-style: none; }
+.real-studio .settings-form-model .resource-entry { overflow-wrap: anywhere; }
+.real-studio .settings-form-model .model-editor { max-width: none; border: 1px solid var(--line); border-radius: 9px; }
+.real-studio .settings-form-model .model-editor > label:not(.model-key-clear) { display: grid; grid-template-columns: 130px minmax(0, 1fr); align-items: center; gap: 16px; }
+.real-studio .settings-form-model .model-editor > label input, .real-studio .settings-form-model .model-editor > label select { margin-top: 0; }
+.real-studio .settings-form-model .model-editor > button { background: var(--primary); color: var(--on-primary); }
+.real-studio .research-model-picker { display: grid; gap: 6px; margin-top: 12px; font-size: 13px; }
+.real-studio .research-model-picker select { min-width: 0; width: 100%; }
+.real-studio .research-model-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 8px; font-size: 12px; }
+.real-studio .research-model-actions .button { font-size: 12px; padding: 4px 8px; }
+@media (max-width: 1199px) {
+  .real-studio .settings-form-model .model-connection-layout { grid-template-columns: 240px minmax(0, 1fr); gap: 20px; }
+}
+@media (max-width: 799px) {
+  .real-studio .settings-form-model .model-connection-layout { grid-template-columns: minmax(0, 1fr); }
+  .real-studio .settings-form-model .model-editor > label:not(.model-key-clear) { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+}
