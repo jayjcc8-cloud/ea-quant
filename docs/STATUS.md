@@ -48,8 +48,12 @@ soak. Those remain separate binary/operational claims. No release or live connec
   identities and approved rounds. Successful frozen reports can prepare chronological holdout:
   the user selects a backend-offered compatible strictly later input and separately confirms
   its displayed identity. Saved relationships and both independent reports reopen in v3;
-  uncertain receipts query existing relationships without resending. Simulation, Live, batches and Candidate promotion
-  are not connected in this entry. Experiment records expose owner-confirmed stop requests and
+  uncertain receipts query existing relationships without resending. Completed relationships can
+  explicitly create EVALUATED research Candidates. History/details expose frozen identities,
+  parameters and both v3 reports; human acceptance/rejection requires a reason and survives reopen.
+  Missing or changed evidence prevents decisions; uncertain writes only read back saved state.
+  EVALUATED means evidence completeness, not statistical validity or profitability; ACCEPTED grants
+  no execution permission. Simulation, Live and batches are not connected in this entry. Experiment records expose owner-confirmed stop requests and
   the existing explicit unknown recovery preparation/release controls. A stopping receipt is not
   a confirmed stop; releasing a verified slot retains the unknown result and frozen budget/input.
   Development and self-contained local candidate build modes exist.

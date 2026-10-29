@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import type { ApiAdapter, BacktestJob, ChronologicalHoldout, ScenarioSummary } from './app'
 import { useRunRead } from './user-strategy-research'
+import { CandidateFromHoldout } from './studio-candidates'
 import { PageHeader, Icon } from '../studio/src/layout'
 
 const reason = (error: unknown) => error instanceof Error ? error.message : '读取失败'
@@ -105,7 +106,7 @@ function HoldoutCreator({ api, jobId }: { api: ApiAdapter; jobId: string }) {
           {!confirming && !uncertain && <><label className="field" htmlFor="holdout-input">留出输入<select id="holdout-input" value={selected} disabled={!catalog} onChange={event => setSelected(event.target.value)}><option value="">选择兼容且严格更晚的输入</option>{catalog?.map(item => <option key={targetKey(item)} value={targetKey(item)}>{item.name}</option>)}</select></label>
             {catalog?.length === 0 && <p>没有兼容且严格更晚的输入。</p>}<button className="button" onClick={() => { setCatalog(null); setSelected(''); setError(''); setRefresh(n => n + 1) }}>重新读取输入</button></>}
           {target && <TargetFacts target={target} />}{target && !target.input_identity && <Note>输入身份未提供，不能确认。请重新读取输入。</Note>}
-          <p className="notice">策略、参数、资金与成本保持来源冻结值。原报告不变；候选晋级、模拟、实盘与批量尚未接入。</p>
+          <p className="notice">策略、参数、资金与成本保持来源冻结值。完成后可创建人工研究候选；模拟、实盘与批量尚未接入。</p>
           <Note>{error}</Note>
           {uncertain ? <><p role="status">{busy ? '正在等待运行所有者响应…' : '这次确认只查询已有记录，不再提交。'}</p><button className="button" disabled={busy} onClick={() => void query()}>查询已有留出</button></>
             : <div className="button-row">{confirming ? <><button className="button" onClick={() => { setConfirming(false); setError('') }}>返回选择</button><button className="button primary" disabled={busy} onClick={() => void submit()}>确认并运行留出</button></>
@@ -115,8 +116,7 @@ function HoldoutCreator({ api, jobId }: { api: ApiAdapter; jobId: string }) {
   </div>
 }
 
-function RunEvidence({ api, id, label, refresh }: { api: ApiAdapter; id: string; label: string; refresh: number }) {
-  const run = useRunRead(api, id, String(refresh))
+function RunEvidence({ run, id, label }: { run: ReturnType<typeof useRunRead>; id: string; label: string }) {
   return <section className="panel" aria-label={label}><h2>{label}</h2><p>{id}</p>
     {run?.kind === 'loading' && <p role="status">正在读取运行…</p>}{run?.kind === 'unavailable' && <Note>{run.note}</Note>}
     {run?.kind === 'ready' && <><p className="status">succeeded · 正式报告可读</p><p><Window data={run.job.input_snapshot?.scenario.data} /></p>
@@ -128,6 +128,14 @@ function RunEvidence({ api, id, label, refresh }: { api: ApiAdapter; id: string;
       ]} /><Link className="button" to={reportUrl(id)}>打开{label}</Link></>}
   </section>
 }
+function HoldoutEvidence({ api, relation, refresh }: { api: ApiAdapter; relation: ChronologicalHoldout; refresh: number }) {
+  const source = useRunRead(api, relation.source_job_id, String(refresh))
+  const holdout = useRunRead(api, relation.holdout_job_id, String(refresh))
+  return <><div className="two-column"><RunEvidence run={source} id={relation.source_job_id} label="来源报告" /><RunEvidence run={holdout} id={relation.holdout_job_id} label="留出报告" /></div>
+    <p className="notice">两次运行使用来源冻结的策略、参数、资金与成本。时间先后不代表验证通过；候选接受仅记录人工研究判断。</p>
+    <CandidateFromHoldout api={api} validationId={relation.validation_id} ready={source?.kind === 'ready' && holdout?.kind === 'ready'} />
+  </>
+}
 export function HoldoutDetailRoute({ api }: { api: ApiAdapter }) { const { id = '' } = useParams(); return <HoldoutDetail key={id} api={api} id={id} /> }
 function HoldoutDetail({ api, id }: { api: ApiAdapter; id: string }) {
   const [relation, setRelation] = useState<ChronologicalHoldout | null>(null), [error, setError] = useState(''), [refresh, setRefresh] = useState(0)
@@ -137,6 +145,6 @@ function HoldoutDetail({ api, id }: { api: ApiAdapter; id: string }) {
     return () => { active = false }
   }, [api, id, refresh])
   return <div className="page real-holdout"><PageHeader title="留出验证" subtitle={id} breadcrumb={<Link to="/records">回测记录 / 留出</Link>} actions={<button className="button" onClick={() => setRefresh(n => n + 1)}>重新读取状态</button>} />
-    <Note>{error}</Note>{relation && <><p>关联创建于 {relation.created_at}；结果以各自运行及正式报告为准。</p><div className="two-column"><RunEvidence api={api} id={relation.source_job_id} label="来源报告" refresh={refresh} /><RunEvidence api={api} id={relation.holdout_job_id} label="留出报告" refresh={refresh} /></div><p className="notice">两次运行使用来源冻结的策略、参数、资金与成本。时间先后不代表验证通过；候选晋级尚未接入。</p></>}
+    <Note>{error}</Note>{relation && <><p>关联创建于 {relation.created_at}；结果以各自运行及正式报告为准。</p><HoldoutEvidence key={relation.validation_id} api={api} relation={relation} refresh={refresh} /></>}
   </div>
 }

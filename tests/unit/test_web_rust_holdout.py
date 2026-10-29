@@ -302,6 +302,86 @@ def test_the_relationship_outlives_a_core_restart(
 # --- one explicitly selected later dataset -----------------------------------
 
 
+def test_core_source_and_holdout_support_http_candidate_decision_and_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A human research decision binds real core evidence without another run."""
+    core = Core(tmp_path)
+    _STARTED.append(core)
+    settings = _web_settings(tmp_path, core)
+    _commissioned(settings.scenario_root)
+    _target(settings.scenario_root)
+    counts = _no_python_owner(monkeypatch)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        identity = _create_via_http(client)
+        source = _source_job(client, identity)
+        relation = _post_holdout(
+            client, source, identity=_offered(client, source, "later.yaml")
+        ).json()
+        holdout = relation["holdout_job_id"]
+        assert _await_job(client, holdout)["status"] == "succeeded"
+        reports = {
+            job: client.get(f"/api/backtests/{job}/report").content for job in (source, holdout)
+        }
+        created = client.post(
+            "/api/candidates",
+            headers=WRITE_HEADERS,
+            json={"validation_id": relation["validation_id"]},
+        )
+        assert created.status_code == 201, created.text
+        candidate = created.json()
+        assert candidate["status"] == "EVALUATED"
+        assert candidate["decision"] is None
+        assert candidate["projection"]["source"]["job_id"] == source
+        assert candidate["projection"]["holdout"]["job_id"] == holdout
+        url = f"/api/candidates/{candidate['candidate_id']}"
+        decision = {"outcome": "ACCEPTED", "reason": "Synthetic workflow evidence reviewed."}
+        refused = client.post(
+            f"{url}/decision", headers=WRITE_HEADERS, json={**decision, "reason": " "}
+        )
+        assert refused.status_code == 409
+        decided = client.post(f"{url}/decision", headers=WRITE_HEADERS, json=decision)
+        assert decided.status_code == 200, decided.text
+        accepted = decided.json()
+        assert accepted["status"] == "ACCEPTED"
+        assert accepted["fingerprint"] == candidate["fingerprint"]
+        assert accepted["projection"] == candidate["projection"]
+        assert accepted["decision"]["reason"] == decision["reason"]
+        assert (
+            client.post(f"{url}/decision", headers=WRITE_HEADERS, json=decision).json() == accepted
+        )
+        assert (
+            client.post(
+                f"{url}/decision",
+                headers=WRITE_HEADERS,
+                json={**decision, "outcome": "REJECTED"},
+            ).status_code
+            == 409
+        )
+        assert len(QuineBridge(core.socket).experiments()) == 2
+        assert client.get("/api/backtests").json()["jobs"] == []
+
+    core.stop()
+    restarted = Core(tmp_path, workspace=core.workspace)
+    _STARTED.append(restarted)
+    with TestClient(create_app(_web_settings(tmp_path, restarted)), base_url=ORIGIN) as client:
+        assert client.get(url).json() == accepted
+        assert client.get("/api/candidates").json()["candidates"] == [accepted]
+        for job, content in reports.items():
+            assert client.get(f"/api/backtests/{job}/report").content == content
+        assert len(QuineBridge(restarted.socket).experiments()) == 2
+        assert all(value == 0 for value in counts.values())
+        # A fresh read and decision must still verify the core's official bytes.
+        (restarted.workspace / "official" / holdout / "report.json").write_bytes(b"{}\n")
+        assert client.get(url).status_code == 409
+        assert (
+            client.post(f"{url}/decision", headers=WRITE_HEADERS, json=decision).status_code == 409
+        )
+        assert client.get("/api/candidates").json()["candidates"] == [
+            {"candidate_id": candidate["candidate_id"], "status": "UNAVAILABLE"}
+        ]
+
+
 def test_a_core_owned_success_holds_out_into_a_later_uploaded_dataset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
