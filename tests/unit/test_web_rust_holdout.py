@@ -444,8 +444,8 @@ def test_a_registered_target_that_changed_since_selection_is_refused(
         _target(settings.scenario_root, day="07")
 
         stale = _post_holdout(client, source, identity=offered)
-        assert stale.status_code == 422, stale.text
-        assert stale.json()["error"]["code"] == "holdout_invalid"
+        assert stale.status_code == 409, stale.text
+        assert stale.json()["error"]["code"] == "input_conflict"
         assert "changed" in stale.json()["error"]["message"]
         assert client.get("/api/holdouts").json()["holdouts"] == []
         assert bridge.experiments() == before, "the owner was never asked to admit this"
@@ -508,8 +508,8 @@ def test_a_window_only_change_is_refused_even_when_the_selected_data_is_identica
         assert refreshed["scenario_sha256"] != offered["scenario_sha256"]
 
         stale = _post_holdout(client, source, identity=offered)
-        assert stale.status_code == 422, stale.text
-        assert stale.json()["error"]["code"] == "holdout_invalid"
+        assert stale.status_code == 409, stale.text
+        assert stale.json()["error"]["code"] == "input_conflict"
         assert bridge.experiments() == before
         assert client.get("/api/holdouts").json()["holdouts"] == []
 

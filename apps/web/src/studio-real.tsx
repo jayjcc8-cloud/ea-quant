@@ -11,6 +11,7 @@ import { FrozenReportDetails, FrozenReportFacts, FrozenReportMetrics, ReportTrad
 import { EquityCurve } from './equity-path'
 import { useRunRead } from './user-strategy-research'
 import { isIntentDraft, UserStrategyRequestError, type UserStrategy, type UserStrategyExperiment, type UserStrategyPreview } from './user-strategies-api'
+import { HoldoutCreatorRoute, HoldoutDetailRoute, HoldoutLinks } from './studio-holdout'
 import { StorageFailureGuard } from './storage-failure-guard'
 import { AgentSurface, DetailSurface, DraftSurface, ReportOverviewSurface, PageHeader, Tabs, Logo, Icon } from '../studio/src/layout'
 import '../studio/src/report-overview.css'
@@ -46,7 +47,7 @@ function fact(value: unknown): string {
 }
 function Facts({ items }: { items: [string, unknown][] }) { return <dl className="key-values">{items.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{fact(value)}</dd></div>)}</dl> }
 function ErrorNote({ children }: { children: ReactNode }) { return children ? <p className="notice error" role="alert">{children}</p> : null }
-function Unavailable() { return <div className="page"><h1>此候选尚未接入</h1><p>模拟、实盘、批量、留出与候选晋级暂不可用。</p><Link to="/">返回研究</Link></div> }
+function Unavailable() { return <div className="page"><h1>此候选尚未接入</h1><p>模拟、实盘、批量与候选晋级暂不可用。</p><Link to="/">返回研究</Link></div> }
 
 function Home({ api }: { api: ApiAdapter }) {
   const list = useRead(useCallback(() => api.listResearch!(), [api]))
@@ -364,6 +365,7 @@ function Records({ api }: { api: ApiAdapter }) {
       {job ? <Link className="real-research-row" to={`/report/${encodeURIComponent(job.job_id)}/overview`}><span><strong>{research.name}</strong><small>{job.job_id}</small></span><span>{job.status} · {job.report_ready ? '报告可读' : '无正式报告'}</span></Link>
         : <section className="panel"><Link to={`/research/${encodeURIComponent(research.user_strategy_id)}/experiments`}>{research.name} · 查询原实验</Link><p>{experiment.launch_intent_id ?? '确认身份未提供'}</p><p>{experiment.job_id ? '运行暂不可读，未推断为失败或完成。' : '尚未登记运行，请查询原研究。'}</p><ErrorNote>{error}</ErrorNote></section>}
     </div>)}{records.value?.length === 0 && <p>暂无实验记录。</p>}
+    <HoldoutLinks api={api} />
   </div>
 }
 
@@ -383,7 +385,7 @@ function Report({ api, id }: { api: ApiAdapter; id: string }) {
   }, [api, id]))
   const evidence = run?.kind === 'ready' ? <section className="report-evidence" aria-label="报告解读与证据"><div className="report-evidence-heading"><h2>这份报告说明了什么</h2><small>本地引擎 · 已冻结事实 · 未调用模型</small></div><div className="report-reading"><p>净盈亏 <strong>{run.report.economics.net_pnl.amount} {run.report.economics.currency}</strong>；订单 / 成交 {run.report.economics.counts.orders} / {run.report.economics.counts.fills}。</p><p>单次运行不足以判断稳健性。数据与成本需先核对。</p></div><div className="report-evidence-links"><Link to={`/report/${encodeURIComponent(id)}/inputs`}>[1] 冻结输入与来源</Link><Link to={`/report/${encodeURIComponent(id)}/trades`}>[2] 交易明细</Link></div><div className="report-next-step"><h3>下一步检查</h3><p>核对交易与成本，再决定下一次独立实验。</p><Link className="button" to={`/report/${encodeURIComponent(id)}/trades`}>检查交易</Link></div></section> : undefined
   return <DetailSurface className="report-overview" assistant={source.value ? <Assistant api={api} strategy={source.value.owner} jobId={id} evidence={evidence} changed={owner => source.setValue(current => current ? { ...current, owner } : null)} /> : <AgentSurface context="冻结报告 · 只读证据" report history={<>{evidence}<p>未读取到唯一研究来源，会话暂不可用。</p><ErrorNote>{source.error}</ErrorNote></>} input={<small>不会生成替代回答。</small>} />}>
-    <PageHeader title={source.value ? `${source.value.owner.name} · 报告` : "冻结报告"} subtitle={<span title={id}>冻结报告 · {id.slice(0, 8)}{run?.kind === 'ready' ? ' · 已完成' : ''}</span>} breadcrumb={<Link to="/records" title={id}>回测记录 / {id.slice(0, 8)}</Link>} actions={<><button className="button" onClick={() => setRefresh(n => n + 1)}>重新读取报告</button>{source.value && <Link className="button primary" to={`/research/${encodeURIComponent(source.value.owner.user_strategy_id)}/draft`}>继续研究</Link>}</>} />
+    <PageHeader title={source.value ? `${source.value.owner.name} · 报告` : "冻结报告"} subtitle={<span title={id}>冻结报告 · {id.slice(0, 8)}{run?.kind === 'ready' ? ' · 已完成' : ''}</span>} breadcrumb={<Link to="/records" title={id}>回测记录 / {id.slice(0, 8)}</Link>} actions={<><button className="button" onClick={() => setRefresh(n => n + 1)}>重新读取报告</button>{run?.kind === 'ready' && <Link className="button" to={`/holdout/new/${encodeURIComponent(id)}`}>配置留出验证</Link>}{source.value && <Link className="button primary" to={`/research/${encodeURIComponent(source.value.owner.user_strategy_id)}/draft`}>继续研究</Link>}</>} />
     <Tabs active={tab} items={[{ id: 'overview', label: '概览' }, { id: 'trades', label: '交易' }, { id: 'inputs', label: '冻结输入' }, { id: 'files', label: '文件' }]} onChange={value => navigate(`/report/${encodeURIComponent(id)}/${value}`)} />
     {run?.kind === 'loading' && <p role="status">正在读取正式报告…</p>}{run?.kind === 'unavailable' && <ErrorNote>{run.note}</ErrorNote>}
     {run?.kind === 'ready' && <><FrozenReportFacts job={run.job} report={run.report} revision={source.value?.revision} />
@@ -391,6 +393,7 @@ function Report({ api, id }: { api: ApiAdapter; id: string }) {
       {tab === 'inputs' && <><p className="notice">冻结输入只读。当前草稿的后续修改不会改变本报告。</p><FrozenReportDetails job={run.job} report={run.report} path={path.value} /></>}
       {tab === 'trades' && <><ErrorNote>{analytics.error}</ErrorNote><ReportTrades report={run.report} analytics={analytics.value} view="complete" /><ReportTrades report={run.report} analytics={analytics.value} view="orders" /></>}
       {tab === 'files' && <section className="panel"><h2>正式产物</h2>{(['report.json', 'summary.txt', 'equity-path.json'] as const).map(name => <p key={name}><a className="button" href={api.artifactUrl(id, name)} download><Icon name="download" />{name}</a></p>)}<p>报告指纹：{run.job.report_sha256 ?? '未提供'}</p></section>}
+      <HoldoutLinks key={id} api={api} jobId={id} />
       {!['overview', 'inputs', 'trades', 'files'].includes(tab) && <Unavailable />}
     </>}
   </DetailSurface>
@@ -420,7 +423,7 @@ function WorkspaceNav({ api }: { api: ApiAdapter }) {
 }
 export function StudioRoutes({ api }: { api: ApiAdapter }) {
   return <div className="studio real-studio" data-theme="light"><WorkspaceNav api={api} />
-    <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/records" element={<Records api={api} />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} />} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="/settings/workspace" element={<div className="page"><PageHeader title="工作区" subtitle="核对研究保存位置；更换目录在下次启动生效。" /><DesktopSettings api={api} section="workspace" onSaved={() => {}} /></div>} /><Route path="/settings/about" element={<div className="page"><PageHeader title="诊断与备份" /><DesktopAbout api={api} /></div>} /><Route path="*" element={<Unavailable />} /></Routes></main>
+    <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/records" element={<Records api={api} />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} />} /><Route path="/holdout/new/:jobId" element={<HoldoutCreatorRoute api={api} />} /><Route path="/holdout/:id" element={<HoldoutDetailRoute api={api} />} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="/settings/workspace" element={<div className="page"><PageHeader title="工作区" subtitle="核对研究保存位置；更换目录在下次启动生效。" /><DesktopSettings api={api} section="workspace" onSaved={() => {}} /></div>} /><Route path="/settings/about" element={<div className="page"><PageHeader title="诊断与备份" /><DesktopAbout api={api} /></div>} /><Route path="*" element={<Unavailable />} /></Routes></main>
   </div>
 }
 export default function RealStudio() { return <BrowserRouter basename="/studio"><StudioRoutes api={browserApi} /></BrowserRouter> }
