@@ -6,4 +6,3 @@ export const latencyLabel = (latency?: Latency | null) => latency
   : 'Legacy latency omitted · effective 0 ms'
 export const slippageLabel = (slippage?: Slippage | null) => slippage ? `${slippage.slippage_bps} bps adverse slippage` : '0 bps slippage'
 export const commissionLabel = (commission?: Commission | null) => commission ? `${commission.policy} · ${commission.commission_bps} bps` : 'Legacy zero commission · 0 bps'
-

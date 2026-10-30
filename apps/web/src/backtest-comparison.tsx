@@ -316,4 +316,3 @@ function StrategyComparisonAssociation({ api, leftJobId, rightJobId, studio }: {
     </>}
   </section>
 }
-

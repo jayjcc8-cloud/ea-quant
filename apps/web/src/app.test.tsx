@@ -750,7 +750,7 @@ it('shows persisted commission assumptions and formal report fees', async () => 
   expect(await screen.findByText('deterministic-commission-v1 · 100 bps')).toBeTruthy()
   expect((await screen.findAllByText('2.03 USD')).length).toBeGreaterThan(0)
   expect(await screen.findByText('25 bps adverse slippage')).toBeTruthy()
-  expect(await screen.findByText('60000 ms execution latency')).toBeTruthy()
+  expect(await screen.findByText('60000 ms execution latency', { selector: 'span' })).toBeTruthy()
   expect(screen.queryByLabelText('Commission bps')).toBeNull()
 })
 

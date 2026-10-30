@@ -72,7 +72,7 @@ type Dataset = {
 type DatasetReference = { dataset_id?: string; source_sha256?: string }
 export type InputIdentity = DatasetReference & { scenario_sha256: string; data_sha256: string; record_count: number }
 export type StrategyParameterContract = {
-  name: string; type: 'decimal' | 'integer' | 'price-rule-v1' | 'price-rule-v1' | 'price-rule-v1' | 'price-rule-v1'
+  name: string; type: 'decimal' | 'integer' | 'price-rule-v1'
   default: string | number | null; current_value: string | number | null
   minimum: string | number; maximum: string | number | null
 }

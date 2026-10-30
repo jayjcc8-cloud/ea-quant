@@ -76,7 +76,8 @@ soak. Those remain separate binary/operational claims. No release or live connec
   reader; execution labels distinguish omitted latency (effective zero) from explicit zero.
   Accepted Candidates can independently confirm a finite local simulation; the budget uses
   ordinary audited stop, and reopening reads history without resuming. This needs no continuous
-  local uptime. It does not replace the separate 72-hour/7-day operational soak claim.
+  local uptime. The bounded historical review removed an unused report helper and duplicate
+  UI formatting/types; generated test roots now clean up after themselves. It does not replace the separate 72-hour/7-day operational soak claim.
 - **Historical release:** [EA v0.2.0](https://github.com/jayjcc8-cloud/ea-quant/releases/tag/v0.2.0)
   is the limited offline prerelease, not a QUINE desktop release.
 

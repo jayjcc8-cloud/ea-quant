@@ -72,3 +72,19 @@ it('does not select unfinished records and preserves missing metrics and differe
   expect(results.getAllByText('No report').length).toBeGreaterThan(0)
   expect(results.queryByText('+0.2 USD')).toBeNull()
 })
+
+it.each([
+  [undefined, 'Legacy latency omitted · effective 0 ms'],
+  [{ policy: 'deterministic-latency-v1', latency_ms: 0 }, '0 ms execution latency'],
+  [{ policy: 'deterministic-latency-v1', latency_ms: 60000 }, '60000 ms execution latency'],
+] as const)('labels frozen execution latency on the actual v3 report details route: %s', async (latency, label) => {
+  const frozen = job('a')
+  frozen.input_snapshot!.scenario.execution = { policy: 'next-bar-open', ...(latency === undefined ? {} : { latency }) }
+  const before = JSON.stringify(frozen)
+  const dispatch = vi.fn()
+  open(adapter({ getBacktest: async () => frozen, launchUserStrategyExperiment: dispatch }), '/report/a/inputs')
+  await userEvent.click(await screen.findByText('原始指标与冻结输入'))
+  expect(await screen.findByText(label)).toBeTruthy()
+  expect(JSON.stringify(frozen)).toBe(before)
+  expect(dispatch).not.toHaveBeenCalled()
+})
