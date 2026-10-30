@@ -17,10 +17,12 @@ The Apple Silicon Mac desktop is the product target. Browser previews support de
 | Surface | Available | Limits |
 | --- | --- | --- |
 | Native v3 `/studio` (`apps/web/src/studio-real.tsx`) | Save research, import/check CSV, bind strategy/data, edit drafts, preview and explicitly confirm local engine experiments, read frozen reports, select next-launch workspace | Development candidate; final native acceptance is pending |
-| Research assistant | Uses the existing model service when explicitly configured; draft changes and experiment confirmation remain separate | v3 model connection settings are read-only; calls to real model providers have not completed acceptance testing |
+| Research assistant and model connections | Create, edit, cancel or save connections; set the workspace default or select a research connection. Explicit Send calls the model; Apply only edits the draft | Saving does not validate authentication; real-provider calls have not completed acceptance testing |
+| Experiment stop and recovery | Request a stop and read owner status; unknown records expose existing recovery preparation and active-slot release controls | stopping is not confirmed stopped; release retains the unknown outcome, frozen input and spent budget. New experiments still need separate confirmation |
 | Offline design preview (`apps/web/studio/`) | Resettable synthetic scenes for layout and interaction work | No real engine, provider, account or exchange calls; demo results are not research evidence |
 | Chronological holdout | Select a compatible strictly later input from a successful report, separately confirm one core-owned run, and reopen the relationship and both frozen reports | Chronology does not establish unseen data, generalization or automatic promotion |
-| Simulation, Live, batches, Candidate promotion | Older engine/Paper tooling remains in the repository | These flows are **not connected in native v3**; external brokers and real-money trading are unavailable |
+| Manual research Candidates | Create EVALUATED from an explicitly selected completed holdout, inspect frozen evidence, and accept/reject with a reason; reopen history and reports | Complete evidence is not statistical validity or profitability; acceptance starts no experiment or simulation |
+| Simulation, Live, batches | Older engine/Paper tooling remains in the repository | These flows are **not connected in native v3**; external brokers and real-money trading are unavailable |
 
 Historical EA **0.2.0** is the package version and an earlier offline prerelease, not a new QUINE
 release. No real-time coverage, profitability, investment suitability or real-money trading is

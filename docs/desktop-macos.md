@@ -100,8 +100,13 @@ parameters, funding and costs stay frozen from the source. Input changes require
 uncertain receipts query saved relationships without resending. The records and report pages link
 to the relationship and both frozen reports after reopen. This establishes chronology only, not
 unseen data, generalization or a pass/fail decision.
-Simulation, Live, batches and Candidate promotion are unavailable
-in this entry. Model connections can be configured here; saving does not test authentication.
+A completed relationship can explicitly create an **EVALUATED** research Candidate. **研究候选历史**
+in records opens saved identities, frozen parameters and both v3 reports. Human acceptance or
+rejection requires a reason; reopen retains the same identity, reason and terminal state. Changed
+or missing evidence prevents decisions; uncertain creation/decision replies only query saved
+state. EVALUATED means complete selected evidence, not statistical validity or profitability.
+ACCEPTED records research judgment and starts no experiment or simulation.
+Simulation, Live and batches are unavailable in this entry. Model connections can be configured here; saving does not test authentication.
 Return to a research and explicitly send a message to authorize one model call and zero backtests.
 The desktop has one normal entry;
 `/strategies` remains a migration fallback without a parallel navigation link. The standalone
