@@ -296,7 +296,7 @@ function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapte
       <details className="agent-context"><summary>来源与上下文</summary><p>研究 {id} · 草稿 r{strategy.draft.revision}</p><Link to={`/research/${encodeURIComponent(id)}/draft`}>查看当前草稿</Link>{jobId && <><p><Link to={`/report/${encodeURIComponent(jobId)}/inputs`}>冻结输入</Link></p><Link to={`/report/${encodeURIComponent(jobId)}/trades`}>交易证据</Link></>}</details>
       {strategy.messages.map(message => <article className={`message ${message.role}`} key={message.message_id}><small>{message.role === 'user' ? '你' : '模型 · 推断'}</small><p>{message.text}</p></article>)}
       {(strategy.calls.length > 0 || localUnknown.length > 0) && <section className="call-history" aria-label="模型调用记录"><h3>调用记录</h3>
-        {strategy.calls.map(call => <article key={call.call_id}><code>{call.call_id}</code><p>r{call.base_revision} · {call.status}</p>{call.status === 'unknown' && <p>结果与用量未知，可能已到达提供方；不会重发。可以明确发送一个新问题。</p>}{call.message && <p>{call.message}</p>}<small>{call.usage_available ? `输入 ${call.input_tokens ?? '未提供'} / 输出 ${call.output_tokens ?? '未提供'} tokens` : '未报告用量，不按零计费'}</small></article>)}
+        {strategy.calls.map(call => <article key={call.call_id}><code>{call.call_id}</code><p>r{call.base_revision} · {call.status}</p>{call.model_profile && <small>当次连接：{call.model_profile.name} · v{call.model_profile.revision}</small>}{call.status === 'unknown' && <p>结果与用量未知，可能已到达提供方；不会重发。可以明确发送一个新问题。</p>}{call.message && <p>{call.message}</p>}<small>{call.usage_available ? `输入 ${call.input_tokens ?? '未提供'} / 输出 ${call.output_tokens ?? '未提供'} tokens` : '未报告用量，不按零计费'}</small></article>)}
         {localUnknown.map(call => <article key={call.call_id}><code>{call.call_id}</code><p>r{call.base_revision} · 回执未知，保留原请求身份。</p></article>)}
         <button className="button" disabled={busy} onClick={() => void query()}>查询模型请求</button>
       </section>}
@@ -306,6 +306,13 @@ function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapte
     input={<><ErrorNote>{error || model.error}</ErrorNote><label className="sr-only" htmlFor="studio-message">消息</label><textarea id="studio-message" value={text} onChange={e => edit(e.target.value)} placeholder={jobId ? '询问这份报告…' : '继续讨论这个研究…'} />
       {!textRetained && text && <small>未发送消息无法在本机缓冲，离开前请保留输入。</small>}
       <StorageFailureGuard active={!textRetained && !!text} message="未发送消息无法在本机保留，离开将丢失输入。" />
+      {api.selectUserStrategyModelProfile && model.value?.profiles && <label className="research-model-picker">本研究模型连接<select value={strategy.model_profile_id ?? ''} disabled={busy || inFlight || localUnknown.length > 0} onChange={event => { const profileId = event.target.value; void act(async () => accept(await api.selectUserStrategyModelProfile!(id, profileId || null))) }}>
+        <option value="">跟随工作区默认 · {model.value.profiles.find(item => item.id === model.value?.default_profile_id)?.name ?? '未设置'}</option>
+        {strategy.model_profile_id && !model.value.profiles.some(item => item.id === strategy.model_profile_id) && <option value={strategy.model_profile_id}>已选连接不可用，请重新选择</option>}
+        {model.value.profiles.map(item => <option key={item.id} value={item.id}>{item.name} · {item.model}{item.configured ? '' : ' · 未配置'}</option>)}
+      </select></label>}
+      <small>选择仅影响本研究下一次发送；历史调用与已批准轮次保持原连接。</small>
+      <div className="research-model-actions"><Link to="/resources/models">管理模型连接</Link><button className="button" disabled={busy} onClick={model.reload}>重新读取连接</button></div>
       <small>{selectedModel?.configured ? `${selectedModel.provider} · ${selectedModel.model}；一次发送授权 1 次模型调用` : '模型未配置或不可读；不会生成替代回答。'}</small>
       <button aria-label="发送一次模型请求" title="发送一次模型请求" className="button primary real-send" disabled={busy || inFlight || localUnknown.some(call => call.text === text.trim()) || !selectedModel?.configured || !text.trim()} onClick={() => void send()}><Icon name="send" size={22} /></button>
       {localUnknown.length > 0 && <small>同一问题只查询原请求。可以输入不同的新问题，原身份仍保留。</small>}
@@ -363,16 +370,8 @@ function Report({ api, id }: { api: ApiAdapter; id: string }) {
 
 }
 function Models({ api }: { api: ApiAdapter }) {
-  const model = useRead(useCallback(() => api.settingsStatus!(), [api])), [selectedId, setSelectedId] = useState('')
-  const profiles = model.value?.profiles ?? [], selected = profiles.find(item => item.id === selectedId) ?? profiles.find(item => item.id === model.value?.default_profile_id) ?? profiles[0] ?? model.value
-  return <div className="page model-connections"><PageHeader title="模型连接" subtitle="查看研究助手当前可用的连接。此候选不修改连接或凭据。" actions={<button className="button" onClick={model.reload}>重新读取模型状态</button>} />
-    <ErrorNote>{model.error}</ErrorNote>
-    <div className="model-layout"><section className="model-directory" aria-label="已保存的模型连接">
-      {profiles.map(item => <button className={`directory-item ${selected === item ? 'selected' : ''}`} aria-current={selected === item ? 'true' : undefined} key={item.id} onClick={() => setSelectedId(item.id)}><Icon name="cube" /><span><span className="connection-name"><strong>{item.name}</strong>{item.id === model.value?.default_profile_id && <span className="status">默认</span>}</span><small>{item.configured ? '已配置 · 请求未验证' : '不可用'}</small></span></button>)}
-      {profiles.length === 0 && <p>没有已保存的连接目录。</p>}
-    </section><section className="panel model-editor"><h2>{selected?.configured ? '已配置' : '未配置或不可读'}</h2>{selected && <Facts items={[[ '提供方', selected.provider ], ['模型', selected.model], ['协议', selected.protocol], ['配置问题', selected.configuration_error ?? '未报告'], ['缺失能力', selected.missing_capabilities?.join('、') || '未报告']]} />}
-      <section className="connection-test"><h3>请求验证</h3><p>配置可读不等于真实 provider 已通过验收。没有模型时，研究保存与本地实验仍可使用。</p><p>本切片仅以现有无密钥脚本适配器验证交互。</p></section>
-    </section></div>
+  return <div className="page model-connections"><PageHeader title="模型连接" subtitle="保存工作区连接，再到研究中选择并发送消息。" />
+    <DesktopSettings api={api} section="model" onSaved={() => {}} />
   </div>
 }
 

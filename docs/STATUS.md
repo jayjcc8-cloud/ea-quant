@@ -42,7 +42,10 @@ soak. Those remain separate binary/operational claims. No release or live connec
 - **Real v3 research:** the native `/studio` entry reuses existing
   research, CSV, draft, preview/confirmation and frozen-report services, with Rust-owned experiments.
   It includes report references, retained uncertain requests and next-launch workspace selection.
-  Model connection status is read-only; simulation, Live, batches, holdout and Candidate promotion
+  Model connections reuse the desktop editor for create/edit/cancel/save and workspace defaults;
+  the assistant can explicitly select a research connection or follow the workspace default.
+  Saving never calls a provider; selection affects future sends and preserves historical call
+  identities and approved rounds. Simulation, Live, batches, holdout and Candidate promotion
   are not connected in this entry. Development and self-contained local candidate build modes exist.
 - **Independent offline v3:** `apps/web/studio/` implements the 39-view design with resettable
   synthetic scenarios and browser-local persistence. [v3 documentation](frontend-v3/README.md)
