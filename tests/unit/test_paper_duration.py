@@ -3,6 +3,7 @@
 import json
 import time
 from pathlib import Path
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -22,7 +23,7 @@ def accepted(tmp_path: Path) -> tuple[Path, str, Path]:
 
 
 def test_duration_stops_a_real_child_and_reopens_without_another_dispatch(
-    tmp_path: Path, accepted: tuple[Path, str, Path]
+    tmp_path: Path, accepted: tuple[Path, str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace, candidate, _ = accepted
     root = tmp_path / "desktop-paper"
@@ -55,6 +56,17 @@ def test_duration_stops_a_real_child_and_reopens_without_another_dispatch(
         assert row["overview"]["position"] == "0"
         assert not row["overview"]["lease_held"]
         assert row["process_exit"] == 0
+        # Reproduce a child exit between reads of the same response. A response
+        # that still observes a live child must not also confirm its terminal.
+        with monkeypatch.context() as patch:
+            child = manager._children[request["request_id"]]
+            patch.setattr(child, "poll", Mock(side_effect=[None, 0, 0, 0, 0, 0]))
+            uncertain = manager.get(request["request_id"])
+            assert uncertain["process_exit"] is None
+            assert not uncertain["terminal_confirmed"]
+            settled = manager.get(request["request_id"])
+            assert settled["process_exit"] == 0
+            assert settled["terminal_confirmed"]
     finally:
         manager.close()
     manager = DesktopPaper(root, workspace)

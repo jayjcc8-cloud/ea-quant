@@ -239,21 +239,23 @@ class DesktopPaper:
                 "overview": {"available": False, "reason": "attempt_not_observed"},
             }
             child = self._children.get(request_id)
-            result["process_exit"] = None if child is None else child.poll()
+            # One process observation per response: exit can race manifest/status reads.
+            process_exit = None if child is None else child.poll()
+            result["process_exit"] = process_exit
             if (
                 record.get("spawn_failed")
                 and not (self.runs / request_id).exists()
-                and (child is None or child.poll() is not None)
+                and (child is None or process_exit is not None)
             ):
                 result.update(state="start_failed", terminal_confirmed=True)
                 return result
             if (
                 child is not None
-                and child.poll() is not None
+                and process_exit is not None
                 and not (self.runs / request_id).exists()
             ):
                 record["spawn_failed"] = True
-                record["startup_exit"] = child.returncode
+                record["startup_exit"] = process_exit
                 self._publish(self.requests / f"{request_id}.json", record)
                 result.update(
                     state="start_failed",
@@ -282,7 +284,7 @@ class DesktopPaper:
                     and not status["lease_held"]
                     and status.get("terminal_durable") is True
                 )
-                if terminal and (child is None or child.poll() is not None):
+                if terminal and (child is None or process_exit is not None):
                     # Reuse the existing journal/manifest recovery classification. This
                     # inspects and reconciles the original attempt; it never continues it.
                     recovered = resume_local_paper(self.runs / request_id)
