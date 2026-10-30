@@ -372,11 +372,12 @@ def _history(
         tuple(associations),
         observations=tuple(
             PaperIntervalObservation(
-                decode_paper_snapshot(row["snapshot"]),
+                None if row["snapshot"] is None else decode_paper_snapshot(row["snapshot"]),
                 decode_gate_identity(row["current_identity"]),
+                datetime.fromisoformat(row["captured_at"]) if row["snapshot"] is None else None,
             )
             for row in rows
-            if row["snapshot"] is not None and row["current_identity"] is not None
+            if row["current_identity"] is not None
         ),
     ), errors
 

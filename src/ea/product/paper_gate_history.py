@@ -338,21 +338,37 @@ class PaperAttemptAssociation:
 
 @dataclass(frozen=True, slots=True)
 class PaperIntervalObservation:
-    """An actual saved observation, including identity before any later restoration."""
+    """A saved identity and its same-time snapshot, when that read succeeded."""
 
-    snapshot: PaperSnapshot
+    snapshot: PaperSnapshot | None
     current_identity: PaperGateIdentity
+    captured_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        if type(self.snapshot) is not PaperSnapshot:
-            raise _fail(OutcomeCode.INVALID_TYPE, "observation requires an exact snapshot")
+        if self.snapshot is not None and type(self.snapshot) is not PaperSnapshot:
+            raise _fail(OutcomeCode.INVALID_TYPE, "observation snapshot must be exact or absent")
         if type(self.current_identity) is not PaperGateIdentity:
             raise _fail(OutcomeCode.INVALID_TYPE, "observation requires an exact identity")
+        if self.snapshot is None or self.captured_at is not None:
+            stamp = _require_utc(self.captured_at, field="captured_at")
+            if self.snapshot is not None and stamp != self.snapshot.captured_at:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "observation timestamp conflicts")
+
+    @property
+    def observed_at(self) -> datetime:
+        if self.snapshot is not None:
+            return self.snapshot.captured_at
+        return _require_utc(self.captured_at, field="captured_at")
 
     def document(self) -> dict[str, Any]:
         return {
-            "snapshot": self.snapshot.document(),
+            "snapshot": None if self.snapshot is None else self.snapshot.document(),
             "current_identity": self.current_identity.document(),
+            **(
+                {"captured_at": self.observed_at.isoformat()}
+                if self.captured_at is not None
+                else {}
+            ),
         }
 
 
@@ -391,7 +407,7 @@ class PaperIntervalHistory:
         ):
             raise _fail(OutcomeCode.INVALID_TYPE, "observations must be exact observations")
         if any(
-            not self.identity.started_at <= item.snapshot.captured_at <= coverage_end
+            not self.identity.started_at <= item.observed_at <= coverage_end
             for item in self.observations
         ):
             raise _fail(OutcomeCode.OUT_OF_RANGE, "observation is outside the interval")
@@ -478,8 +494,11 @@ def decode_paper_interval_history(document: object) -> PaperIntervalHistory:
         associations=tuple(associations),
         observations=tuple(
             PaperIntervalObservation(
-                decode_paper_snapshot(item.get("snapshot")),
+                None if item.get("snapshot") is None else decode_paper_snapshot(item["snapshot"]),
                 decode_gate_identity(item.get("current_identity")),
+                None
+                if item.get("captured_at") is None
+                else _require_stamp(item["captured_at"], field="captured_at"),
             )
             for item in raw_observations
         ),
@@ -796,6 +815,11 @@ def _interval_reasons(
     window_start = locked.started_at
     window_end = evaluated_at
     elapsed = window_end - window_start
+    if any(
+        item.snapshot is None and window_start <= item.observed_at <= window_end
+        for item in history.observations
+    ):
+        gaps.append(GAP_EVIDENCE)
     if elapsed < required_duration(locked.gate_type):
         # A window that has not run for its requested duration cannot pass, and a
         # non-positive window is not coverage at all.
@@ -930,7 +954,7 @@ def evaluate_gate(
         tuple(
             item
             for item in history.observations
-            if locked_identity.started_at <= item.snapshot.captured_at <= evaluated_at
+            if locked_identity.started_at <= item.observed_at <= evaluated_at
         )
         if type(history) is PaperIntervalHistory and history.identity == locked_identity
         else ()
@@ -955,7 +979,8 @@ def evaluate_gate(
     gaps, failures = _interval_reasons(history, snapshot, locked_identity, evaluated_at)
     failures.extend(_hard_rule_reasons(snapshot))
     for observation in observations:
-        failures.extend(_hard_rule_reasons(observation.snapshot))
+        if observation.snapshot is not None:
+            failures.extend(_hard_rule_reasons(observation.snapshot))
     if failures:
         return PaperGateVerdict(
             verdict=GateVerdict.FAIL,

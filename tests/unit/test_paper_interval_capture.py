@@ -355,3 +355,45 @@ def test_collection_has_no_manual_clock_or_health_override() -> None:
         assert "--started-at" not in help_text
         assert "--ended-at" not in help_text
         assert "--supervisor-state" not in help_text
+
+
+def test_observed_identity_drift_survives_missing_snapshot(tmp_path: Path) -> None:
+    """A failed runtime read must not discard the identity read that succeeded."""
+    live = Live(tmp_path, at=datetime.now(UTC))
+    config, launchd = _operator_surface(tmp_path)
+    pointer = tmp_path / "current-run"
+    pointer.write_text(str(live.run_dir))
+    interval = tmp_path / "interval"
+    try:
+        first = begin_interval(
+            interval,
+            run_dir=live.run_dir,
+            repository=REPO,
+            config=config,
+            launchd_dir=launchd,
+            gate_id="partial-observation",
+            gate_type=GateType.T72H,
+            current_run=pointer,
+        )
+        original = config.read_bytes()
+        config.write_bytes(original + b"BACKUP_KEEP=10\n")
+        pointer.unlink()
+        observed = observe_interval(interval)
+        assert observed["snapshot"] is None
+        assert observed["current_identity"] != first["current_identity"]
+        config.write_bytes(original)
+        pointer.write_text(str(live.run_dir))
+        observe_interval(interval, end=True)
+    finally:
+        live.paper.quiesce()
+    settle_interval(interval, [backup(live.run_dir, tmp_path)])
+    result = evaluate_interval(interval)
+    assert result["historical_verdict"]["reasons"] == ["config_drift"]
+    assert result["historical_verdict"]["verdict"] == "invalid"
+    assert result["boundary_identity"] == first["current_identity"]
+    # Readback preserves the actual partial observation; no other snapshot is
+    # substituted for the unavailable one.
+    partial = result["history"]["observations"][1]
+    assert partial["snapshot"] is None
+    assert partial["captured_at"] == observed["captured_at"]
+    assert partial["current_identity"] == observed["current_identity"]

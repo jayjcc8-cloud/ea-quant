@@ -641,13 +641,13 @@ def canonical_gate_verdict_bytes(verdict: PaperGateVerdict) -> bytes:
 
 
 def _identity_drift_reasons(
-    snapshot: PaperSnapshot,
+    snapshot: PaperSnapshot | None,
     locked: PaperGateIdentity,
     current: PaperGateIdentity,
 ) -> list[str]:
     """Yield the identity-relevant drift reasons, in a stable order."""
     reasons: list[str] = []
-    if snapshot.repo_sha != locked.repo_sha:
+    if snapshot is not None and snapshot.repo_sha != locked.repo_sha:
         reasons.append("repo_sha_drift")
     if current.gate_id != locked.gate_id:
         reasons.append("gate_id_drift")
@@ -665,9 +665,9 @@ def _identity_drift_reasons(
         reasons.append("evidence_schema_drift")
     # The Paper/Live boundary is part of the locked identity, so an unexpected
     # mode is drift, not a runtime fault.
-    if snapshot.broker_mode is not BrokerMode.LOCAL_SIMULATED_PAPER:
+    if snapshot is not None and snapshot.broker_mode is not BrokerMode.LOCAL_SIMULATED_PAPER:
         reasons.append("broker_mode_drift")
-    if snapshot.live_enabled:
+    if snapshot is not None and snapshot.live_enabled:
         reasons.append("unexpected_live_capability")
     return reasons
 
