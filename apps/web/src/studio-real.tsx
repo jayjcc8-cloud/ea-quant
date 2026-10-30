@@ -1,3 +1,4 @@
+import { CompareBacktestsRoute } from './backtest-comparison'
 /** v3's first real slice. No scenario adapter, fixture state or synthetic outcome. */
 import { useCallback, useEffect, useRef, useState, type ReactNode, type SetStateAction } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
@@ -349,6 +350,8 @@ function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapte
 }
 
 function Records({ api }: { api: ApiAdapter }) {
+  const [selected, setSelected] = useState<string[]>([])
+  const navigate = useNavigate()
   const records = useRead(useCallback(async () => {
     const refs = await api.researchReferences!()
     return Promise.all(refs.flatMap(research => research.experiments.map(async experiment => {
@@ -360,10 +363,13 @@ function Records({ api }: { api: ApiAdapter }) {
       } catch (e) { return { research, experiment, job: null, error: reason(e) } }
     })))
   }, [api]))
+  const ready = new Set(records.value?.flatMap(({ job }) => job?.status === 'succeeded' && job.report_ready ? [job.job_id] : []) ?? [])
+  const comparison = selected.filter(id => ready.has(id))
   return <div className="page"><PageHeader title="回测记录" subtitle="从已保存研究读取实验与正式报告。" actions={<><Link className="button" to="/candidates">研究候选历史</Link><button className="button" onClick={records.reload}>重新读取记录</button></>} />
     <ErrorNote>{records.error}</ErrorNote>{!records.value && !records.error && <p>正在读取…</p>}
+    <div className="result-toolbar"><p>选择两份已完成的冻结报告，查看参数、成本与结果差异。</p><button className="button" disabled={comparison.length !== 2} onClick={() => navigate(`/compare/${encodeURIComponent(comparison[0])}/${encodeURIComponent(comparison[1])}`)}>对比所选报告</button></div>
     {records.value?.map(({ research, experiment, job, error }, index) => <div key={`${research.user_strategy_id}.${experiment.launch_intent_id ?? index}`}>
-      {job ? <Link className="real-research-row" to={`/report/${encodeURIComponent(job.job_id)}/overview`}><span><strong>{research.name}</strong><small>{job.job_id}</small></span><span>{job.status} · {job.report_ready ? '报告可读' : '无正式报告'}</span></Link>
+      {job ? <div className="comparison-record"><label><input type="checkbox" aria-label={`选择 ${job.job_id} 进行对比`} checked={comparison.includes(job.job_id)} disabled={!ready.has(job.job_id) || (comparison.length === 2 && !comparison.includes(job.job_id))} onChange={() => setSelected(current => current.includes(job.job_id) ? current.filter(id => id !== job.job_id) : [...current.filter(id => ready.has(id)), job.job_id])} /><span className="sr-only">选择报告</span></label><Link className="real-research-row" to={`/report/${encodeURIComponent(job.job_id)}/overview`}><span><strong>{research.name}</strong><small>{job.job_id}</small></span><span>{job.status} · {job.report_ready ? '报告可读' : '无正式报告'}</span></Link></div>
         : <section className="panel"><Link to={`/research/${encodeURIComponent(research.user_strategy_id)}/experiments`}>{research.name} · 查询原实验</Link><p>{experiment.launch_intent_id ?? '确认身份未提供'}</p><p>{experiment.job_id ? '运行暂不可读，未推断为失败或完成。' : '尚未登记运行，请查询原研究。'}</p><ErrorNote>{error}</ErrorNote></section>}
     </div>)}{records.value?.length === 0 && <p>暂无实验记录。</p>}
     <HoldoutLinks api={api} />
@@ -424,7 +430,7 @@ function WorkspaceNav({ api }: { api: ApiAdapter }) {
 }
 export function StudioRoutes({ api }: { api: ApiAdapter }) {
   return <div className="studio real-studio" data-theme="light"><WorkspaceNav api={api} />
-    <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/records" element={<Records api={api} />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} />} /><Route path="/holdout/new/:jobId" element={<HoldoutCreatorRoute api={api} />} /><Route path="/holdout/:id" element={<HoldoutDetailRoute api={api} />} /><Route path="/candidates" element={<div className="page real-candidates"><CandidateHistory api={api} studio /></div>} /><Route path="/candidates/:candidateId" element={<div className="page real-candidates"><CandidateDetail api={api} studio /></div>} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="/settings/workspace" element={<div className="page"><PageHeader title="工作区" subtitle="核对研究保存位置；更换目录在下次启动生效。" /><DesktopSettings api={api} section="workspace" onSaved={() => {}} /></div>} /><Route path="/settings/about" element={<div className="page"><PageHeader title="诊断与备份" /><DesktopAbout api={api} /></div>} /><Route path="*" element={<Unavailable />} /></Routes></main>
+    <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/records" element={<Records api={api} />} /><Route path="/compare/:leftId/:rightId" element={<CompareBacktestsRoute api={api} studio />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} />} /><Route path="/holdout/new/:jobId" element={<HoldoutCreatorRoute api={api} />} /><Route path="/holdout/:id" element={<HoldoutDetailRoute api={api} />} /><Route path="/candidates" element={<div className="page real-candidates"><CandidateHistory api={api} studio /></div>} /><Route path="/candidates/:candidateId" element={<div className="page real-candidates"><CandidateDetail api={api} studio /></div>} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="/settings/workspace" element={<div className="page"><PageHeader title="工作区" subtitle="核对研究保存位置；更换目录在下次启动生效。" /><DesktopSettings api={api} section="workspace" onSaved={() => {}} /></div>} /><Route path="/settings/about" element={<div className="page"><PageHeader title="诊断与备份" /><DesktopAbout api={api} /></div>} /><Route path="*" element={<Unavailable />} /></Routes></main>
   </div>
 }
 export default function RealStudio() { return <BrowserRouter basename="/studio"><StudioRoutes api={browserApi} /></BrowserRouter> }

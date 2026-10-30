@@ -128,3 +128,7 @@
 @media (max-width: 1000px) {
   .real-studio .real-candidates .compare-identities { grid-template-columns: minmax(0, 1fr); }
 }
+
+.real-studio .comparison-record { display:flex; align-items:center; gap:14px; }
+.real-studio .comparison-record > .real-research-row { flex:1; min-width:0; }
+.real-studio .compare-page .panel { overflow-x:auto; }
