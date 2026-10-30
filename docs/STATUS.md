@@ -45,7 +45,10 @@ soak. Those remain separate binary/operational claims. No release or live connec
   Model connections reuse the desktop editor for create/edit/cancel/save and workspace defaults;
   the assistant can explicitly select a research connection or follow the workspace default.
   Saving never calls a provider; selection affects future sends and preserves historical call
-  identities and approved rounds. Simulation, Live, batches, holdout and Candidate promotion
+  identities and approved rounds. Successful frozen reports can prepare chronological holdout:
+  the user selects a backend-offered compatible strictly later input and separately confirms
+  its displayed identity. Saved relationships and both independent reports reopen in v3;
+  uncertain receipts query existing relationships without resending. Simulation, Live, batches and Candidate promotion
   are not connected in this entry. Experiment records expose owner-confirmed stop requests and
   the existing explicit unknown recovery preparation/release controls. A stopping receipt is not
   a confirmed stop; releasing a verified slot retains the unknown result and frozen budget/input.

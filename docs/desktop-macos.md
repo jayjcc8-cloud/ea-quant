@@ -94,7 +94,13 @@ and are never redispatched. Experiment records can request a stop; `stopping` me
 not a confirmed stop. Unknown records reuse the existing owner-gated recovery preparation and
 release actions described below. Release retains the unknown outcome, frozen input and spent
 budget; a new experiment still requires a new preview and explicit confirmation.
-Simulation, Live, batches, holdout and Candidate promotion are unavailable
+Successful frozen reports offer **配置留出验证**: select a backend-provided compatible strictly
+later input, review its identity and separately confirm one independent core-owned run. Strategy,
+parameters, funding and costs stay frozen from the source. Input changes require fresh selection;
+uncertain receipts query saved relationships without resending. The records and report pages link
+to the relationship and both frozen reports after reopen. This establishes chronology only, not
+unseen data, generalization or a pass/fail decision.
+Simulation, Live, batches and Candidate promotion are unavailable
 in this entry. Model connections can be configured here; saving does not test authentication.
 Return to a research and explicitly send a message to authorize one model call and zero backtests.
 The desktop has one normal entry;
