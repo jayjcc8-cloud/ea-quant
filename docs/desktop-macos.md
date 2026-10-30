@@ -90,7 +90,11 @@ sandboxed untrusted code.
 The first real v3 slice opens at `/studio` in the native window. It reuses the existing
 research, CSV, experiment-preview/confirmation and official report services. Saving and applying
 a proposal do not run an experiment. Unknown confirmation receipts retain their request identity
-and offer reads only. Simulation, Live, batches, holdout and Candidate promotion are unavailable
+and are never redispatched. Experiment records can request a stop; `stopping` means accepted,
+not a confirmed stop. Unknown records reuse the existing owner-gated recovery preparation and
+release actions described below. Release retains the unknown outcome, frozen input and spent
+budget; a new experiment still requires a new preview and explicit confirmation.
+Simulation, Live, batches, holdout and Candidate promotion are unavailable
 in this entry. Model connections can be configured here; saving does not test authentication.
 Return to a research and explicitly send a message to authorize one model call and zero backtests.
 The desktop has one normal entry;

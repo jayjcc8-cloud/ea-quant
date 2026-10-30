@@ -357,6 +357,7 @@ export type ApiAdapter = {
     userStrategyId: string,
     launchIntentId: string,
   ): Promise<UserStrategy>
+  recoverUserStrategyExperiment?: typeof userStrategiesApi.recoverExperiment
 }
 
 async function loadTradeAnalytics(api: ApiAdapter, job: BacktestJob): Promise<TradeAnalytics | null> {
@@ -478,6 +479,8 @@ export const browserApi: ApiAdapter = {
     userStrategiesApi.launchExperiment(userStrategyId, input),
   cancelUserStrategyExperiment: (userStrategyId, launchIntentId) =>
     userStrategiesApi.cancelExperiment(userStrategyId, launchIntentId),
+  recoverUserStrategyExperiment: (userStrategyId, launchIntentId, input) =>
+    userStrategiesApi.recoverExperiment(userStrategyId, launchIntentId, input),
 }
 
 async function loadPath(api: ApiAdapter, job: BacktestJob): Promise<EquityPath | null> {

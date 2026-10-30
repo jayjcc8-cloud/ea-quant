@@ -2607,8 +2607,9 @@ function ExperimentPanel({ api, strategy, changed, failed }: {
   </section>
 }
 
-function UnknownRecoveryControls({ strategyId, item, changed }: {
+export function UnknownRecoveryControls({ strategyId, item, changed, recover = userStrategiesApi.recoverExperiment, diagnosticsHref = '/settings?section=about' }: {
   strategyId: string; item: UserStrategyExperiment; changed: (value: UserStrategy) => void
+  recover?: typeof userStrategiesApi.recoverExperiment; diagnosticsHref?: string
 }) {
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState('')
@@ -2628,7 +2629,7 @@ function UnknownRecoveryControls({ strategyId, item, changed }: {
       preparation.current = { revision: item.core_revision, id: crypto.randomUUID() }
     }
     try {
-      const updated = await userStrategiesApi.recoverExperiment(strategyId, item.launch_intent_id, {
+      const updated = await recover(strategyId, item.launch_intent_id, {
         action, attempt_id: item.attempt_id, expected_revision: item.core_revision,
         preparation_id: recovery?.preparation_id ?? preparation.current.id,
       })
@@ -2652,7 +2653,7 @@ function UnknownRecoveryControls({ strategyId, item, changed }: {
       {busy ? '正在核对核心回执…' : action === 'prepare' ? '记录恢复准备（需重启 Mac）' : '保留未知结果并释放运行名额'}
     </button>}
     {failure && <p role="alert">{failure}</p>}
-    <p>已保存的草稿和报告仍可查看。<Link to="/settings?section=about">查看脱敏诊断与备份说明</Link></p>
+    <p>已保存的草稿和报告仍可查看。<Link to={diagnosticsHref}>查看脱敏诊断与备份说明</Link></p>
   </div>
 }
 
