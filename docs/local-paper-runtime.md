@@ -218,9 +218,8 @@ The M4 release-candidate gates (72h, 7d) are judged by the frozen WU-2 contract:
 `build_gate_identity` one `PaperGateIdentity`, and the interval aggregation in
 `ea.product.paper_gate_history` turns those plus explicit durable interval evidence into the
 verdict. This layer adds only the thin operational surface those need on a real host — it adds no
-second evaluator, no timer, no watchdog and no gate state — and it does **not** connect the
-interval evidence, so it cannot reach a gate `PASS`; see
-[the interval verdict is not reachable from this layer](#the-interval-verdict-is-not-reachable-from-this-layer).
+second evaluator, timer or watchdog. The saved interval workflow below connects actual
+observations and settled backups to that same evaluator; it does not perform a 72h/7d soak.
 
 ```
 ea-runtime snapshot --repo CHECKOUT [--alert-stream PATH]
@@ -265,41 +264,79 @@ identity that is already locked is never replaced, because drift must become `IN
 fresh gate. Editing the pinned config or re-rendering a plist afterwards therefore fails the
 gate instead of silently relocking it.
 
-**Locking an identity does not start a gate.** This product owns no clock, no timer and no gate
-state, so nothing begins when that file is written; `evaluate_gate` is the only verdict
+**Locking an identity does not start an observed interval.** Use `gate interval begin` below
+for an actual start observation; `evaluate_gate` remains the only verdict
 authority and `ea paper gate evaluate` is only a reading of the lock against the runtime as it is
 now. The 72-hour and 7-day Gates are started by the M4 release-candidate freeze, a separate
 authorization, and exit code 3 means the verdict is not `PASS` or the observation could not be
 taken.
 
-### The interval verdict is not reachable from this layer
+### Saved interval evidence
 
-The verdict is an **interval** verdict, aggregated only from explicit durable interval evidence
-(`ea.product.paper_gate_history`): the frozen identity, a bounded coverage window, the complete
-attempt inventory, and each attempt's `[begin, end)` association. One healthy instant can never
-stand for 72 hours, no backup is ever discovered automatically, and coverage is a caller claim
-rather than a fact that can be found on disk.
+`ea paper gate evaluate` remains a current observation without interval history: it cannot
+produce a soak PASS. For a saved historical interval, use the following explicit sequence with
+a separately authorized, already running local simulated Paper process:
 
-This layer connects none of that. `ea-runtime snapshot` and `ea paper gate evaluate` supply a
-boundary observation and a live identity — never a `PaperIntervalHistory` — so:
+```sh
+# These commands only observe and save evidence; begin starts no Paper process.
+$EA gate begin --interval /absolute/evidence/interval-1 --gate-id interval-1 --gate-type 72h \
+  --repo /absolute/checkout --alert-stream /absolute/evidence/alerts.json
+$EA gate observe --interval /absolute/evidence/interval-1
+$EA gate end --interval /absolute/evidence/interval-1
+# Only after end: ordinary cooperative stop, then normal quiesced backup.
+$EA stop
+$EA backup
+# Name every interval attempt's verified backup explicitly; repeat --backup as needed.
+$EA gate settle --interval /absolute/evidence/interval-1 --backup /absolute/backups/backup-...
+$EA gate evaluate --interval /absolute/evidence/interval-1
+```
 
-| Invocation | Verdict | Reasons | Exit |
-| --- | --- | --- | --- |
-| unchanged identity, unhealthy runtime, no interval history | `FAIL` | each violated hard rule **plus** `evidence_gap` | 3 |
-| healthy, unchanged runtime, no interval history | `INVALID` | `evidence_gap` | 3 |
-| drifted config, LaunchAgent or checkout | `INVALID` | the drift reason alone | 3 |
+`begin` reads the actual UTC clock, locks the actual config/HEAD/rendered-plist identity, and
+requires a running attempt with its writer lease. The operator supplies its pinned current-run,
+runtime root and complete launch log. Direct foreground users can use `ea paper gate interval
+begin` with `--run-dir`, `--repo`, `--config`, `--launchd-dir`, `--gate-id`, `--gate-type` and
+optional `--backup-root`/`--alert-stream`; the attempt's parent is the dedicated runtime root.
+The direct path reports supervisor state as unknown. No collection command accepts supplied
+start/end times, a healthy flag or a supervisor-state override. Legacy `gate lock --started-at`
+is not accepted as interval evidence.
 
-A healthy host with no interval history therefore reports `INVALID`/`evidence_gap`/exit 3. That is
-the fail-closed answer, not a defect to work around: **no invocation of these commands can produce
-a 72h or 7d `PASS`**, and `ea paper gate evaluate` must not be read as a pre-freeze readiness
-certification, as a soak result, or as a post-hoc certification of a gate that has already run.
-Hand-writing associations or an inventory to obtain a `PASS` would claim coverage that nothing
-observed, and is never a substitute for the missing integration.
+`observations.jsonl` retains each real snapshot, identity and complete directory inventory.
+`observe` is an explicit additional read, not a polling service. Two live observations of the
+same immutable attempt binding, together with its settled journal, bound its execution; the
+runtime cannot resume that attempt into another live run. New attempts remain in the inventory,
+including attempts that start and finish between observations. A launch event alone establishes
+neither coverage nor identity. An attempt never observed live remains unassociated evidence;
+missing directories, incomplete launches or a truncated launch log remain coverage gaps.
+Pre-start settled attempts do not contribute to this interval.
 
-Connecting trusted durable interval history to the operator surface is **deferred work (P1)**.
-Evidence ownership, coverage provenance and the association contract require a parent decision and
-are not designed here. Until that work lands, the only honest claims this layer supports about a
-gate are the identity and runtime observations below.
+`end` seals once: `snapshot.captured_at = ended_at = evaluated_at`. A failed boundary read is
+retained but does not seal; a later successful read cannot erase that gap. A readable unhealthy
+boundary can be sealed and remains non-PASS. End never stops the runtime. `settle` then writes
+one canonical `history.json` from all retained observations and explicit verified backup paths.
+Missing backup paths remain missing evidence; corrupt attachments are refused and later loss or
+corruption of attached backups is detected during readback. Settle never creates a backup or
+selects a newest attempt. The saved inventory is checked against observations on each readback.
+
+The existing evaluator also applies its unchanged identity/health rules to saved observations:
+observed drift remains INVALID after config restoration, and a later healthy read cannot erase
+an observed fault. An in-window clean stop is `attempt_interrupted`; a crash or failed attempt
+cannot be replaced with a healthier attempt to obtain continuous acceptance. Post-end stop and
+backup supply settled evidence without moving the boundary. Evaluation reports
+`historical_verdict`, `boundary_snapshot`, `boundary_identity`, `ended_at` and `history`, with
+`current_status` separately labelled. Exit 3 means non-PASS or unavailable evidence.
+
+**Backup freshness is still the saved snapshot's newest verified copy in the configured backup
+root, not a recovery point for the active run.** Its FRESH threshold remains 36 hours, while the
+operator normally backs up each settled run once. A continuous 72h/7d attempt therefore does not
+naturally satisfy that freshness condition. Post-end backups never refresh the sealed snapshot;
+this workflow never re-backs up old runs to manufacture freshness. In-process consistent
+checkpoints/online backup remain separate work. Short synthetic checks prove this workflow,
+not a long-duration PASS.
+
+Evidence remains local and unsigned. Retain the dedicated runtime root, complete launch log,
+observations and backups; manual rewriting/removal of both runtime and evidence is outside the
+existing integrity threat model. Observations record what was actually read, not changes that
+occurred and were restored wholly between reads.
 
 What the layer can still show on a real host before the freeze: the checkout HEAD is observable
 and is the commit being frozen; the pinned config and both rendered LaunchAgents are observable

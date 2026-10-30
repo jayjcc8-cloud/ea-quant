@@ -64,7 +64,11 @@ soak. Those remain separate binary/operational claims. No release or live connec
   of its own. The native slice reuses its visual components with real service contracts.
   Local ignored screenshots are not hosted CI evidence.
 - **Local simulated Paper:** M1 recovery, M2 risk guards and M3 health/backup/alerts are delivered.
-  M4 fault-campaign and gate-preparation tooling exist; see [Paper operations](local-paper-runtime.md).
+  M4 fault-campaign and gate-preparation tooling exist. The interval CLI records real begin/end
+  observations and complete attempt inventories, binds explicit settled backups, and evaluates the
+  saved boundary separately from current status. Observed drift/faults and evidence gaps persist;
+  36-hour backup freshness and continuous 72h/7d acceptance remain unchanged and unproven.
+  See [Paper operations](local-paper-runtime.md).
 - **Cleanup:** #259/#260 were closed after containment was verified. Redundant branches and old
   development checkouts were retired; unique prototype source and historical evidence were
   preserved in verified local archives. Current research data and the existing Paper service remain.

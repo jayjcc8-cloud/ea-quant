@@ -102,6 +102,7 @@ from ea.product.paper_evidence import (
     _hard_rule_reasons,
     _identity_drift_reasons,
     decode_gate_identity,
+    decode_paper_snapshot,
 )
 
 INTERVAL_HISTORY_SCHEMA = "ea.paper-interval-history.v1"
@@ -336,6 +337,42 @@ class PaperAttemptAssociation:
 
 
 @dataclass(frozen=True, slots=True)
+class PaperIntervalObservation:
+    """A saved identity and its same-time snapshot, when that read succeeded."""
+
+    snapshot: PaperSnapshot | None
+    current_identity: PaperGateIdentity
+    captured_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.snapshot is not None and type(self.snapshot) is not PaperSnapshot:
+            raise _fail(OutcomeCode.INVALID_TYPE, "observation snapshot must be exact or absent")
+        if type(self.current_identity) is not PaperGateIdentity:
+            raise _fail(OutcomeCode.INVALID_TYPE, "observation requires an exact identity")
+        if self.snapshot is None or self.captured_at is not None:
+            stamp = _require_utc(self.captured_at, field="captured_at")
+            if self.snapshot is not None and stamp != self.snapshot.captured_at:
+                raise _fail(OutcomeCode.CONFLICTING_ID, "observation timestamp conflicts")
+
+    @property
+    def observed_at(self) -> datetime:
+        if self.snapshot is not None:
+            return self.snapshot.captured_at
+        return _require_utc(self.captured_at, field="captured_at")
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "snapshot": None if self.snapshot is None else self.snapshot.document(),
+            "current_identity": self.current_identity.document(),
+            **(
+                {"captured_at": self.observed_at.isoformat()}
+                if self.captured_at is not None
+                else {}
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PaperIntervalHistory:
     """The explicit, bounded interval evidence one gate evaluation judges.
 
@@ -354,6 +391,7 @@ class PaperIntervalHistory:
     attempts: tuple[PaperAttemptEvidence, ...]
     associations: tuple[PaperAttemptAssociation, ...]
     schema: str = INTERVAL_HISTORY_SCHEMA
+    observations: tuple[PaperIntervalObservation, ...] = ()
 
     def __post_init__(self) -> None:
         if self.schema != INTERVAL_HISTORY_SCHEMA:
@@ -364,6 +402,15 @@ class PaperIntervalHistory:
         coverage_end = _require_utc(self.coverage_end, field="coverage_end")
         if coverage_start > coverage_end:
             raise _fail(OutcomeCode.OUT_OF_RANGE, "coverage must be an ordered interval")
+        if type(self.observations) is not tuple or any(
+            type(item) is not PaperIntervalObservation for item in self.observations
+        ):
+            raise _fail(OutcomeCode.INVALID_TYPE, "observations must be exact observations")
+        if any(
+            not self.identity.started_at <= item.observed_at <= coverage_end
+            for item in self.observations
+        ):
+            raise _fail(OutcomeCode.OUT_OF_RANGE, "observation is outside the interval")
         if type(self.attempts) is not tuple:
             raise _fail(OutcomeCode.INVALID_TYPE, "attempts must be one tuple")
         if not all(type(attempt) is PaperAttemptEvidence for attempt in self.attempts):
@@ -390,6 +437,7 @@ class PaperIntervalHistory:
             "coverage_end": self.coverage_end.isoformat(),
             "attempts": [attempt.document() for attempt in self.attempts],
             "associations": [association.document() for association in self.associations],
+            "observations": [item.document() for item in self.observations],
         }
 
 
@@ -408,6 +456,11 @@ def decode_paper_interval_history(document: object) -> PaperIntervalHistory:
         raise _fail(OutcomeCode.CONFLICTING_ID, "interval history schema conflicts")
     raw_attempts = document.get("attempts")
     raw_associations = document.get("associations")
+    raw_observations = document.get("observations", [])
+    if type(raw_observations) is not list or any(
+        type(item) is not dict for item in raw_observations
+    ):
+        raise _fail(OutcomeCode.INVALID_TYPE, "observations must be an array of objects")
     if type(raw_attempts) is not list or type(raw_associations) is not list:
         raise _fail(OutcomeCode.INVALID_TYPE, "interval history inventory must be two arrays")
     attempts: list[PaperAttemptEvidence] = []
@@ -439,6 +492,16 @@ def decode_paper_interval_history(document: object) -> PaperIntervalHistory:
         coverage_end=_require_stamp(document.get("coverage_end"), field="coverage_end"),
         attempts=tuple(attempts),
         associations=tuple(associations),
+        observations=tuple(
+            PaperIntervalObservation(
+                None if item.get("snapshot") is None else decode_paper_snapshot(item["snapshot"]),
+                decode_gate_identity(item.get("current_identity")),
+                None
+                if item.get("captured_at") is None
+                else _require_stamp(item["captured_at"], field="captured_at"),
+            )
+            for item in raw_observations
+        ),
     )
 
 
@@ -752,6 +815,11 @@ def _interval_reasons(
     window_start = locked.started_at
     window_end = evaluated_at
     elapsed = window_end - window_start
+    if any(
+        item.snapshot is None and window_start <= item.observed_at <= window_end
+        for item in history.observations
+    ):
+        gaps.append(GAP_EVIDENCE)
     if elapsed < required_duration(locked.gate_type):
         # A window that has not run for its requested duration cannot pass, and a
         # non-positive window is not coverage at all.
@@ -882,7 +950,23 @@ def evaluate_gate(
         raise _fail(OutcomeCode.INVALID_TYPE, "current_identity must be an exact identity")
     evaluated_at = _require_utc(evaluated_at, field="evaluated_at")
 
-    drift = _dedup(_identity_drift_reasons(snapshot, locked_identity, current_identity))
+    observations = (
+        tuple(
+            item
+            for item in history.observations
+            if locked_identity.started_at <= item.observed_at <= evaluated_at
+        )
+        if type(history) is PaperIntervalHistory and history.identity == locked_identity
+        else ()
+    )
+    drift_reasons = _identity_drift_reasons(snapshot, locked_identity, current_identity)
+    for observation in observations:
+        drift_reasons.extend(
+            _identity_drift_reasons(
+                observation.snapshot, locked_identity, observation.current_identity
+            )
+        )
+    drift = _dedup(drift_reasons)
     if drift:
         return PaperGateVerdict(
             verdict=GateVerdict.INVALID,
@@ -894,6 +978,9 @@ def evaluate_gate(
 
     gaps, failures = _interval_reasons(history, snapshot, locked_identity, evaluated_at)
     failures.extend(_hard_rule_reasons(snapshot))
+    for observation in observations:
+        if observation.snapshot is not None:
+            failures.extend(_hard_rule_reasons(observation.snapshot))
     if failures:
         return PaperGateVerdict(
             verdict=GateVerdict.FAIL,
@@ -937,6 +1024,7 @@ __all__ = [
     "PaperAttemptEvidence",
     "PaperAttemptRecord",
     "PaperIntervalHistory",
+    "PaperIntervalObservation",
     "canonical_paper_interval_history_bytes",
     "decode_paper_interval_history",
     "evaluate_gate",

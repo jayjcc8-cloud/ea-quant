@@ -20,6 +20,7 @@
 #   ea-runtime reload                    re-render both LaunchAgents from the config
 #   ea-runtime log [paper|backup]        tail the launchd-captured output
 #   ea-runtime snapshot --repo PATH      one read-only M4 gate-preparation snapshot
+#   ea-runtime gate begin|observe|end|settle|evaluate  saved interval evidence
 #
 # launchd targets:
 #
@@ -474,6 +475,29 @@ cmd_snapshot() {
         --backup-root "$BACKUP_ROOT"
 }
 
+# Gate collection pins the same current-run and complete launch inventory as
+# this operator. The product reads the real clock and health; no healthy or
+# timestamp override is accepted. No process is started/stopped by these calls.
+cmd_gate() {
+    action=${1:-}
+    [ $# -gt 0 ] || die "usage: ea-runtime gate begin|observe|end|settle|evaluate ..."
+    shift
+    load_config
+    case "$action" in
+        begin)
+            run_dir=$(current_run_dir) || die "no supervised attempt to observe"
+            exec "$EA_BIN" paper gate interval begin \
+                --run-dir "$run_dir" --current-run "$CURRENT_RUN" \
+                --launch-history "$HISTORY" --config "$CONFIG" \
+                --launchd-dir "$AGENTS_DIR" --backup-root "$BACKUP_ROOT" "$@"
+            ;;
+        observe|end|settle|evaluate)
+            exec "$EA_BIN" paper gate interval "$action" "$@"
+            ;;
+        *) die "unknown gate action $action" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # launchd targets
 # ---------------------------------------------------------------------------
@@ -656,6 +680,7 @@ main() {
         run) cmd_run "${1:-}" ;;
         backup) cmd_backup ;;
         snapshot) cmd_snapshot "$@" ;;
+        gate) cmd_gate "$@" ;;
         help | --help | -h | '') usage ;;
         *) die "unknown command '$command' (try: ea-runtime help)" ;;
     esac
