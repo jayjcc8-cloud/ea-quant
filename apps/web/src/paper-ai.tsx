@@ -63,8 +63,8 @@ function AiAnswer({ text, initialOpen, onExpand }: { text: string; initialOpen: 
 }
 
 /** The parent keys this panel by run ID; subscriptions, input and saved calls share that identity. */
-export function PaperAi({ runId, instanceName, sourceJobId, onOverview, api = paperApi }: {
-  runId: string; instanceName: string; sourceJobId: string; onOverview?: () => void; api?: PaperExplanationApi
+export function PaperAi({ runId, instanceName, sourceJobId, onOverview, studio = false, api = paperApi }: {
+  runId: string; instanceName: string; sourceJobId: string; studio?: boolean; onOverview?: () => void; api?: PaperExplanationApi
 }) {
   const [conversation, setConversation] = useState<PaperExplanationConversation | null>(null)
   const [draft, setDraft] = useState(() => saved(paperExplanationDraftKey(runId)))
@@ -191,9 +191,9 @@ export function PaperAi({ runId, instanceName, sourceJobId, onOverview, api = pa
         <p>证据观测时间：{observationTime(context.observed_at)}</p>
         <p>经济快照发布：{observationTime(typeof context.economics.observed_at === 'string' ? context.economics.observed_at : null)}</p>
         <p>{context.economics.available ? `快照权益 ${text(context.economics.equity)} ${text(context.economics.currency)}` : '经济快照不可用'}</p>
-        <Link to={`/backtests/${encodeURIComponent(context.source_job_id)}`}>来源研究 ↗</Link>
+        <Link to={studio ? `/report/${encodeURIComponent(context.source_job_id)}/overview` : `/backtests/${encodeURIComponent(context.source_job_id)}`}>来源研究 ↗</Link>
       </div>}
-      {!context && <p>当前证据不可用。已保存的回答仍保留原观测范围。<Link to={`/backtests/${encodeURIComponent(sourceJobId)}`}>来源研究 ↗</Link></p>}
+      {!context && <p>当前证据不可用。已保存的回答仍保留原观测范围。<Link to={studio ? `/report/${encodeURIComponent(sourceJobId)}/overview` : `/backtests/${encodeURIComponent(sourceJobId)}`}>来源研究 ↗</Link></p>}
       {!conversation?.messages.length && <p className="chat-empty-guidance">可以询问当前状态、阻断原因或经济快照。解释仅使用这次读取到的运行证据。</p>}
       <ol className="message-list paper-ai-thread">
         {conversation?.messages.map((message, index) => {

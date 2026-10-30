@@ -52,7 +52,7 @@ export function paperObservation(row: PaperInstance, disconnected: boolean): Pap
   if (blocking && !reportedReasons.length) reportedReasons.push('后端未提供具体原因。')
   return {
     overview: overview ? { ...overview, health } : undefined, health, current, kind,
-    stateLabel: disconnected && !historical ? '断连 · 状态未知' : paperStateLabels[row.state] ?? '状态未知', context,
+    stateLabel: disconnected && !historical ? '断连 · 状态未知' : historical && row.state === 'stopped' && overview?.reason === 'stop_requested' && overview.stop_trigger === 'duration_budget' ? '计划时长已到 · 已停止' : paperStateLabels[row.state] ?? '状态未知', context,
     process: disconnected || typeof overview?.lease_held !== 'boolean' ? { text: '未知', tone: 'neutral' }
       : { text: overview.lease_held ? '存活 · 租约占用' : '未存活 · 租约释放', tone: 'neutral' },
     readiness: reading(health?.runtime_ready, '读取时就绪', '读取时未就绪'),

@@ -750,7 +750,7 @@ it('shows persisted commission assumptions and formal report fees', async () => 
   expect(await screen.findByText('deterministic-commission-v1 · 100 bps')).toBeTruthy()
   expect((await screen.findAllByText('2.03 USD')).length).toBeGreaterThan(0)
   expect(await screen.findByText('25 bps adverse slippage')).toBeTruthy()
-  expect(await screen.findByText('60000 ms execution latency')).toBeTruthy()
+  expect(await screen.findByText('60000 ms execution latency', { selector: 'span' })).toBeTruthy()
   expect(screen.queryByLabelText('Commission bps')).toBeNull()
 })
 
@@ -1744,4 +1744,26 @@ it('returns through the actual report association to the same source report view
   expect(window.location.pathname + window.location.search).toBe('/backtests/job-1?report=complete')
   expect(screen.getByRole('button', { name: '完整交易' }).getAttribute('aria-pressed')).toBe('true')
   expect(writes).not.toHaveBeenCalled()
+})
+
+
+it.each([
+  [undefined, 'Legacy latency omitted · effective 0 ms'],
+  [{ policy: 'deterministic-latency-v1', latency_ms: 0 }, '0 ms execution latency'],
+  [{ policy: 'deterministic-latency-v1', latency_ms: 60000 }, '60000 ms execution latency'],
+] as const)('distinguishes frozen latency assumptions in report details: %s', async (latency, expected) => {
+  const frozen = structuredClone(job)
+  frozen.input_snapshot!.scenario.execution = { policy: 'phase1.next-bar-close.v1', latency }
+  window.history.pushState({}, '', '/backtests/job-1')
+  render(<App api={adapter({ getBacktest: async () => frozen })} />)
+  expect((await screen.findAllByText(expected)).length).toBeGreaterThan(0)
+})
+
+it('keeps omitted and explicit zero latency distinguishable in comparison inputs', async () => {
+  const right = structuredClone(secondJob)
+  right.input_snapshot!.scenario.execution = { policy: 'phase1.next-bar-close.v1', latency: { policy: 'deterministic-latency-v1', latency_ms: 0 } }
+  window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+  render(<App api={adapter({ getBacktest: async id => id === 'job-1' ? job : right, getReport: async id => id === 'job-1' ? report : secondReport })} />)
+  expect(await screen.findByText('Legacy latency omitted · effective 0 ms')).toBeTruthy()
+  expect(screen.getByText('0 ms execution latency')).toBeTruthy()
 })

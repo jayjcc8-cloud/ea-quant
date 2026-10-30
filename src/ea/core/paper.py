@@ -93,6 +93,13 @@ def _require_utc_text(value: object, *, field: str) -> str:
 
 def require_paper_audit_document(document: dict[str, Any], schema: str) -> None:
     fields = _SCHEMAS[schema] | {"schema", "canonicalization", "run_id"}
+    if schema == "ea.audit-paper-terminal.v1" and "stop_trigger" in document:
+        fields = fields | {"stop_trigger"}
+        if document.get("reason") != "stop_requested" or document["stop_trigger"] not in (
+            "requested",
+            "duration_budget",
+        ):
+            raise ValueError("Paper terminal stop trigger is invalid")
     if (
         set(document) != fields
         or document.get("schema") != schema
@@ -264,6 +271,7 @@ def canonical_paper_terminal_payload(
     pending_facts: int,
     pending_orders: int,
     fill_count: int,
+    stop_trigger: str | None = None,
 ) -> bytes:
     return _payload(
         "ea.audit-paper-terminal.v1",
@@ -275,6 +283,7 @@ def canonical_paper_terminal_payload(
         pending_facts=pending_facts,
         pending_orders=pending_orders,
         fill_count=fill_count,
+        **({"stop_trigger": stop_trigger} if stop_trigger is not None else {}),
     )
 
 

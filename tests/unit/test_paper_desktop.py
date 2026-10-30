@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ea.web.app import create_app
@@ -11,14 +12,43 @@ from unit.test_web_rust_experiments import Core, _create_via_http, _web_settings
 from unit.test_web_rust_holdout import _await_job, _offered, _post_holdout, _source_job
 
 
-def test_rust_candidate_reads_owner_evidence_without_legacy_job_copies(tmp_path: Path) -> None:
+@pytest.mark.parametrize("finite", [False, True])
+def test_rust_candidate_reads_owner_evidence_without_legacy_job_copies(
+    tmp_path: Path, finite: bool
+) -> None:
+    import shutil
+    import time
+    from dataclasses import replace
     from uuid import uuid4
+
+    import yaml
+
+    from ea.web.paper_desktop import DesktopPaper
+    from ea.web.quine import QuineBridge
+    from unit.test_bounded_round_trips_v1 import bounded_scenario
 
     owner_root = Path(__file__).parents[2] / ".local" / "paper-desktop" / ("q" + uuid4().hex[:6])
     core = Core(tmp_path, workspace=owner_root)
+    manager = None
     try:
         settings = _web_settings(tmp_path, core)
+        if finite:
+            bounded_scenario(settings.scenario_root).replace(
+                settings.scenario_root / "bounded-long.yaml"
+            )
+            manager = DesktopPaper(
+                tmp_path / "paper",
+                settings.workspace,
+                quine=QuineBridge(core.socket, workspace=core.workspace),
+            )
+            manager.open()
+            settings = replace(settings, desktop_paper=manager)
         _target(settings.scenario_root)
+        if finite:
+            target = settings.scenario_root / "later.yaml"
+            document = yaml.safe_load(target.read_text())
+            document["strategy"].pop("target_quantity")
+            target.write_text(yaml.safe_dump(document))
         with TestClient(create_app(settings), base_url=ORIGIN) as client:
             source = _source_job(client, _create_via_http(client))
             relation = _post_holdout(
@@ -42,16 +72,48 @@ def test_rust_candidate_reads_owner_evidence_without_legacy_job_copies(tmp_path:
                 == 200
             )
             assert client.get(path).json()["status"] == "ACCEPTED"
-            assert client.get(path + "/simulation-preparation").json()["blockers"] == [
-                "unsupported_paper_profile_requires_action_v2_v4_v5"
-            ]
+            preparation = client.get(path + "/simulation-preparation").json()
+            if finite:
+                assert preparation["eligible"], preparation
+                request_id = str(uuid4())
+                launched = client.post(
+                    "/api/paper/instances",
+                    headers=WRITE_HEADERS,
+                    json={
+                        "request_id": request_id,
+                        "candidate_id": candidate["candidate_id"],
+                        "fingerprint": preparation["fingerprint"],
+                        "name": "Finite owner run",
+                        "prices": [100],
+                        "interval_seconds": 0.01,
+                        "duration_seconds": 2,
+                    },
+                )
+                assert launched.status_code == 202, launched.text
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    ended = client.get(f"/api/paper/instances/{request_id}").json()
+                    if ended["terminal_confirmed"]:
+                        break
+                    time.sleep(0.05)
+                assert ended["terminal_confirmed"], ended
+                assert ended["overview"]["stop_trigger"] == "duration_budget"
+                assert ended["overview"]["cash"] == "9998.8"
+                assert ended["process_exit"] == 0
+            else:
+                assert preparation["blockers"] == [
+                    "unsupported_paper_profile_requires_action_v2_v4_v5"
+                ]
             assert not list((settings.workspace / "jobs").glob("*.json"))
             # An owner artifact drift is unavailable, never a replacement report.
             report = core.workspace / "official" / source / "report.json"
             report.write_bytes(report.read_bytes() + b" ")
             assert client.get(path).status_code == 409
     finally:
+        if manager is not None:
+            manager.close()
         core.stop()
+        shutil.rmtree(owner_root)
 
 
 def test_launch_identity_survives_lost_response_and_stop_reopens(tmp_path: Path) -> None:
