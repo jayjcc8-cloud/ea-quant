@@ -112,6 +112,7 @@ def run_local_paper(
     prices: tuple[float, ...] = (100.0,),
     interval: float = 0.1,
     event_limit: int | None = None,
+    duration_seconds: int | None = None,
     run_id: RunId | None = None,
     on_ready: Callable[[Path], None] | None = None,
     crash_after: AuditRecordKind | None = None,
@@ -130,6 +131,10 @@ def run_local_paper(
         raise ValueError("Paper interval must be in 0.01..10 seconds")
     if event_limit is not None and (type(event_limit) is not int or event_limit < 1):
         raise ValueError("Paper event limit must be positive")
+    if duration_seconds is not None and (
+        type(duration_seconds) is not int or not 1 <= duration_seconds <= 3600
+    ):
+        raise ValueError("Paper duration must be an integer in 1..3600 seconds")
     run_id = RunId(str(uuid4())) if run_id is None else run_id
     output_root = _safe_output_root(output_root.expanduser().absolute())
     attempt = output_root / run_id.value
@@ -168,6 +173,8 @@ def run_local_paper(
         "interval_seconds": interval,
         "event_limit": event_limit,
     }
+    if duration_seconds is not None:
+        operation["duration_seconds"] = duration_seconds
     lineage = Sha256Digest(
         sha256(b"ea.local-paper-lineage.v1\0" + _canonical(operation)).hexdigest()
     )
@@ -190,6 +197,8 @@ def run_local_paper(
     writer: PaperSessionWriter | None = None
     stopping = Event()
     capacity_exhausted = False
+    deadline: float | None = None
+    stop_trigger: str | None = None
     previous_handlers: dict[signal.Signals, Any] = {}
     result: dict[str, Any] = {
         "state": "starting",
@@ -214,12 +223,19 @@ def run_local_paper(
         stopping.set()
 
     def should_stop() -> bool:
+        nonlocal stop_trigger
         assert writer is not None
-        return (
+        if stop_trigger is not None:
+            return True
+        if (
             stopping.is_set()
             or (parent_stop is not None and parent_stop())
             or writer.stop_requested()
-        )
+        ):
+            stop_trigger = "requested"
+        elif deadline is not None and time.monotonic() >= deadline:
+            stop_trigger = "duration_budget"
+        return stop_trigger is not None
 
     def stream_stop_requested() -> bool:
         """Independent capacity gate consulted immediately before each market.
@@ -330,6 +346,8 @@ def run_local_paper(
         if artifact is not None:
             _write_once(attempt / "strategy.eastrategy", artifact)
         logger.emit("paper.started")
+        if duration_seconds is not None:
+            deadline = time.monotonic() + duration_seconds
         publish()
         if on_ready is not None:
             on_ready(attempt)
@@ -373,6 +391,9 @@ def run_local_paper(
             and stream.reason.value == "stop_requested"
             else "failed"
         )
+        terminal_trigger = (
+            stop_trigger if duration_seconds is not None and result["state"] == "stopped" else None
+        )
         engine._append(
             AuditRecordKind.RUN_TERMINAL,
             canonical_paper_terminal_payload(
@@ -386,9 +407,12 @@ def run_local_paper(
                 pending_facts=stream.pending_facts,
                 pending_orders=int(engine.pending is not None),
                 fill_count=len(engine.committed),
+                stop_trigger=terminal_trigger,
             ),
         )
         result["terminal_durable"] = True
+        if terminal_trigger is not None:
+            result["stop_trigger"] = terminal_trigger
     except BaseException as error:
         if writer is None:
             raise
@@ -492,6 +516,12 @@ def resume_local_paper(run_dir: Path) -> dict[str, Any]:
                         pending_orders=pending_orders,
                         pending_facts=pending_facts,
                     )
+                terminal = json.loads(verified.terminal_record.canonical_payload)
+                if reason == "stop_requested" and terminal.get("stop_trigger") in {
+                    "requested",
+                    "duration_budget",
+                }:
+                    document["stop_trigger"] = terminal["stop_trigger"]
                 return document
             finally:
                 recovered_terminal._finish()
