@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Annotated, cast
 import typer
 
 from ea import __version__
+from ea.cli.paper_interval import interval_app
 from ea.config import ConfigurationError, load_configuration
 from ea.config.diagnostics import escape_diagnostic_label
 from ea.product import (
@@ -66,9 +67,10 @@ alerts_app = typer.Typer(
 )
 paper_app.add_typer(alerts_app, name="alerts")
 gate_app = typer.Typer(
-    help="Lock one gate identity and judge the current runtime against it. Starts no gate.",
+    help="Observe current Paper state or collect and evaluate a saved interval. Starts no runtime.",
 )
 paper_app.add_typer(gate_app, name="gate")
+gate_app.add_typer(interval_app, name="interval")
 
 
 data_app = typer.Typer(help="Inspect strict full-capture local OHLCV input.")
@@ -1043,14 +1045,13 @@ def paper_gate_evaluate(
     This command supplies no interval history, so a healthy, unchanged runtime
     evaluates INVALID/evidence_gap: one healthy instant can never certify a 72h or
     7d window, and no invocation of this command can produce a 72h or 7d PASS
-    until trusted durable interval history is connected to it. It adds no
-    evaluator and writes nothing, so it starts no gate, certifies no gate after
-    the fact, and reports no soak result.
+    on this current-observation path. Use `gate interval begin|end|settle|evaluate`
+    to collect and judge a saved interval. This command adds no evaluator and
+    writes nothing; it reports no soak result.
 
     Exit code 3 means the verdict is not PASS, or that the observation itself
     could not be taken.
     """
-    from ea.product.market_stream import RealUtcClock
     from ea.product.paper_evidence import GateVerdict, evaluate_gate
     from ea.product.paper_gate_prep import (
         PaperGatePrepError,
@@ -1080,10 +1081,11 @@ def paper_gate_evaluate(
         backup_root=backup_root,
         alert_stream=alert_stream,
     )
-    verdict = evaluate_gate(snapshot, locked, current, evaluated_at=RealUtcClock().now())
+    verdict = evaluate_gate(snapshot, locked, current, evaluated_at=snapshot.captured_at)
     typer.echo(
         canonical_json(
             {
+                "evaluation_scope": "current_observation_without_interval_history",
                 "locked_identity": locked.document(),
                 "current_identity": current.document(),
                 "snapshot": snapshot.document(),

@@ -1223,3 +1223,31 @@ def test_instant_health_evaluator_is_unchanged() -> None:
     )
     assert drifted.verdict is GateVerdict.INVALID
     assert drifted.reasons == ("repo_sha_drift",)
+
+
+@pytest.mark.parametrize("changed", ["identity", "health"])
+def test_saved_observation_cannot_be_erased_by_healthy_boundary(
+    tmp_path: Path, changed: str
+) -> None:
+    from dataclasses import replace
+
+    from ea.product.paper_gate_history import PaperIntervalObservation
+
+    locked = _locked()
+    clean = _attempt(tmp_path, INTERRUPTED_RUN, shape=PAPER_STOP, name="clean")
+    history = _history(
+        locked,
+        attempts=(clean,),
+        associations=(_association(clean, STARTED_AT, WINDOW_END, locked),),
+    )
+    snapshot = replace(_healthy_snapshot(), captured_at=MIDPOINT)
+    current = locked
+    if changed == "identity":
+        current = _current(locked, config_bytes=b"changed and later restored")
+    else:
+        snapshot = replace(snapshot, backup_state=BackupSummary.STALE)
+    history = replace(history, observations=(PaperIntervalObservation(snapshot, current),))
+    history = decode_paper_interval_history(history.document())
+    verdict = _evaluate(history=history, locked=locked)
+    assert verdict.verdict is (GateVerdict.INVALID if changed == "identity" else GateVerdict.FAIL)
+    assert ("config_drift" if changed == "identity" else "backup_not_fresh") in verdict.reasons

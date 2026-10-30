@@ -708,3 +708,38 @@ def test_snapshot_refuses_rather_than_inventing_a_runtime(harness: Harness) -> N
 
     harness.run("run", check=False)
     assert harness.run("snapshot", check=False).returncode != 0
+
+
+def test_gate_begin_pins_operator_inventory_without_starting_anything(harness: Harness) -> None:
+    harness.install()
+    harness.run("run", "--supervised", check=False)
+    run = (harness.supervisor / "state" / "current-run").read_text().strip()
+    Path(run).mkdir(parents=True, exist_ok=True)
+    before = harness.argv()
+    # The stub exits 9 for the new product command; argv proves the wrapper
+    # passes the real pinned paths rather than a hand-entered time/health state.
+    result = harness.run(
+        "gate",
+        "begin",
+        "--interval",
+        "/srv/interval",
+        "--repo",
+        "/srv/ea",
+        "--gate-id",
+        "observed",
+        "--gate-type",
+        "72h",
+        check=False,
+    )
+    assert result.returncode == 9
+    assert len(harness.argv()) == len(before) + 1
+    assert harness.argv()[-1] == (
+        f"paper gate interval begin --run-dir {run} "
+        f"--current-run {harness.supervisor / 'state/current-run'} "
+        f"--launch-history {harness.supervisor / 'state/launch-history.jsonl'} "
+        f"--config {harness.supervisor / 'run-config.env'} "
+        f"--launchd-dir {harness.agents} --backup-root {harness.backups} "
+        "--interval /srv/interval --repo /srv/ea --gate-id observed --gate-type 72h"
+    )
+    harness.run("gate", "end", "--interval", "/srv/interval", check=False)
+    assert harness.argv()[-1] == "paper gate interval end --interval /srv/interval"
