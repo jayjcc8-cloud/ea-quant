@@ -1745,3 +1745,25 @@ it('returns through the actual report association to the same source report view
   expect(screen.getByRole('button', { name: '完整交易' }).getAttribute('aria-pressed')).toBe('true')
   expect(writes).not.toHaveBeenCalled()
 })
+
+
+it.each([
+  [undefined, 'Legacy latency omitted · effective 0 ms'],
+  [{ policy: 'deterministic-latency-v1', latency_ms: 0 }, '0 ms execution latency'],
+  [{ policy: 'deterministic-latency-v1', latency_ms: 60000 }, '60000 ms execution latency'],
+] as const)('distinguishes frozen latency assumptions in report details: %s', async (latency, expected) => {
+  const frozen = structuredClone(job)
+  frozen.input_snapshot!.scenario.execution = { policy: 'phase1.next-bar-close.v1', latency }
+  window.history.pushState({}, '', '/backtests/job-1')
+  render(<App api={adapter({ getBacktest: async () => frozen })} />)
+  expect((await screen.findAllByText(expected)).length).toBeGreaterThan(0)
+})
+
+it('keeps omitted and explicit zero latency distinguishable in comparison inputs', async () => {
+  const right = structuredClone(secondJob)
+  right.input_snapshot!.scenario.execution = { policy: 'phase1.next-bar-close.v1', latency: { policy: 'deterministic-latency-v1', latency_ms: 0 } }
+  window.history.pushState({}, '', '/backtests/compare/job-1/job-2')
+  render(<App api={adapter({ getBacktest: async id => id === 'job-1' ? job : right, getReport: async id => id === 'job-1' ? report : secondReport })} />)
+  expect(await screen.findByText('Legacy latency omitted · effective 0 ms')).toBeTruthy()
+  expect(screen.getByText('0 ms execution latency')).toBeTruthy()
+})
