@@ -112,7 +112,7 @@ export function DesktopSettings({ api, onSaved, onSavingChange, section = 'all' 
       {(section === 'all' || section === 'model') && <fieldset className="model-connections" disabled={busy || !!status.model_error}>
         <legend>模型连接</legend>
         {status.model_error && <p role="alert">{status.model_error}</p>}
-        <p className="model-scope">作用域：当前工作区。已批准轮次保留当时的连接身份。</p>
+        <p className="model-scope">这些连接用于当前工作区。更改不会影响正在进行的请求。</p>
         <div className="model-connection-layout">
         {status.model.profiles && <aside className="model-directory" aria-label="已保存连接">
           <p>工作区默认：<strong>{status.model.profiles.find(item => item.id === status.model.default_profile_id)?.name ?? '未设置'}</strong></p>
@@ -120,7 +120,7 @@ export function DesktopSettings({ api, onSaved, onSavingChange, section = 'all' 
             <strong>{item.name}</strong> · {item.provider} · {item.model} · v{item.revision}
             <p className="muted">{item.base_url || '提供方默认端点'} · {item.credential_available ? '凭据已保存，连接未验证' : '未配置凭据'}</p>
             <button onClick={() => edit(item.id, item, item.name)}>编辑 {item.name}</button>
-            <button disabled={item.id === status.model.default_profile_id} onClick={() => void save({ default_model_profile: item.id }, '工作区默认已更改；历史调用和已批准轮次保持原配置。')}>{item.id === status.model.default_profile_id ? '当前默认' : `设为默认 ${item.name}`}</button>
+            <button disabled={item.id === status.model.default_profile_id} onClick={() => void save({ default_model_profile: item.id }, '默认连接已更改。跟随默认设置的研究将在下次提问时使用它；当前请求和历史记录不变。')}>{item.id === status.model.default_profile_id ? '当前默认' : `设为默认 ${item.name}`}</button>
           </li>)}</ul>
           <button onClick={() => edit(crypto.randomUUID(), { provider: 'deepseek', model: '', base_url: null } as ModelConfigurationStatus, '')}>添加连接</button>
         </aside>}
@@ -160,7 +160,7 @@ export function DesktopSettings({ api, onSaved, onSavingChange, section = 'all' 
         </select></label>
         <button onClick={() => void save({ theme }, '主题已保存，退出重开后仍然生效。')}>保存主题</button>
       </fieldset>}
-      {section !== 'workspace' && <footer className="settings-edit-footer"><p>页面切换保留本次会话普通草稿；退出应用不保证保留。请保存设置，或取消放弃编辑。</p><button disabled={busy} onClick={cancel}>取消未保存的修改</button></footer>}
+      {section !== 'workspace' && <footer className="settings-edit-footer"><p>未保存的普通设置仅在本次会话内保留。退出应用前，请保存或取消修改。</p><button disabled={busy} onClick={cancel}>取消未保存的修改</button></footer>}
     </>}
   </section>
 }

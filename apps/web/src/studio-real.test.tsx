@@ -383,7 +383,7 @@ it('configures a fresh workspace through v3 and explicitly selects its connectio
   fireEvent.change(screen.getByLabelText('模型 ID'), { target: { value: 'first-model' } })
   await userEvent.click(screen.getByRole('button', { name: '保存模型设置' }))
   await userEvent.click(await screen.findByRole('button', { name: '设为默认 本地连接' }))
-  await screen.findByText('工作区默认已更改；历史调用和已批准轮次保持原配置。')
+  await screen.findByText('默认连接已更改。跟随默认设置的研究将在下次提问时使用它；当前请求和历史记录不变。')
   expect(send).not.toHaveBeenCalled()
   await userEvent.click(screen.getByRole('button', { name: '返回研究' }))
   expect(screen.getByLabelText('消息')).toBe(preservedInput)
