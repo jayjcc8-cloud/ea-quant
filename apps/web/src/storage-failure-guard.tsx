@@ -14,7 +14,7 @@ let replayedAnchor: HTMLAnchorElement | null = null
 export function StorageFailureGuard({ active, message }: { active: boolean; message: string }) {
   const [pending, setPending] = useState<HTMLAnchorElement | null>(null)
   const pendingAnchor = useRef<HTMLAnchorElement | null>(null)
-  const dialog = useRef<HTMLDivElement>(null)
+  const dialog = useRef<HTMLDialogElement>(null)
   const cancelButton = useRef<HTMLButtonElement>(null)
   const titleId = useId()
   const messageId = useId()
@@ -58,11 +58,28 @@ export function StorageFailureGuard({ active, message }: { active: boolean; mess
     }
   }, [active])
 
-  useEffect(() => { if (pending) cancelButton.current?.focus() }, [pending])
+  useEffect(() => {
+    const element = dialog.current
+    if (!pending || !element) return
+    // Keep this decision above a native search/assistant modal. A z-index overlay
+    // cannot receive input while another dialog owns the browser's top layer.
+    if (element.showModal) element.showModal()
+    else element.open = true
+    cancelButton.current?.focus()
+    return () => {
+      if (element.open) { if (element.close) element.close(); else element.open = false }
+    }
+  }, [pending])
+
+  const dismiss = () => {
+    const element = dialog.current
+    if (element?.open) { if (element.close) element.close(); else element.open = false }
+  }
 
   const close = () => {
     const anchor = pendingAnchor.current
     pendingAnchor.current = null
+    dismiss()
     setPending(null)
     if (anchor?.isConnected) anchor.focus()
   }
@@ -70,6 +87,7 @@ export function StorageFailureGuard({ active, message }: { active: boolean; mess
   const confirmLeave = () => {
     const anchor = pendingAnchor.current
     pendingAnchor.current = null
+    dismiss()
     setPending(null)
     // A detached link is closed rather than navigating through a stale target.
     if (!anchor || !anchor.isConnected) return
@@ -79,7 +97,8 @@ export function StorageFailureGuard({ active, message }: { active: boolean; mess
     }
   }
 
-  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+  const onKeyDown = (event: KeyboardEvent<HTMLDialogElement>) => {
+    if (event.defaultPrevented || event.nativeEvent.isComposing) return
     if (event.key === 'Escape') { event.preventDefault(); close(); return }
     if (event.key !== 'Tab') return
     const nodes = dialog.current?.querySelectorAll<HTMLElement>(
@@ -96,9 +115,9 @@ export function StorageFailureGuard({ active, message }: { active: boolean; mess
   }
 
   if (!active || !pending) return null
-  return <div className="preview-backdrop">
-    <div ref={dialog} className="preview-dialog" role="dialog" aria-modal="true"
-      aria-labelledby={titleId} aria-describedby={messageId} tabIndex={-1} onKeyDown={onKeyDown}>
+  return <dialog ref={dialog} className="preview-dialog storage-leave-dialog" aria-modal="true"
+      aria-labelledby={titleId} aria-describedby={messageId} tabIndex={-1} onKeyDown={onKeyDown}
+      onCancel={event => { event.preventDefault(); close() }}>
       <h2 id={titleId}>离开此页？</h2>
       <p id={messageId}>{message}</p>
       <p className="muted">继续编辑会留在本页并保留输入；放弃并离开会丢弃本页未能缓冲的输入，只导航到你刚才点击的链接。</p>
@@ -106,6 +125,5 @@ export function StorageFailureGuard({ active, message }: { active: boolean; mess
         <button ref={cancelButton} type="button" onClick={close}>继续编辑</button>
         <button type="button" onClick={confirmLeave}>放弃并离开</button>
       </div>
-    </div>
-  </div>
+  </dialog>
 }
