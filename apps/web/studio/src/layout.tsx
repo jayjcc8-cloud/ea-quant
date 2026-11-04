@@ -1,5 +1,5 @@
 /** Existing v3 presentation, separated from the offline scenario store. */
-import { useState, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode, type KeyboardEvent } from 'react';
 export function Icon({
   name = "file",
   size = 20,
@@ -178,16 +178,86 @@ export function AgentSurface({ context, report = false, onClose, history, input 
     <div className="agent-input">{input}</div>
   </aside>;
 }
+function modalKey(event: KeyboardEvent<HTMLDialogElement>, close: () => void) {
+  if (event.defaultPrevented || event.nativeEvent.isComposing) return;
+  const dialog = event.currentTarget;
+  if ((event.target as Element).closest('dialog, [role="dialog"]') !== dialog) return;
+  if (event.key === 'Escape') { event.preventDefault(); close(); return; }
+  if (event.key !== 'Tab') return;
+  const controls = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex="-1"])')]
+    .filter(element => element.getClientRects().length > 0 && !element.closest('[inert]'));
+  const first = controls[0], last = controls.at(-1);
+  if (!first) { event.preventDefault(); dialog.focus(); }
+  else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+}
+
+/** A modal owns browser focus/inert behavior; callers keep business state outside it. */
+export function DialogSurface({ title, children, onClose, className = '' }: {
+  title: string; children: ReactNode; onClose: () => void; className?: string;
+}) {
+  const ref = useRef<HTMLDialogElement>(null), id = useId();
+  useEffect(() => {
+    const prior = document.activeElement as HTMLElement | null, dialog = ref.current;
+    return () => {
+      if (dialog?.open) { if (dialog.close) dialog.close(); else dialog.open = false; }
+      if (prior?.isConnected) prior.focus();
+    };
+  }, []);
+  useEffect(() => {
+    const dialog = ref.current;
+    if (!dialog) return;
+    if (!dialog.open) dialog.showModal();
+    dialog.querySelector<HTMLElement>('[data-autofocus]')?.focus();
+  }, [title]);
+  return <dialog ref={ref} className={`dialog ${className}`} aria-labelledby={id}
+    onCancel={event => { event.preventDefault(); onClose(); }}
+    onKeyDown={event => modalKey(event, onClose)}>
+    <div className="dialog-head"><h2 id={id}>{title}</h2><button className="icon-button" aria-label={`关闭${title}`} onClick={onClose}><Icon name="close" /></button></div>
+    {children}
+  </dialog>;
+}
+
 export function DetailSurface({ children, assistant, openAgent, className = '' }: {
   children: ReactNode; assistant: ReactNode; openAgent?: () => void; className?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [narrow, setNarrow] = useState(() => window.matchMedia?.('(max-width: 1279px)').matches ?? false);
+  const ref = useRef<HTMLDialogElement>(null), opener = useRef<HTMLButtonElement>(null), panelId = useId();
+  useEffect(() => {
+    if (openAgent || !window.matchMedia) return;
+    const media = window.matchMedia('(max-width: 1279px)');
+    const resize = (event: MediaQueryListEvent) => { setNarrow(event.matches); setExpanded(false); };
+    media.addEventListener('change', resize);
+    return () => media.removeEventListener('change', resize);
+  }, [openAgent]);
+  useEffect(() => {
+    const dialog = ref.current, trigger = opener.current;
+    if (!dialog) return;
+    // Keep this one assistant subtree mounted as the panel changes mode. A
+    // showModal drawer gives keyboard focus containment without a second stream.
+    if (dialog.open) { if (dialog.close) dialog.close(); else dialog.open = false; }
+    if (narrow && expanded) dialog.showModal();
+    else if (!narrow) dialog.open = true;
+    return () => {
+      if (dialog.open) { if (dialog.close) dialog.close(); else dialog.open = false; }
+      if (narrow && expanded) trigger?.focus();
+    };
+  }, [narrow, expanded]);
+  const close = () => setExpanded(false);
   return <div className={`detail-layout ${className}${expanded ? ' local-agent-open' : ''}`}>
     <div className="detail-content">
-      <div className="agent-open"><button className="button" onClick={openAgent ?? (() => setExpanded(true))}><Icon name="panel" />打开 Agent</button></div>
+      <div className="agent-open"><button ref={opener} className="button" aria-controls={panelId} aria-expanded={expanded}
+        onClick={openAgent ?? (() => setExpanded(true))}><Icon name="panel" />打开研究助手</button></div>
       {children}
     </div>
-    <div className="desktop-agent">{!openAgent && expanded && <button className="button agent-close" onClick={() => setExpanded(false)}>收起 Agent</button>}{assistant}</div>
+    {openAgent ? <div className="desktop-agent">{assistant}</div> :
+      <dialog ref={ref} id={panelId} className="desktop-agent persistent-agent" role={narrow ? 'dialog' : 'complementary'}
+        aria-label="研究助手面板" aria-modal={narrow && expanded ? true : undefined}
+        onCancel={event => { event.preventDefault(); close(); }}
+        onKeyDown={event => { if (narrow) modalKey(event, close); }}>
+        <button className="button agent-close" onClick={close}><Icon name="close" />收起研究助手</button>{assistant}
+      </dialog>}
   </div>;
 }
 
@@ -198,3 +268,5 @@ export function DraftSurface({ source, parameters, costs }: { source: ReactNode;
 export function ReportOverviewSurface({ metrics, chart, sources }: { metrics: ReactNode; chart: ReactNode; sources: ReactNode }) {
   return <>{metrics}{chart}<section className="panel"><h2>来源与范围</h2>{sources}</section></>;
 }
+
+export function ErrorNote({ children }: { children: ReactNode }) { return children ? <p className="notice error" role="alert">{children}</p> : null }

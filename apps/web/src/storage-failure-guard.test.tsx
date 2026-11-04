@@ -30,6 +30,53 @@ const renderGuard = (active: boolean, message = '未保存输入在本机无法�
 const location = () => screen.getByLabelText('location').textContent
 afterEach(() => { cleanup(); window.history.replaceState({}, '', '/') })
 
+it('keeps the leave decision outside a closed assistant dialog', () => {
+  window.history.replaceState({}, '', '/start')
+  render(<BrowserRouter><Links /><dialog aria-label="收起的研究助手">
+    <StorageFailureGuard active message="消息无法缓冲" />
+  </dialog><LocationProbe /></BrowserRouter>)
+  const link = screen.getByText('first link')
+  fireEvent.click(link)
+  const confirmation = document.querySelector('.storage-leave-dialog')!
+  expect(confirmation.parentElement).toBe(document.body)
+  fireEvent.click(within(confirmation as HTMLElement).getByRole('button', { name: '继续编辑' }))
+  expect(document.querySelector('.storage-leave-dialog')).toBeNull()
+  expect(document.activeElement).toBe(link)
+  expect(location()).toBe('/start·')
+})
+
+it('opens a native modal above a search dialog and keeps the intercepted link available for one replay', async () => {
+  window.history.replaceState({}, '', '/start')
+  const nativeShow = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'showModal')
+  const nativeClose = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'close')
+  const showModal = vi.fn(function (this: HTMLDialogElement) { this.open = true })
+  Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: showModal })
+  Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value: function (this: HTMLDialogElement) { this.open = false } })
+  try {
+    render(<BrowserRouter><dialog open aria-label="搜索研究"><Links /></dialog>
+      <StorageFailureGuard active message="消息无法缓冲" /><LocationProbe /></BrowserRouter>)
+    const link = screen.getByText('first link')
+    fireEvent.click(link)
+    const confirmation = screen.getByRole('dialog', { name: '离开此页？' })
+    expect(confirmation.tagName).toBe('DIALOG')
+    expect(showModal).toHaveBeenCalledOnce()
+    expect(document.activeElement).toBe(within(confirmation).getByRole('button', { name: '继续编辑' }))
+    fireEvent(confirmation, new Event('cancel', { cancelable: true }))
+    expect(screen.queryByRole('dialog', { name: '离开此页？' })).toBeNull()
+    expect(document.activeElement).toBe(link)
+    expect(location()).toBe('/start·')
+    fireEvent.click(link)
+    fireEvent.click(screen.getByRole('button', { name: '放弃并离开' }))
+    await waitFor(() => expect(location()).toBe('/next?tab=1·kept'))
+    expect(screen.getByRole('dialog', { name: '搜索研究' })).toBeTruthy()
+  } finally {
+    if (nativeShow) Object.defineProperty(HTMLDialogElement.prototype, 'showModal', nativeShow)
+    else Reflect.deleteProperty(HTMLDialogElement.prototype, 'showModal')
+    if (nativeClose) Object.defineProperty(HTMLDialogElement.prototype, 'close', nativeClose)
+    else Reflect.deleteProperty(HTMLDialogElement.prototype, 'close')
+  }
+})
+
 it('coalesces simultaneous uncached inputs into one cancellable leave decision', async () => {
   window.history.replaceState({}, '', '/start')
   render(<BrowserRouter><Links /><StorageFailureGuard active message="草稿无法缓冲" />

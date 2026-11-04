@@ -5053,7 +5053,14 @@ class UserStrategyService:
     def conversation_state(self, user_strategy_id: object) -> dict[str, Any]:
         """What a reloaded client needs, without reading a checkpoint itself."""
         identity = _identifier(user_strategy_id, "user_strategy_id")
-        strategy = self._store.migrate_conversation(identity)
+        if self._store.is_conversation_migrated(identity):
+            # Read a running task without waiting for its provider-held lock.
+            strategy = self._store.get(identity)
+        else:
+            # Initial migration changes persistence authority. Serialize it with
+            # binding/manual saves that may already have selected the JSON path.
+            with self._lock(identity):
+                strategy = self._store.migrate_conversation(identity)
         pending = strategy.conversation_confirmation
         reserved = int(self._store.model_call_usage()["reserved_model_calls"])
         return {

@@ -644,6 +644,8 @@ nav.research-tools a:hover { background: transparent; color: var(--accent); }
 .preview-dialog { width:min(560px,100%); max-height:calc(100dvh - 32px); overflow:auto; background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:24px; box-shadow:0 14px 70px #0003; }
 .preview-dialog h2 { margin-bottom:16px; }
 .preview-dialog .actions { margin-bottom:16px; }
+.storage-leave-dialog { margin:auto; width:min(560px,calc(100% - 32px)); color:var(--text); }
+.storage-leave-dialog::backdrop { background:#0005; }
 .strategy-workspace > .paper-workspace { display:block; }
 .strategy-workspace > .paper-workspace > .paper-ai { height:100%; max-height:100%; min-height:0; position:static; border:0; border-radius:0; }
 .strategy-workspace .paper-main { gap:14px; }
