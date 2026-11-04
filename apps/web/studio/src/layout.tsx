@@ -218,11 +218,11 @@ export function DialogSurface({ title, children, onClose, className = '' }: {
   </dialog>;
 }
 
-export function DetailSurface({ children, assistant, openAgent, className = '' }: {
-  children: ReactNode; assistant: ReactNode; openAgent?: () => void; className?: string;
+export function DetailSurface({ children, assistant, openAgent, className = '', defaultCollapsed = false }: {
+  children: ReactNode; assistant: ReactNode; openAgent?: () => void; className?: string; defaultCollapsed?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const [narrow, setNarrow] = useState(() => window.matchMedia?.('(max-width: 1279px)').matches ?? false);
   const ref = useRef<HTMLDialogElement>(null), opener = useRef<HTMLButtonElement>(null), panelId = useId();
   const wasVisible = useRef<boolean | null>(null);

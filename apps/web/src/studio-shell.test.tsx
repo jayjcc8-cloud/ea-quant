@@ -146,6 +146,17 @@ it('collapses the desktop assistant without interrupting its session and restore
   expect(unmounted).not.toHaveBeenCalled()
 })
 
+it('keeps research content primary until the user opens the optional assistant', async () => {
+  narrow = false
+  const mounted = vi.fn()
+  function Assistant() { useEffect(mounted, []); return <textarea aria-label="消息" /> }
+  render(<DetailSurface defaultCollapsed assistant={<Assistant />}><h1>准备第一次回测</h1></DetailSurface>)
+  expect(screen.queryByRole('complementary', { name: '研究助手面板' })).toBeNull()
+  await userEvent.click(screen.getByRole('button', { name: '打开研究助手' }))
+  expect(screen.getByRole('textbox', { name: '消息' })).toBeTruthy()
+  expect(mounted).toHaveBeenCalledTimes(1)
+})
+
 it('keeps desktop collapse separate from opening a narrow modal and returns focus when that modal disappears', async () => {
   narrow = false
   render(<DetailSurface assistant={<textarea aria-label="消息" defaultValue="研究问题" />}><p>正文</p></DetailSurface>)

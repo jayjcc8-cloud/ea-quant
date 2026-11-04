@@ -30,7 +30,15 @@ function adapter(overrides: Partial<ApiAdapter> = {}): ApiAdapter {
 function open(api: ApiAdapter, path: string) {
   return render(<MemoryRouter initialEntries={[path]}><StudioRoutes api={api} /></MemoryRouter>)
 }
-beforeEach(() => { sessionStorage.clear(); localStorage.clear() })
+async function assistantInput() {
+  if (!screen.queryByRole('textbox', { name: '消息' })) await userEvent.click(await screen.findByRole('button', { name: '打开研究助手' }))
+  return screen.findByLabelText('消息')
+}
+beforeEach(() => {
+  sessionStorage.clear(); localStorage.clear()
+  HTMLDialogElement.prototype.showModal = function () { this.open = true }
+  HTMLDialogElement.prototype.close = function () { this.open = false }
+})
 afterEach(cleanup)
 
 it.each(['概览', '实验'])('guards uncached draft edits before leaving through the %s tab', async label => {
@@ -60,17 +68,17 @@ it('restores an unsent assistant message after experiment preparation without se
   const send = vi.fn(), launch = vi.fn()
   const api = adapter({ sendUserStrategyMessage: send, launchUserStrategyExperiment: launch })
   const view = open(api, '/research/real-idea/overview')
-  await userEvent.type(await screen.findByLabelText('消息'), '比较费用变化后再决定实验')
+  await userEvent.type(await assistantInput(), '比较费用变化后再决定实验')
   await userEvent.click(screen.getByRole('link', { name: '准备一次实验' }))
   await screen.findByRole('heading', { name: '确认一次实验' })
   await userEvent.click(screen.getByRole('link', { name: '返回修改' }))
-  expect((await screen.findByLabelText('消息') as HTMLTextAreaElement).value).toBe('比较费用变化后再决定实验')
+  expect((await assistantInput() as HTMLTextAreaElement).value).toBe('比较费用变化后再决定实验')
   view.unmount()
   const reopened = open(api, '/research/real-idea/overview')
-  expect((await screen.findByLabelText('消息') as HTMLTextAreaElement).value).toBe('比较费用变化后再决定实验')
+  expect((await assistantInput() as HTMLTextAreaElement).value).toBe('比较费用变化后再决定实验')
   reopened.unmount()
   open(adapter({ getUserStrategy: async () => ({ ...strategy, user_strategy_id: 'other-idea' }) }), '/research/other-idea/overview')
-  expect((await screen.findByLabelText('消息') as HTMLTextAreaElement).value).toBe('')
+  expect((await assistantInput() as HTMLTextAreaElement).value).toBe('')
   expect(send).not.toHaveBeenCalled(); expect(launch).not.toHaveBeenCalled()
 })
 
@@ -79,7 +87,7 @@ it('keeps newer unsent typing when an earlier model receipt arrives', async () =
   const send = vi.fn<NonNullable<ApiAdapter['sendUserStrategyMessage']>>(() => new Promise<UserStrategy>(resolve => { finish = resolve }))
   const api = adapter({ sendUserStrategyMessage: send, settingsStatus: configuredModel })
   const view = open(api, '/research/real-idea/overview')
-  const input = await screen.findByLabelText('消息')
+  const input = await assistantInput()
   fireEvent.change(input, { target: { value: '第一个问题' } })
   await waitFor(() => expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(false))
   await userEvent.click(screen.getByRole('button', { name: '发送一次模型请求' }))
@@ -89,7 +97,7 @@ it('keeps newer unsent typing when an earlier model receipt arrives', async () =
   expect((screen.getByLabelText('消息') as HTMLTextAreaElement).value).toBe('尚未发送的下一个问题')
   view.unmount()
   open(api, '/research/real-idea/overview')
-  expect((await screen.findByLabelText('消息') as HTMLTextAreaElement).value).toBe('尚未发送的下一个问题')
+  expect((await assistantInput() as HTMLTextAreaElement).value).toBe('尚未发送的下一个问题')
   expect(send).toHaveBeenCalledTimes(1)
 })
 
@@ -97,7 +105,7 @@ it('asks before losing an assistant message when its session buffer cannot be wr
   const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('quota', 'QuotaExceededError') })
   try {
     open(adapter(), '/research/real-idea/overview')
-    await userEvent.type(await screen.findByLabelText('消息'), '保留这个问题')
+    await userEvent.type(await assistantInput(), '保留这个问题')
     await userEvent.click(screen.getByRole('link', { name: '准备一次实验' }))
     expect(screen.getByRole('dialog', { name: '离开此页？' })).toBeTruthy()
     await userEvent.click(screen.getByRole('button', { name: '继续编辑' }))
@@ -131,8 +139,33 @@ it('saves an idea through the real contract without a model or experiment call',
   await userEvent.type(screen.getByLabelText('研究目标'), '检验成本')
   await userEvent.click(screen.getByRole('button', { name: '保存研究并继续' }))
   await screen.findByRole('heading', { name: strategy.name })
+  expect(screen.getByRole('link', { name: '策略草稿', current: 'page' })).toBeTruthy()
   expect(create).toHaveBeenCalledExactlyOnceWith({ name: '检验成本', intent: '检验成本' })
   expect(launch).not.toHaveBeenCalled(); expect(message).not.toHaveBeenCalled()
+})
+
+it('keeps the same assistant input mounted from preparation to confirmation and back', async () => {
+  const launch = vi.fn(), send = vi.fn()
+  open(adapter({ launchUserStrategyExperiment: launch, sendUserStrategyMessage: send }), '/research/real-idea/draft')
+  await userEvent.click(await screen.findByRole('button', { name: '打开研究助手' }))
+  const input = screen.getByLabelText('消息')
+  fireEvent.change(input, { target: { value: '先保留我的问题' } })
+  await userEvent.click(screen.getByRole('link', { name: '准备一次实验' }))
+  await screen.findByRole('heading', { name: '确认一次实验' })
+  expect(screen.getByLabelText('消息')).toBe(input)
+  expect((input as HTMLTextAreaElement).value).toBe('先保留我的问题')
+  await userEvent.click(screen.getByRole('link', { name: '返回修改' }))
+  expect(screen.getByLabelText('消息')).toBe(input)
+  expect(launch).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled()
+})
+
+it('shows a named backtest status while keeping request identity in details', async () => {
+  const record = controlRecord({ status: 'confirmed', launch_intent_id: 'private-technical-request' })
+  open(adapter({ getUserStrategy: async () => ({ ...strategy, experiments: [record] }) }), '/research/real-idea/experiments')
+  const title = await screen.findByRole('heading', { name: '回测 1' })
+  const card = title.closest('article')!
+  expect(within(card).getByText('已确认，等待运行')).toBeTruthy()
+  expect(within(card).getByText('private-technical-request').closest('details')?.open).toBe(false)
 })
 
 it('consumes one preview once and retains a lost receipt as query-only across remount', async () => {
@@ -158,7 +191,7 @@ it('reads a server-owned unknown on reopen without offering a new confirmation',
   const api = adapter({ getUserStrategy: async () => ({ ...strategy, experiments: [unknown] } as UserStrategy), launchUserStrategyExperiment: launch, previewUserStrategyExperiment: readPreview })
   open(api, '/research/real-idea/confirm')
   await userEvent.click(await screen.findByRole('button', { name: '查询原请求' }))
-  expect(screen.getByRole('alert').textContent).toContain('原请求 original：unknown')
+  expect(screen.getByRole('alert').textContent).toContain('原请求：结果未知')
   expect(launch).not.toHaveBeenCalled(); expect(readPreview).not.toHaveBeenCalled()
 })
 
@@ -194,7 +227,7 @@ it('uses one explicit scripted model call and applies its proposal without runni
   const api = adapter({ sendUserStrategyMessage: send, applyUserStrategyProposal: apply, launchUserStrategyExperiment: launch,
     settingsStatus: async () => ({ configured: true, provider: 'scripted', model: 'no-network', credential_available: false }) as Awaited<ReturnType<NonNullable<ApiAdapter['settingsStatus']>>> })
   render(<StrictMode><MemoryRouter initialEntries={['/research/real-idea/overview']}><StudioRoutes api={api} /></MemoryRouter></StrictMode>)
-  await userEvent.type(await screen.findByLabelText('消息'), '检查参数')
+  await userEvent.type(await assistantInput(), '检查参数')
   await userEvent.click(screen.getByRole('button', { name: '发送一次模型请求' }))
   await userEvent.click(await screen.findByRole('link', { name: '审阅修改提案' }))
   await screen.findByRole('heading', { name: '审阅修改提案' })
@@ -237,12 +270,13 @@ it('shows a server unknown model call and identity after reopening and permits a
   })
   const api = adapter({ getUserStrategy: async () => doc, sendUserStrategyMessage: send, settingsStatus: configuredModel })
   const view = open(api, '/research/real-idea/overview')
-  await userEvent.type(await screen.findByLabelText('消息'), '检查参数')
+  await userEvent.type(await assistantInput(), '检查参数')
   await userEvent.click(screen.getByRole('button', { name: '发送一次模型请求' }))
   await screen.findByText(/结果与用量未知/)
   const identity = send.mock.calls[0][1].call_id
   view.unmount()
   open(api, '/research/real-idea/overview')
+  await assistantInput()
   await screen.findByText(identity)
   await userEvent.click(screen.getByRole('button', { name: '查询模型请求' }))
   expect(send).toHaveBeenCalledTimes(1)
@@ -254,13 +288,14 @@ it('retains transport-unknown model identity across remount and queries without 
   const send = vi.fn().mockRejectedValue(new Error('transport lost'))
   const api = adapter({ sendUserStrategyMessage: send, settingsStatus: configuredModel })
   const view = open(api, '/research/real-idea/overview')
-  await userEvent.type(await screen.findByLabelText('消息'), '检查参数')
+  await userEvent.type(await assistantInput(), '检查参数')
   await userEvent.click(screen.getByRole('button', { name: '发送一次模型请求' }))
   await screen.findByText(/transport lost/)
   expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(true)
   const identity = send.mock.calls[0][1].call_id
   view.unmount()
   open(api, '/research/real-idea/overview')
+  await assistantInput()
   await screen.findByText(identity)
   await userEvent.click(screen.getByRole('button', { name: '查询模型请求' }))
   await screen.findByText(/尚未读到此调用/)
@@ -339,9 +374,10 @@ it('configures a fresh workspace through v3 and explicitly selects its connectio
   const api = adapter({ getUserStrategy: async () => doc, desktopSettings: async () => desktop(), saveDesktopSettings: save,
     settingsStatus: async () => model, selectUserStrategyModelProfile: select, sendUserStrategyMessage: send })
   open(api, '/research/real-idea/overview')
-  fireEvent.change(await screen.findByLabelText('消息'), { target: { value: '检查草稿' } })
+  fireEvent.change(await assistantInput(), { target: { value: '检查草稿' } })
   expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(true)
-  await userEvent.click(screen.getByRole('link', { name: '管理模型连接' }))
+  const preservedInput = screen.getByLabelText('消息')
+  await userEvent.click(screen.getByRole('button', { name: '配置模型连接' }))
   await userEvent.click(await screen.findByRole('button', { name: '添加连接' }))
   fireEvent.change(screen.getByLabelText('连接名称'), { target: { value: '本地连接' } })
   fireEvent.change(screen.getByLabelText('模型 ID'), { target: { value: 'first-model' } })
@@ -349,10 +385,9 @@ it('configures a fresh workspace through v3 and explicitly selects its connectio
   await userEvent.click(await screen.findByRole('button', { name: '设为默认 本地连接' }))
   await screen.findByText('工作区默认已更改；历史调用和已批准轮次保持原配置。')
   expect(send).not.toHaveBeenCalled()
-  await userEvent.click(screen.getByRole('link', { name: '新建研究' }))
-  // Re-open the persisted research with the existing direct route contract.
-  cleanup()
-  open(api, '/research/real-idea/overview')
+  await userEvent.click(screen.getByRole('button', { name: '返回研究' }))
+  expect(screen.getByLabelText('消息')).toBe(preservedInput)
+  expect((preservedInput as HTMLTextAreaElement).value).toBe('检查草稿')
   const picker = await screen.findByLabelText('本研究模型连接')
   expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(true)
   await userEvent.selectOptions(picker, model.profiles[0].id)
@@ -372,6 +407,7 @@ it('keeps the research selection and historical call identity when the workspace
   let doc = { ...strategy, model_profile_id: 'first' as string | null, calls: [historical] }
   const select = vi.fn(async (_id: string, profileId: string | null) => { doc = { ...doc, model_profile_id: profileId }; return doc })
   open(adapter({ getUserStrategy: async () => doc, settingsStatus: async () => ({ ...second, default_profile_id: 'second', profiles: [first, second] }), selectUserStrategyModelProfile: select }), '/research/real-idea/overview')
+  await assistantInput()
   const picker = await screen.findByLabelText('本研究模型连接') as HTMLSelectElement
   expect(picker.value).toBe('first')
   expect(screen.getByText('当次连接：历史连接名称 · v1')).toBeTruthy()
@@ -406,7 +442,7 @@ it('requests stop once and renders stopping until an owner terminal receipt is r
   expect((screen.getByRole('button', { name: '停止这次运行' }) as HTMLButtonElement).disabled).toBe(true)
   current = { ...strategy, experiments: [controlRecord({ status: 'cancelled', slot_held: false })] }
   await userEvent.click(screen.getByRole('button', { name: '重新读取研究' }))
-  await screen.findByText(/冻结 r1 · cancelled/)
+  await screen.findByText('已停止')
   expect(screen.queryByRole('button', { name: '停止这次运行' })).toBeNull()
   expect(current.experiments[0].payload).toEqual(controlRecord().payload)
   expect(launch).not.toHaveBeenCalled()
@@ -418,7 +454,7 @@ it('keeps the last owner state and exposes a refused stop without retry or redis
   await userEvent.click(await screen.findByRole('button', { name: '停止这次运行' }))
   await screen.findByRole('alert')
   expect(screen.getByRole('alert').textContent).toContain('owner already committed')
-  expect(screen.getByText(/冻结 r1 · running/)).toBeTruthy()
+  expect(screen.getByText('运行中')).toBeTruthy()
   expect(cancel).toHaveBeenCalledTimes(1); expect(launch).not.toHaveBeenCalled()
 })
 

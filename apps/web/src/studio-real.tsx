@@ -1,6 +1,6 @@
-import { commissionLabel, latencyLabel, slippageLabel } from './execution-assumptions'
 import { currentProposalValue, detailNextStep, experimentStatus, holdsExperiment, summaryNextStep } from './studio-journey'
 import { Assistant } from './studio-assistant'
+import { ResearchModelControl } from './studio-model-setup'
 import { WorkspaceNav } from './studio-navigation'
 import { reason, saved, useRead } from './studio-read'
 import { PaperWorkspace } from './paper-workspace'
@@ -38,16 +38,20 @@ function fact(value: unknown): string {
   return String(value)
 }
 function costFact(kind: 'commission' | 'slippage' | 'latency', value: unknown): string {
-  if (value === null) return kind === 'commission' ? commissionLabel(null) : kind === 'slippage' ? slippageLabel(null) : latencyLabel(null)
+  if (value === null) return kind === 'latency' ? '0 ms（旧版未单独记录）' : '0 bps'
   if (!value || typeof value !== 'object') return fact(value)
   const item = value as Record<string, unknown>
   if (typeof item.policy !== 'string') return fact(value)
-  if (kind === 'commission' && (typeof item.commission_bps === 'string' || typeof item.commission_bps === 'number')) return commissionLabel({ policy: item.policy, commission_bps: String(item.commission_bps) })
-  if (kind === 'slippage' && (typeof item.slippage_bps === 'string' || typeof item.slippage_bps === 'number')) return slippageLabel({ policy: item.policy, slippage_bps: String(item.slippage_bps) })
-  if (kind === 'latency' && typeof item.latency_ms === 'number') return latencyLabel({ policy: item.policy, latency_ms: item.latency_ms })
+  if (kind === 'commission' && (typeof item.commission_bps === 'string' || typeof item.commission_bps === 'number')) return `${item.commission_bps} bps`
+  if (kind === 'slippage' && (typeof item.slippage_bps === 'string' || typeof item.slippage_bps === 'number')) return `${item.slippage_bps} bps 不利滑点`
+  if (kind === 'latency' && typeof item.latency_ms === 'number') return `${item.latency_ms} ms`
   return fact(value)
 }
 function Facts({ items }: { items: [string, unknown][] }) { return <dl className="key-values">{items.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{fact(value)}</dd></div>)}</dl> }
+function strategyName(id: string) { return ({ 'bounded-long-v1': '延迟后买入一次', 'moving-average-entry-v1': '快均线高于慢均线时买入一次' } as Record<string, string>)[id] ?? id }
+function ResearchSteps({ step }: { step: number }) {
+  return <ol className="real-research-steps" aria-label="研究流程">{['准备', '确认', '运行', '报告'].map((label, index) => <li key={label} aria-current={index === step ? 'step' : undefined}><span>{index + 1}</span><strong>{label}</strong></li>)}</ol>
+}
 function Unavailable() { return <div className="page"><h1>此功能暂未开放</h1><p>返回研究，继续检查策略与数据。</p><Link to="/">返回研究</Link></div> }
 
 function Home({ api }: { api: ApiAdapter }) {
@@ -61,7 +65,7 @@ function Home({ api }: { api: ApiAdapter }) {
     sending.current = true; setBusy(true); setError('')
     try {
       const next = await api.createUserStrategy!({ name: goal.trim().slice(0, 64), intent: goal.trim() })
-      update(''); navigate(`/research/${encodeURIComponent(next.user_strategy_id)}/overview`)
+      update(''); navigate(`/research/${encodeURIComponent(next.user_strategy_id)}/draft`)
     } catch (e) { setError(`保存结果未确认：${reason(e)}。请刷新研究列表核对，不要重复保存。`); setUncertain(true); list.reload() }
     finally { sending.current = false; setBusy(false) }
   }
@@ -90,6 +94,7 @@ function ResearchDetail({ api, id, onResearchChanged }: { api: ApiAdapter; id: s
   const read = useCallback(async () => { const next = await api.getUserStrategy!(id); if (next.user_strategy_id !== id) throw new Error('研究身份不一致'); return next }, [api, id])
   const loaded = useRead(read), catalog = useRead(useCallback(() => api.listScenarios(true), [api]))
   const [error, setError] = useState('')
+  const [modelOpen, setModelOpen] = useState(false), [modelVersion, setModelVersion] = useState(0)
   const setStrategy = loaded.setValue
   const changed = useCallback((next: UserStrategy) => { if (next.user_strategy_id === id) { setStrategy(next); onResearchChanged(next) } }, [id, setStrategy, onResearchChanged])
   const strategy = loaded.value
@@ -103,10 +108,10 @@ function ResearchDetail({ api, id, onResearchChanged }: { api: ApiAdapter; id: s
   const draft = strategy.draft, next = detailNextStep(strategy)
   const canPrepare = !isIntentDraft(draft) && !strategy.experiments.some(holdsExperiment)
   const latest = strategy.experiments.at(-1), pendingProposals = strategy.proposals.filter(item => item.status === 'open')
-  if (tab === 'confirm') return <div className="page"><PageHeader title="确认实验输入" subtitle="核对冻结输入后，明确启动一次本地引擎实验。" breadcrumb={<Link to={`/research/${encodeURIComponent(id)}/draft`}>{strategy.name} / 新建实验</Link>} /><Confirmation key={`${id}.${draft.revision}`} api={api} strategy={strategy} changed={changed} done={() => navigate(`/research/${encodeURIComponent(id)}/experiments`)} /></div>
-  return <DetailSurface className="real-detail" assistant={<Assistant key={id} api={api} strategy={strategy} changed={changed} />}>
-    <PageHeader title={strategy.name} subtitle={`草稿 r${draft.revision} · ${isIntentDraft(draft) ? '等待绑定策略与数据' : `${draft.venue}:${draft.symbol}`}`} breadcrumb={<Link to="/">研究 / {strategy.name}</Link>} actions={tab === 'experiments' && canPrepare && <Link className="button primary" to={`/research/${encodeURIComponent(id)}/confirm`}>准备一次实验</Link>} />
-    <nav className="tabs" aria-label="页面标签">{[['overview', '概览'], ['draft', '策略草稿'], ['experiments', '实验']].map(([value, label]) => <Link key={value} to={`/research/${encodeURIComponent(id)}/${value}`} aria-current={tab === value ? 'page' : undefined}>{label}</Link>)}</nav>
+  return <DetailSurface className="real-detail" defaultCollapsed assistant={<Assistant key={id} api={api} strategy={strategy} changed={changed} modelVersion={modelVersion} onConfigureModel={() => setModelOpen(true)} />}>
+    <PageHeader title={strategy.name} subtitle={isIntentDraft(draft) ? '选择策略与自己的数据，开始第一次回测。' : `草稿 r${draft.revision} · ${draft.venue}:${draft.symbol}`} breadcrumb={<Link to="/">研究 / {strategy.name}</Link>} actions={<><ResearchModelControl api={api} strategy={strategy} open={modelOpen} onOpen={() => setModelOpen(true)} onClose={() => setModelOpen(false)} modelVersion={modelVersion} onSaved={() => setModelVersion(value => value + 1)} />{tab === 'experiments' && canPrepare && <Link className="button primary" to={`/research/${encodeURIComponent(id)}/confirm`}>准备一次实验</Link>}</>} />
+    {['draft', 'confirm', 'experiments'].includes(tab) && <ResearchSteps step={tab === 'confirm' ? 1 : tab === 'experiments' ? 2 : 0} />}
+    {(!isIntentDraft(draft) || tab !== 'draft') && <nav className="tabs" aria-label="页面标签">{[['overview', '概览'], ['draft', '策略草稿'], ['experiments', '实验']].map(([value, label]) => <Link key={value} to={`/research/${encodeURIComponent(id)}/${value}`} aria-current={tab === value ? 'page' : undefined}>{label}</Link>)}</nav>}
     <ErrorNote>{error}</ErrorNote>
     {tab === 'overview' && <>
       <h2>研究问题</h2><section className="panel"><p>{strategy.intent}</p></section>
@@ -123,11 +128,12 @@ function ResearchDetail({ api, id, onResearchChanged }: { api: ApiAdapter; id: s
       </ol>
       <section className="panel"><div className="binding-row"><Icon name="cube" size={25} /><div><strong>策略模板</strong><small>{isIntentDraft(draft) ? '尚未绑定' : draft.strategy_id}</small></div><Link className="button" to={`/research/${encodeURIComponent(id)}/draft`}>检查策略草稿</Link></div><div className="binding-row"><Icon name="data" size={25} /><div><strong>数据</strong><small>{isIntentDraft(draft) ? '尚未绑定' : draft.dataset_id ?? `注册场景 ${draft.scenario_id}`}</small></div><Link className="button" to={`/research/${encodeURIComponent(id)}/draft`}>绑定策略与数据</Link></div></section>
     </>}
-    {tab === 'draft' && (isIntentDraft(draft) ? <BindScenario api={api} strategy={strategy} scenarios={catalog.value ?? []} catalogReady={!!catalog.value} catalogError={catalog.error || null} reloadCatalog={catalog.reload} changed={changed} failed={setError} />
+    {tab === 'draft' && (isIntentDraft(draft) ? <><p className="setup-summary">{strategy.intent}</p><BindScenario presentation="studio" api={api} strategy={strategy} scenarios={catalog.value ?? []} catalogReady={!!catalog.value} catalogError={catalog.error || null} reloadCatalog={catalog.reload} changed={changed} failed={setError} /></>
       : <><ResearchDraft api={api} strategy={strategy} changed={changed} /><details className="real-data-binding"><summary>修改绑定数据或导入 CSV</summary><SelectDataset key={draft.revision} api={api} strategy={strategy} changed={changed} failed={setError} /></details></>)}
+    {tab === 'confirm' && <Confirmation key={`${id}.${draft.revision}`} api={api} strategy={strategy} changed={changed} done={() => navigate(`/research/${encodeURIComponent(id)}/experiments`)} />}
     {tab === 'experiments' && <Experiments api={api} strategy={strategy} changed={changed} refresh={loaded.reload} />}
     {tab === 'proposal' && <ProposalReview api={api} strategy={strategy} proposalId={new URLSearchParams(location.search).get('proposal')} changed={changed} />}
-    {!['overview', 'draft', 'experiments', 'proposal'].includes(tab) && <Unavailable />}
+    {!['overview', 'draft', 'confirm', 'experiments', 'proposal'].includes(tab) && <Unavailable />}
   </DetailSurface>
 
 }
@@ -166,11 +172,11 @@ function ResearchDraft({ api, strategy, changed }: { api: ApiAdapter; strategy: 
   const blocked = strategy.experiments.some(holdsExperiment), next = detailNextStep(strategy)
   return <><div className="section-heading"><h2>策略草稿 · <span className="status">r{revision}</span></h2><Link className="button primary" to={blocked ? next.href : `/research/${encodeURIComponent(id)}/confirm`}>{blocked ? next.label : '准备一次实验'}</Link></div>
     <DraftSurface source={<><Facts items={[
-      ['策略模板', draft.strategy_id], ['数据', draft.dataset_id ?? draft.scenario_id], ['标的', `${draft.venue}:${draft.symbol}`],
+      ['策略', strategyName(draft.strategy_id)], ['数据', draft.dataset_id ?? draft.scenario_id], ['标的', `${draft.venue}:${draft.symbol}`],
       ['样本区间（UTC）', source.value?.data?.start_utc && source.value.data.end_utc ? `${source.value.data.start_utc} — ${source.value.data.end_utc}` : '尚未读到'],
     ]} /><ErrorNote>{source.error}</ErrorNote></>}
       parameters={<DraftEditor presentation="studio" api={api} strategy={strategy} changed={changed} />}
-      costs={<><Facts items={[[ '手续费', costFact('commission', source.value?.commission) ], ['滑点', costFact('slippage', source.value?.slippage)], ['延迟', costFact('latency', source.value?.latency)]]} /><p className="muted">每 1 bps 等于 0.01%。成本由所选场景提供，当前只读。保存草稿后，进入独立确认页核对本次执行。</p></>} />
+      costs={<><Facts items={[[ '手续费', costFact('commission', source.value?.commission) ], ['滑点', costFact('slippage', source.value?.slippage)], ['延迟', costFact('latency', source.value?.latency)]]} /><p className="muted">每 1 bps 等于 0.01%。成本使用所选策略的固定设置。保存参数后，继续核对并确认这次回测。</p></>} />
   </>
 }
 function ExperimentControls({ api, strategyId, item, changed }: { api: ApiAdapter; strategyId: string; item: UserStrategyExperiment; changed: (next: UserStrategy) => void }) {
@@ -192,7 +198,7 @@ function ExperimentControls({ api, strategyId, item, changed }: { api: ApiAdapte
   return <>
     {['confirmed', 'running', 'stopping'].includes(item.status) && <div className="real-experiment-controls">
       <button className="button" disabled={busy || item.status === 'stopping' || !api.cancelUserStrategyExperiment} onClick={() => void stop()}>{busy ? '正在请求停止…' : '停止这次运行'}</button>
-      <p className="muted" role="status">{item.status === 'stopping' ? '停止请求已受理，尚未证实停止；等待运行所有者记录终态。' : '停止请求由运行所有者处理，以返回的状态为准。'}</p>
+      <p className="muted" role="status">{item.status === 'stopping' ? '停止请求已受理，尚未证实停止；正在等待执行结果。' : '提交停止请求后，仍需等待执行结果。'}</p>
     </div>}
     <ErrorNote>{error}</ErrorNote>
     {item.status === 'unknown' && <UnknownRecoveryControls strategyId={strategyId} item={item} changed={changed} recover={api.recoverUserStrategyExperiment} diagnosticsHref="/settings/about" />}
@@ -201,10 +207,11 @@ function ExperimentControls({ api, strategyId, item, changed }: { api: ApiAdapte
 function Experiments({ api, strategy, changed, refresh }: { api: ApiAdapter; strategy: UserStrategy; changed: (next: UserStrategy) => void; refresh: () => void }) {
   return <section className="panel"><div className="section-heading"><h2>实验记录</h2><button className="button" onClick={refresh}>重新读取研究</button></div>
     {!strategy.experiments.length && <p className="muted">尚无实验；保存草稿不会自动执行。</p>}
-    {strategy.experiments.map(item => <article className="real-experiment" key={item.launch_intent_id}><strong>{item.launch_intent_id}</strong><p>冻结 r{item.payload.draft_revision} · {item.status}{item.phase ? ` · ${item.phase}` : ''}</p>
-      {item.message && <p>{item.message}</p>}{item.status === 'unknown' && <p>结果未知。只查询原请求，不重新派发。</p>}
+    {strategy.experiments.map((item, index) => <article className="real-experiment" key={item.launch_intent_id}><div className="section-heading"><h3>回测 {index + 1}</h3><span role="status">{item.report_ready && item.status === 'created' ? '报告已生成' : experimentStatus(item.status)}</span></div><p>使用草稿 r{item.payload.draft_revision}</p>
+      {item.status === 'unknown' && <p>尚未确认这次回测的结果。查询原请求后再继续。</p>}
       <ExperimentControls api={api} strategyId={strategy.user_strategy_id} item={item} changed={changed} />
       {item.job_id && <Link className="button" to={`/report/${encodeURIComponent(item.job_id)}/overview`}>{item.report_ready ? '打开冻结报告' : '查看运行与报告状态'}</Link>}
+      <details><summary>运行详情</summary><Facts items={[[ '请求', item.launch_intent_id ], ['状态记录', item.status], ['执行阶段', item.phase]]} />{item.message && <p>{item.message}</p>}</details>
     </article>)}
   </section>
 }
@@ -248,7 +255,7 @@ function Confirmation({ api, strategy, changed, done }: { api: ApiAdapter; strat
       const record = next.experiments.find(item => item.launch_intent_id === queryId)
       if (!record) setError('尚未读到原请求。保留确认身份，只能再次查询；不会重新派发。')
       else if (!holdsExperiment(record)) { sessionStorage.removeItem(key); setPending(''); done() }
-      else setError(`原请求 ${record.launch_intent_id}：${record.status}。继续保留，不重新派发。`)
+      else setError(`原请求：${experimentStatus(record.status)}。继续查询，不会重复运行。`)
     } catch (e) { if (alive.current) setError(reason(e)) }
     finally { sending.current = false; if (alive.current) setBusy(false) }
   }
@@ -275,13 +282,13 @@ function Confirmation({ api, strategy, changed, done }: { api: ApiAdapter; strat
   return <section className="real-confirm"><h2>确认一次实验</h2>
     <ErrorNote>{error}</ErrorNote>
     {rejected && <button className="button" disabled={busy} onClick={() => void repreview()}>重新读取并预览</button>}
-    {queryId ? <section className="panel"><p>原请求：{queryId} · {open?.status ?? '结果待核对'}</p><p>再次读取只查询这个身份，不会派发另一次实验。</p><button className="button" disabled={busy} onClick={() => void query()}>查询原请求</button></section>
-      : isIntentDraft(strategy.draft) ? <section className="panel"><p>请先绑定策略与数据，再核对实验输入。</p><Link className="button primary" to={`/research/${encodeURIComponent(id)}/draft`}>前往绑定策略与数据</Link></section>
+    {queryId ? <section className="panel"><p role="status">{open ? experimentStatus(open.status) : '结果待核对'}</p><p>查询这次回测的进度，不会重复运行。</p><button className="button" disabled={busy} onClick={() => void query()}>查询原请求</button><details><summary>请求详情</summary><p>{queryId}</p></details></section>
+      : isIntentDraft(strategy.draft) ? <section className="panel"><p>请先选择策略与数据，再核对回测输入。</p><Link className="button primary" to={`/research/${encodeURIComponent(id)}/draft`}>准备策略与数据</Link></section>
         : preview ? <><div className="two-column">
           <section className="panel"><h2>来源、参数与成本</h2><Facts items={[
-            ['冻结草稿', `r${preview.draft_revision}`], ['策略', preview.strategy_id], ['场景', preview.scenario_id], ['标的', `${preview.venue}:${preview.symbol}`], ['记录数', preview.record_count], ['初始资金', preview.initial_cash], ['参数', preview.parameters], ['数据起点（UTC）', preview.data?.start_utc], ['数据终点（UTC）', preview.data?.end_utc], ['手续费', costFact('commission', preview.commission)], ['滑点', costFact('slippage', preview.slippage)], ['延迟', costFact('latency', preview.latency)],
+            ['使用草稿', `r${preview.draft_revision}`], ['策略', strategyName(preview.strategy_id)], ['标的', `${preview.venue}:${preview.symbol}`], ['记录数', preview.record_count], ['初始资金', preview.initial_cash], ...Object.entries(preview.parameters).map(([name, value]): [string, unknown] => [({ target_quantity: '目标持仓数量', entry_delay_bars: '入场等待（行情条数）', fast_window: '快均线窗口', slow_window: '慢均线窗口' } as Record<string, string>)[name] ?? name, value]), ['数据起点（UTC）', preview.data?.start_utc], ['数据终点（UTC）', preview.data?.end_utc], ['手续费', costFact('commission', preview.commission)], ['滑点', costFact('slippage', preview.slippage)], ['延迟', costFact('latency', preview.latency)],
           ]} /></section>
-          <section className="panel"><h2>本次执行</h2><Facts items={[[ '实验数', 1 ], ['模式', '本地真实引擎'], ['模型调用', 0]]} /><hr /><h2>范围与限制</h2><p>每 1 bps 等于 0.01%。执行成本使用本次冻结假设。</p><p>数据性质以冻结来源声明为准。短合成样例仅验证流程，不用于判断策略收益。</p><p>这次运行只使用已核对的输入。后续修改草稿不会改变报告。</p></section>
+          <section className="panel"><h2>本次执行</h2><Facts items={[[ '回测次数', 1 ], ['模式', '本地历史回测'], ['模型调用', 0]]} /><hr /><h2>范围与限制</h2><p>每 1 bps 等于 0.01%。执行成本使用本次冻结假设。</p><p>数据性质以冻结来源声明为准。短合成样例仅验证流程，不用于判断策略收益。</p><p>这次运行只使用已核对的输入。后续修改草稿不会改变报告。</p></section>
         </div><details><summary>核对原始冻结输入与身份</summary><pre>{JSON.stringify(preview.normalized, null, 2)}</pre><pre>{JSON.stringify(preview.input_identity, null, 2)}</pre><small>预览身份：{preview.preview_identity} · 执行所有者：{preview.owner}</small></details>
           <div className="action-footer"><Link className="button" to={`/research/${encodeURIComponent(id)}/draft`}>返回修改</Link><button className="button primary" disabled={busy} onClick={() => void confirm()}>确认并运行一次</button></div></> : !error && <p role="status">正在读取真实预览…</p>}
   </section>
@@ -330,12 +337,13 @@ function Report({ api, id, onResearchChanged }: { api: ApiAdapter; id: string; o
     return { owner, revision: matches[0].experiment.payload?.draft_revision }
   }, [api, id]))
   const evidence = run?.kind === 'ready' ? <section className="report-evidence" aria-label="报告解读与证据"><div className="report-evidence-links"><Link to={`/report/${encodeURIComponent(id)}/inputs`}><Icon name="file" size={16} />冻结输入与来源</Link><Link to={`/report/${encodeURIComponent(id)}/trades`}><Icon name="chart" size={16} />交易明细</Link></div></section> : undefined
-  return <DetailSurface className="report-overview" assistant={source.value ? <Assistant api={api} strategy={source.value.owner} jobId={id} evidence={evidence} changed={owner => { source.setValue(current => current ? { ...current, owner } : null); onResearchChanged(owner) }} /> : <AgentSurface context="冻结报告 · 只读证据" report history={<>{evidence}<p>暂时无法找到这份报告的研究记录，请先查看报告或返回研究。</p><ErrorNote>{source.error}</ErrorNote></>} input={<Link to="/">返回研究</Link>} />}>
-    <PageHeader title={source.value ? `${source.value.owner.name} · 报告` : "冻结报告"} subtitle={<span title={id}>冻结报告 · {id.slice(0, 8)}{run?.kind === 'ready' ? ' · 已完成' : ''}</span>} breadcrumb={<Link to="/records" title={id}>回测记录 / {id.slice(0, 8)}</Link>} actions={<><button className="button" onClick={() => setRefresh(n => n + 1)}>重新读取报告</button>{run?.kind === 'ready' && <Link className="button" to={`/holdout/new/${encodeURIComponent(id)}`}>配置留出验证</Link>}{source.value && <Link className="button primary" to={`/research/${encodeURIComponent(source.value.owner.user_strategy_id)}/draft`}>继续研究</Link>}</>} />
+  return <DetailSurface className="report-overview" defaultCollapsed assistant={source.value ? <Assistant api={api} strategy={source.value.owner} jobId={id} evidence={evidence} changed={owner => { source.setValue(current => current ? { ...current, owner } : null); onResearchChanged(owner) }} /> : <AgentSurface context="冻结报告 · 只读证据" report history={<>{evidence}<p>暂时无法找到这份报告的研究记录，请先查看报告或返回研究。</p><ErrorNote>{source.error}</ErrorNote></>} input={<Link to="/">返回研究</Link>} />}>
+    <PageHeader title={source.value ? `${source.value.owner.name} · 报告` : "冻结报告"} subtitle={run?.kind === 'ready' ? '已完成 · 查看这次回测的结果与来源' : '正在核对这次运行的报告'} breadcrumb={<Link to="/records">回测记录 / 冻结报告</Link>} actions={<><button className="button" onClick={() => setRefresh(n => n + 1)}>重新读取报告</button>{run?.kind === 'ready' && <Link className="button" to={`/holdout/new/${encodeURIComponent(id)}`}>配置留出验证</Link>}{source.value && <Link className="button primary" to={`/research/${encodeURIComponent(source.value.owner.user_strategy_id)}/draft`}>继续研究</Link>}</>} />
+    <ResearchSteps step={3} />
     <Tabs active={tab} items={[{ id: 'overview', label: '概览' }, { id: 'trades', label: '交易' }, { id: 'inputs', label: '冻结输入' }, { id: 'files', label: '文件' }]} onChange={value => navigate(`/report/${encodeURIComponent(id)}/${value}`)} />
     {run?.kind === 'loading' && <p role="status">正在读取正式报告…</p>}{run?.kind === 'unavailable' && <ErrorNote>{run.note}</ErrorNote>}
     {run?.kind === 'ready' && <><FrozenReportFacts job={run.job} report={run.report} revision={source.value?.revision} />
-      {tab === 'overview' && <ReportOverviewSurface metrics={<FrozenReportMetrics report={run.report} path={path.value} />} chart={<>{path.value ? <EquityCurve analysis={path.value} /> : <p>权益曲线未提供。</p>}<ErrorNote>{path.error}</ErrorNote></>} sources={<><dl className="report-sources"><div><dt>冻结版本</dt><dd>{source.value?.revision == null ? '未记录' : `r${source.value.revision}`}<span>{run.report.source?.strategy.id ?? run.report.scenario?.strategy_id ?? '未记录'}</span></dd></div><div><dt>数据版本</dt><dd>{run.job.dataset_version?.dataset_id ?? '注册场景冻结数据'}<span>{run.job.input_identity.record_count ?? '未记录'} 条</span></dd></div><div><dt>运行身份</dt><dd>{run.report.run_id}<span>{run.report.schema}</span></dd></div></dl><p className="notice">单次回测只反映冻结场景，不代表未来收益。</p>{source.value && <Link className="button" to={`/research/${encodeURIComponent(source.value.owner.user_strategy_id)}/experiments`}>{source.value.owner.name} · 返回研究</Link>}</>} />}
+      {tab === 'overview' && <ReportOverviewSurface metrics={<FrozenReportMetrics report={run.report} path={path.value} />} chart={<>{path.value ? <EquityCurve analysis={path.value} /> : <p>权益曲线未提供。</p>}<ErrorNote>{path.error}</ErrorNote></>} sources={<><dl className="report-sources"><div><dt>冻结版本</dt><dd>{source.value?.revision == null ? '未记录' : `r${source.value.revision}`}<span>{strategyName(run.report.source?.strategy.id ?? run.report.scenario?.strategy_id ?? '未记录')}</span></dd></div><div><dt>数据版本</dt><dd>{run.job.dataset_version?.dataset_id ?? '注册场景冻结数据'}<span>{run.job.input_identity.record_count ?? '未记录'} 条</span></dd></div></dl><p className="notice">单次回测只反映冻结场景，不代表未来收益。</p>{source.value && <Link className="button" to={`/research/${encodeURIComponent(source.value.owner.user_strategy_id)}/experiments`}>{source.value.owner.name} · 返回研究</Link>}</>} />}
       {tab === 'inputs' && <><p className="notice">冻结输入只读。当前草稿的后续修改不会改变本报告。</p><FrozenReportDetails job={run.job} report={run.report} path={path.value} /></>}
       {tab === 'trades' && <><ErrorNote>{analytics.error}</ErrorNote><ReportTrades report={run.report} analytics={analytics.value} view="complete" /><ReportTrades report={run.report} analytics={analytics.value} view="orders" /></>}
       {tab === 'files' && <section className="panel"><h2>正式产物</h2>{(['report.json', 'summary.txt', 'equity-path.json'] as const).map(name => <p key={name}><a className="button" href={api.artifactUrl(id, name)} download><Icon name="download" />{name}</a></p>)}<p>报告指纹：{run.job.report_sha256 ?? '未提供'}</p></section>}
@@ -356,7 +364,7 @@ function LegacyResearchRedirect() { const { id } = useParams(), location = useLo
 export function StudioRoutes({ api, paper = paperApi }: { api: ApiAdapter; paper?: PaperApi }) {
   const [researchVersion, setResearchVersion] = useState('')
   const researchChanged = useCallback((next: UserStrategy) => setResearchVersion(`${next.user_strategy_id}:${next.draft.revision}:${next.updated_at}`), [])
-  return <div className="studio real-studio" data-theme="light"><WorkspaceNav api={api} researchVersion={researchVersion} />
+  return <div className="studio real-studio"><WorkspaceNav api={api} researchVersion={researchVersion} />
     <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} onResearchChanged={researchChanged} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/simulations" element={<PaperWorkspace api={paper} studio />} /><Route path="/records" element={<Records api={api} />} /><Route path="/compare/:leftId/:rightId" element={<CompareBacktestsRoute api={api} studio />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} onResearchChanged={researchChanged} />} /><Route path="/holdout/new/:jobId" element={<HoldoutCreatorRoute api={api} />} /><Route path="/holdout/:id" element={<HoldoutDetailRoute api={api} />} /><Route path="/candidates" element={<div className="page real-candidates"><CandidateHistory api={api} studio /></div>} /><Route path="/candidates/:candidateId" element={<div className="page real-candidates"><CandidateDetail api={api} studio /></div>} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="/settings/workspace" element={<div className="page"><PageHeader title="工作区" subtitle="核对研究保存位置；更换目录在下次启动生效。" /><DesktopSettings api={api} section="workspace" onSaved={() => {}} /></div>} /><Route path="/settings/about" element={<div className="page"><PageHeader title="诊断与备份" /><DesktopAbout api={api} /></div>} /><Route path="*" element={<Unavailable />} /></Routes></main>
   </div>
 }
