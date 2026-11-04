@@ -1,3 +1,4 @@
+import { StudioResearchSetup } from './studio-research-setup'
 import type { ResearchSummary, ResearchReference } from './research-workbench-api'
 import type { PlatformId } from './platform-context'
 import { FrozenReportFacts, FrozenReportMetrics, FrozenReportDetails, ReportTrades } from './frozen-report'
@@ -831,8 +832,8 @@ export function EvidenceSection({ api, strategy }: { api: ApiAdapter; strategy: 
  *
  * Nothing is preselected and nothing is inferred: the list is the workspace's own
  * registry, each choice is named by its exact scenario id and by that scenario's
- * own summary so two similar names stay told apart, and the button stays inert
- * until the user ticks the confirmation. The host validates the scenario and forms
+ * own summary so two similar names stay told apart. Legacy presentation asks for
+ * the confirmation checkbox; studio uses its explicit selection button. The host validates the scenario and forms
  * the executable draft — this panel writes no field itself and never guesses a
  * default. Binding is one revision of the same strategy and cannot be undone, so
  * the panel says so before the click, not after it.
@@ -845,7 +846,7 @@ const TEMPLATE_LABELS: Record<string, string> = {
   policy: '撮合方式', commission: '佣金',
 }
 
-export function BindScenario({ api, strategy, scenarios, catalogReady, catalogError, reloadCatalog, changed, failed }: {
+export function BindScenario({ api, strategy, scenarios, catalogReady, catalogError, reloadCatalog, changed, failed, presentation }: {
   api: ApiAdapter
   strategy: UserStrategy
   scenarios: ScenarioSummary[]
@@ -854,37 +855,43 @@ export function BindScenario({ api, strategy, scenarios, catalogReady, catalogEr
   reloadCatalog: () => void
   changed: (strategy: UserStrategy) => void
   failed: (message: string) => void
+  presentation?: 'studio'
 }) {
   const location = useLocation()
-  const [selected, setSelected] = useState('')
+  const [selected, setSelected] = useState(() => presentation === 'studio' ? new URLSearchParams(location.search).get('setup_scenario') ?? '' : '')
   const [datasetId, setDatasetId] = useState('')
   const [datasets, setDatasets] = useState<SelectableDataset[]>([])
   const [datasetError, setDatasetError] = useState('')
+  const [datasetsReady, setDatasetsReady] = useState(!api.listDatasets)
   useEffect(() => {
     let active = true
     if (api.listDatasets) void api.listDatasets().then(items => {
-      if (active) setDatasets(items)
-    }).catch(() => { if (active) setDatasetError('数据目录读取失败，请返回研究重新打开。') })
+      if (active) { setDatasets(items); setDatasetsReady(true) }
+    }).catch(() => { if (active) { setDatasetError('数据目录读取失败，请返回研究重新打开。'); setDatasetsReady(true) } })
     return () => { active = false }
   }, [api])
   const [field, setField] = useState('')
   const [expectation, setExpectation] = useState<string>('positive')
   const [confirmed, setConfirmed] = useState(false)
   const [busy, setBusy] = useState(false)
-  const attempts = useRef(0)
+  const attempts = useRef(0), binding = useRef(false)
 
   const usable = scenarios.filter(item => item.valid && item.summary && item.scenario_id)
   const candidate = usable.find(item => item.scenario_id === selected) ?? null
   const isTemplate = selected.startsWith('template:')
   const compatibleData = datasets.filter(item => item.valid && item.venue === candidate?.summary?.venue && item.symbol === candidate?.summary?.symbol)
-  const importQuery = new URLSearchParams({ research: strategy.user_strategy_id, revision: String(strategy.draft.revision), return: location.pathname + location.search })
+  const returnQuery = new URLSearchParams({ tab: 'strategy', ...(selected ? { setup_scenario: selected } : {}) })
+  const returnTo = presentation === 'studio' ? `/strategies/${encodeURIComponent(strategy.user_strategy_id)}?${returnQuery}` : location.pathname + location.search
+  const importQuery = new URLSearchParams({ research: strategy.user_strategy_id, revision: String(strategy.draft.revision), return: returnTo })
+  const selectScenario = (value: string) => { setSelected(value); setDatasetId(''); setConfirmed(false) }
 
   const bind = async () => {
+    if (binding.current) return
     if (!candidate) {
       failed('请先选择一个已注册场景。没有被选中的场景就不会被绑定。')
       return
     }
-    if (!confirmed) {
+    if (presentation !== 'studio' && !confirmed) {
       failed('绑定需要一个明确的确认：勾选确认之后才会绑定。')
       return
     }
@@ -893,6 +900,11 @@ export function BindScenario({ api, strategy, scenarios, catalogReady, catalogEr
       failed('这个工作区不提供场景绑定。')
       return
     }
+    if (presentation === 'studio' && (!catalogReady || (isTemplate && !compatibleData.some(item => item.dataset_id === datasetId && item.origin === 'upload')))) {
+      failed('请选择当前策略兼容的已发布 CSV 数据。')
+      return
+    }
+    binding.current = true
     setBusy(true)
     failed('')
     const attempt = attempts.current
@@ -917,9 +929,27 @@ export function BindScenario({ api, strategy, scenarios, catalogReady, catalogEr
     } catch (error) {
       failed(explain(error))
     } finally {
+      binding.current = false
       setBusy(false)
     }
   }
+
+  const criterionFields = <div className="create-fields">
+    <div className="field"><label htmlFor="bind-criterion-field">准则字段</label>
+      <select id="bind-criterion-field" value={field} onChange={event => setField(event.target.value)}>
+        <option value="">不声明准则</option>{CRITERION_FIELDS.map(item => <option key={item.field} value={item.field}>{item.label}</option>)}
+      </select>
+    </div>
+    <div className="field"><label htmlFor="bind-criterion-expectation">预期方向</label>
+      <select id="bind-criterion-expectation" value={expectation} disabled={!field} onChange={event => setExpectation(event.target.value)}>
+        {EXPECTATIONS.map(item => <option key={item} value={item}>{EXPECTATION_LABELS[item]}</option>)}
+      </select>
+    </div>
+  </div>
+  if (presentation === 'studio') return <StudioResearchSetup scenarios={usable} selected={selected} candidate={candidate}
+    selectScenario={selectScenario} datasetId={datasetId} selectDataset={setDatasetId} datasets={compatibleData} datasetsReady={datasetsReady}
+    datasetError={datasetError} catalogReady={catalogReady} catalogError={catalogError} reloadCatalog={reloadCatalog}
+    importHref={`/resources/data?${importQuery}#data-upload`} criterion={criterionFields} busy={busy} bind={() => void bind()} />
 
   return <section aria-label="绑定场景" className="strategy-panel bind-panel">
     <header className="panel-head">
@@ -974,23 +1004,7 @@ export function BindScenario({ api, strategy, scenarios, catalogReady, catalogEr
       <div><dt>初始资金</dt><dd>{`${candidate.summary.initial_cash} USD`}</dd></div>
       <div><dt>记录数</dt><dd>{datasetId ? compatibleData.find(item => item.dataset_id === datasetId)?.record_count ?? '未知' : isTemplate ? '尚未选择研究数据' : candidate.summary.record_count}</dd></div>
     </dl>}
-    <div className="create-fields">
-      <div className="field">
-        <label htmlFor="bind-criterion-field">准则字段</label>
-        <select id="bind-criterion-field" value={field}
-          onChange={event => setField(event.target.value)}>
-          <option value="">不声明准则</option>
-          {CRITERION_FIELDS.map(item => <option key={item.field} value={item.field}>{item.label}</option>)}
-        </select>
-      </div>
-      <div className="field">
-        <label htmlFor="bind-criterion-expectation">预期方向</label>
-        <select id="bind-criterion-expectation" value={expectation} disabled={!field}
-          onChange={event => setExpectation(event.target.value)}>
-          {EXPECTATIONS.map(item => <option key={item} value={item}>{EXPECTATION_LABELS[item]}</option>)}
-        </select>
-      </div>
-    </div>
+    {criterionFields}
     <label className="check" htmlFor="bind-confirm">
       <input id="bind-confirm" type="checkbox" checked={confirmed}
         onChange={event => { setConfirmed(event.target.checked); failed('') }} />
