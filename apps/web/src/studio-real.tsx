@@ -48,7 +48,7 @@ function costFact(kind: 'commission' | 'slippage' | 'latency', value: unknown): 
   return fact(value)
 }
 function Facts({ items }: { items: [string, unknown][] }) { return <dl className="key-values">{items.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{fact(value)}</dd></div>)}</dl> }
-function Unavailable() { return <div className="page"><h1>此候选尚未接入</h1><p>实盘、批量与候选晋级暂不可用。</p><Link to="/">返回研究</Link></div> }
+function Unavailable() { return <div className="page"><h1>此功能暂未开放</h1><p>返回研究，继续检查策略与数据。</p><Link to="/">返回研究</Link></div> }
 
 function Home({ api }: { api: ApiAdapter }) {
   const list = useRead(useCallback(() => api.listResearch!(), [api]))
@@ -65,9 +65,9 @@ function Home({ api }: { api: ApiAdapter }) {
     } catch (e) { setError(`保存结果未确认：${reason(e)}。请刷新研究列表核对，不要重复保存。`); setUncertain(true); list.reload() }
     finally { sending.current = false; setBusy(false) }
   }
-  return <div className="home"><h1>今天，验证什么想法？</h1><p className="subtitle">描述目标，或继续一项研究。保存后，在独立确认页启动实验。</p>
+  return <div className="home"><h1>今天，验证什么想法？</h1><p className="subtitle">写下研究目标，或继续已有研究。</p>
     <div className="composer"><label className="sr-only" htmlFor="real-goal">研究目标</label><textarea id="real-goal" value={goal} onChange={e => update(e.target.value)} placeholder="例如：检验策略在不同交易成本下的表现…" />
-      <div className="composer-bottom"><span>保存不调用模型、不运行实验</span><button className="button primary" disabled={busy || uncertain || !goal.trim()} onClick={() => void create()}>保存研究并继续</button></div><ErrorNote>{error}</ErrorNote>
+      <div className="composer-bottom"><span>先保存想法，再完善策略与数据。</span><button className="button primary" disabled={busy || uncertain || !goal.trim()} onClick={() => void create()}>保存研究并继续</button></div><ErrorNote>{error}</ErrorNote>
     </div>
     <StorageFailureGuard active={!retained && !!goal} message="输入未能缓存在本机。离开前请保存研究。" />
     <div className="quick-actions"><Link to="/resources/data">导入与检查数据</Link><Link to="/records">阅读冻结报告</Link><Link to="/resources/models">模型状态</Link></div>
@@ -83,14 +83,15 @@ function Home({ api }: { api: ApiAdapter }) {
   </div>
 }
 
-function ResearchRoute({ api }: { api: ApiAdapter }) { const { id = '' } = useParams(); return <ResearchDetail key={id} api={api} id={id} /> }
-function ResearchDetail({ api, id }: { api: ApiAdapter; id: string }) {
+type ResearchChange = (strategy: UserStrategy) => void
+function ResearchRoute({ api, onResearchChanged }: { api: ApiAdapter; onResearchChanged: ResearchChange }) { const { id = '' } = useParams(); return <ResearchDetail key={id} api={api} id={id} onResearchChanged={onResearchChanged} /> }
+function ResearchDetail({ api, id, onResearchChanged }: { api: ApiAdapter; id: string; onResearchChanged: ResearchChange }) {
   const { tab = 'overview' } = useParams(), navigate = useNavigate(), location = useLocation()
   const read = useCallback(async () => { const next = await api.getUserStrategy!(id); if (next.user_strategy_id !== id) throw new Error('研究身份不一致'); return next }, [api, id])
   const loaded = useRead(read), catalog = useRead(useCallback(() => api.listScenarios(true), [api]))
   const [error, setError] = useState('')
   const setStrategy = loaded.setValue
-  const changed = useCallback((next: UserStrategy) => { if (next.user_strategy_id === id) setStrategy(next) }, [id, setStrategy])
+  const changed = useCallback((next: UserStrategy) => { if (next.user_strategy_id === id) { setStrategy(next); onResearchChanged(next) } }, [id, setStrategy, onResearchChanged])
   const strategy = loaded.value
   useEffect(() => {
     if (!strategy?.experiments.some(item => ['pending', 'confirmed', 'running', 'stopping'].includes(item.status))) return
@@ -314,8 +315,8 @@ function Records({ api }: { api: ApiAdapter }) {
   </div>
 }
 
-function ReportRoute({ api }: { api: ApiAdapter }) { const { id = '' } = useParams(); return <Report key={id} api={api} id={id} /> }
-function Report({ api, id }: { api: ApiAdapter; id: string }) {
+function ReportRoute({ api, onResearchChanged }: { api: ApiAdapter; onResearchChanged: ResearchChange }) { const { id = '' } = useParams(); return <Report key={id} api={api} id={id} onResearchChanged={onResearchChanged} /> }
+function Report({ api, id, onResearchChanged }: { api: ApiAdapter; id: string; onResearchChanged: ResearchChange }) {
   const { tab = 'overview' } = useParams(), [refresh, setRefresh] = useState(0), navigate = useNavigate()
   const run = useRunRead(api, id, String(refresh))
   const path = useRead(useCallback(async () => { if (run?.kind !== 'ready') return null; const value = await api.getEquityPath(id); if (value.run_id !== run.report.run_id || value.report_sha256 !== run.job.report_sha256) throw new Error('曲线身份与报告不一致'); return value }, [api, id, run]))
@@ -328,8 +329,8 @@ function Report({ api, id }: { api: ApiAdapter; id: string }) {
     if (owner.user_strategy_id !== matches[0].item.user_strategy_id || owner.experiments.filter(e => e.job_id === id).length !== 1) throw new Error('报告研究来源无法唯一核对')
     return { owner, revision: matches[0].experiment.payload?.draft_revision }
   }, [api, id]))
-  const evidence = run?.kind === 'ready' ? <section className="report-evidence" aria-label="报告解读与证据"><div className="report-evidence-heading"><h2>这份报告说明了什么</h2><small>本地引擎 · 已冻结事实 · 未调用模型</small></div><div className="report-reading"><p>净盈亏 <strong>{run.report.economics.net_pnl.amount} {run.report.economics.currency}</strong>；订单 / 成交 {run.report.economics.counts.orders} / {run.report.economics.counts.fills}。</p><p>单次运行不足以判断稳健性。数据与成本需先核对。</p></div><div className="report-evidence-links"><Link to={`/report/${encodeURIComponent(id)}/inputs`}>[1] 冻结输入与来源</Link><Link to={`/report/${encodeURIComponent(id)}/trades`}>[2] 交易明细</Link></div><div className="report-next-step"><h3>下一步检查</h3><p>核对交易与成本，再决定下一次独立实验。</p><Link className="button" to={`/report/${encodeURIComponent(id)}/trades`}>检查交易</Link></div></section> : undefined
-  return <DetailSurface className="report-overview" assistant={source.value ? <Assistant api={api} strategy={source.value.owner} jobId={id} evidence={evidence} changed={owner => source.setValue(current => current ? { ...current, owner } : null)} /> : <AgentSurface context="冻结报告 · 只读证据" report history={<>{evidence}<p>未读取到唯一研究来源，会话暂不可用。</p><ErrorNote>{source.error}</ErrorNote></>} input={<small>不会生成替代回答。</small>} />}>
+  const evidence = run?.kind === 'ready' ? <section className="report-evidence" aria-label="报告解读与证据"><div className="report-evidence-links"><Link to={`/report/${encodeURIComponent(id)}/inputs`}><Icon name="file" size={16} />冻结输入与来源</Link><Link to={`/report/${encodeURIComponent(id)}/trades`}><Icon name="chart" size={16} />交易明细</Link></div></section> : undefined
+  return <DetailSurface className="report-overview" assistant={source.value ? <Assistant api={api} strategy={source.value.owner} jobId={id} evidence={evidence} changed={owner => { source.setValue(current => current ? { ...current, owner } : null); onResearchChanged(owner) }} /> : <AgentSurface context="冻结报告 · 只读证据" report history={<>{evidence}<p>暂时无法找到这份报告的研究记录，请先查看报告或返回研究。</p><ErrorNote>{source.error}</ErrorNote></>} input={<Link to="/">返回研究</Link>} />}>
     <PageHeader title={source.value ? `${source.value.owner.name} · 报告` : "冻结报告"} subtitle={<span title={id}>冻结报告 · {id.slice(0, 8)}{run?.kind === 'ready' ? ' · 已完成' : ''}</span>} breadcrumb={<Link to="/records" title={id}>回测记录 / {id.slice(0, 8)}</Link>} actions={<><button className="button" onClick={() => setRefresh(n => n + 1)}>重新读取报告</button>{run?.kind === 'ready' && <Link className="button" to={`/holdout/new/${encodeURIComponent(id)}`}>配置留出验证</Link>}{source.value && <Link className="button primary" to={`/research/${encodeURIComponent(source.value.owner.user_strategy_id)}/draft`}>继续研究</Link>}</>} />
     <Tabs active={tab} items={[{ id: 'overview', label: '概览' }, { id: 'trades', label: '交易' }, { id: 'inputs', label: '冻结输入' }, { id: 'files', label: '文件' }]} onChange={value => navigate(`/report/${encodeURIComponent(id)}/${value}`)} />
     {run?.kind === 'loading' && <p role="status">正在读取正式报告…</p>}{run?.kind === 'unavailable' && <ErrorNote>{run.note}</ErrorNote>}
@@ -353,8 +354,10 @@ function Models({ api }: { api: ApiAdapter }) {
 function DataRedirect() { const location = useLocation(); return <Navigate replace to={`/resources/data${location.search}${location.hash}`} /> }
 function LegacyResearchRedirect() { const { id } = useParams(), location = useLocation(); return <Navigate replace to={id ? `/research/${encodeURIComponent(id)}/draft${location.search}` : '/'} /> }
 export function StudioRoutes({ api, paper = paperApi }: { api: ApiAdapter; paper?: PaperApi }) {
-  return <div className="studio real-studio" data-theme="light"><WorkspaceNav api={api} />
-    <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/simulations" element={<PaperWorkspace api={paper} studio />} /><Route path="/records" element={<Records api={api} />} /><Route path="/compare/:leftId/:rightId" element={<CompareBacktestsRoute api={api} studio />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} />} /><Route path="/holdout/new/:jobId" element={<HoldoutCreatorRoute api={api} />} /><Route path="/holdout/:id" element={<HoldoutDetailRoute api={api} />} /><Route path="/candidates" element={<div className="page real-candidates"><CandidateHistory api={api} studio /></div>} /><Route path="/candidates/:candidateId" element={<div className="page real-candidates"><CandidateDetail api={api} studio /></div>} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="/settings/workspace" element={<div className="page"><PageHeader title="工作区" subtitle="核对研究保存位置；更换目录在下次启动生效。" /><DesktopSettings api={api} section="workspace" onSaved={() => {}} /></div>} /><Route path="/settings/about" element={<div className="page"><PageHeader title="诊断与备份" /><DesktopAbout api={api} /></div>} /><Route path="*" element={<Unavailable />} /></Routes></main>
+  const [researchVersion, setResearchVersion] = useState('')
+  const researchChanged = useCallback((next: UserStrategy) => setResearchVersion(`${next.user_strategy_id}:${next.draft.revision}:${next.updated_at}`), [])
+  return <div className="studio real-studio" data-theme="light"><WorkspaceNav api={api} researchVersion={researchVersion} />
+    <main className="main"><Routes><Route path="/" element={<Home api={api} />} /><Route path="/research/:id/:tab?" element={<ResearchRoute api={api} onResearchChanged={researchChanged} />} /><Route path="/strategies/:id?" element={<LegacyResearchRedirect />} /><Route path="/simulations" element={<PaperWorkspace api={paper} studio />} /><Route path="/records" element={<Records api={api} />} /><Route path="/compare/:leftId/:rightId" element={<CompareBacktestsRoute api={api} studio />} /><Route path="/report/:id/:tab?" element={<ReportRoute api={api} onResearchChanged={researchChanged} />} /><Route path="/holdout/new/:jobId" element={<HoldoutCreatorRoute api={api} />} /><Route path="/holdout/:id" element={<HoldoutDetailRoute api={api} />} /><Route path="/candidates" element={<div className="page real-candidates"><CandidateHistory api={api} studio /></div>} /><Route path="/candidates/:candidateId" element={<div className="page real-candidates"><CandidateDetail api={api} studio /></div>} /><Route path="/data" element={<DataRedirect />} /><Route path="/resources/data" element={<div className="page"><h1>数据资源</h1><DataWorkspace api={api} /></div>} /><Route path="/resources/models" element={<Models api={api} />} /><Route path="/settings/workspace" element={<div className="page"><PageHeader title="工作区" subtitle="核对研究保存位置；更换目录在下次启动生效。" /><DesktopSettings api={api} section="workspace" onSaved={() => {}} /></div>} /><Route path="/settings/about" element={<div className="page"><PageHeader title="诊断与备份" /><DesktopAbout api={api} /></div>} /><Route path="*" element={<Unavailable />} /></Routes></main>
   </div>
 }
 export default function RealStudio() { return <BrowserRouter basename="/studio"><StudioRoutes api={browserApi} /></BrowserRouter> }

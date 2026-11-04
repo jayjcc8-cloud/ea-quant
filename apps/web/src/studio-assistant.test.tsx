@@ -33,6 +33,86 @@ function open(api: ApiAdapter, initial = original, jobId?: string) {
 beforeEach(() => { sessionStorage.clear(); localStorage.clear() })
 afterEach(cleanup)
 
+it('fills and focuses an empty question without replacing an unsent draft or sending it', async () => {
+  const send = vi.fn()
+  open(adapter({ sendUserStrategyMessage: send }))
+  const input = await screen.findByLabelText('消息') as HTMLTextAreaElement
+  await userEvent.click(screen.getByRole('button', { name: '检查当前证据' }))
+  expect(input.value).toBe('检查当前草稿的参数与数据')
+  expect(document.activeElement).toBe(input)
+  fireEvent.change(input, { target: { value: '我还没有写完的问题' } })
+  await userEvent.click(screen.getByRole('button', { name: '检查下一步' }))
+  expect(input.value).toBe('我还没有写完的问题')
+  expect(sessionStorage.getItem('quine.studio.unsent.research-one.draft')).toBe('我还没有写完的问题')
+  expect(send).not.toHaveBeenCalled()
+})
+
+it.each(['ctrlKey', 'metaKey'] as const)('sends once with %s+Enter while preserving newlines and composition', async modifier => {
+  const q = queue(), send = vi.fn(async () => q.stream())
+  open(adapter({ streamUserStrategyMessage: send }))
+  const input = await screen.findByLabelText('消息') as HTMLTextAreaElement
+  fireEvent.keyDown(input, { key: 'Enter', [modifier]: true })
+  expect(send).not.toHaveBeenCalled()
+  await userEvent.type(input, '第一行{enter}第二行{shift>}{enter}{/shift}第三行')
+  expect(input.value).toBe('第一行\n第二行\n第三行')
+  expect(send).not.toHaveBeenCalled()
+  fireEvent.compositionStart(input)
+  fireEvent.keyDown(input, { key: 'Enter', [modifier]: true })
+  fireEvent.compositionEnd(input)
+  fireEvent.keyDown(input, { key: 'Enter', [modifier]: true, isComposing: true })
+  fireEvent.keyDown(input, { key: 'Enter', [modifier]: true, keyCode: 229 })
+  fireEvent.keyDown(input, { key: 'Enter', [modifier]: true, repeat: true })
+  expect(send).not.toHaveBeenCalled()
+  fireEvent.keyDown(input, { key: 'Enter', [modifier]: true })
+  fireEvent.keyDown(input, { key: 'Enter', [modifier]: true })
+  await waitFor(() => expect(send).toHaveBeenCalledTimes(1))
+  const request = (send.mock.calls[0] as unknown as [string, { call_id: string }])[1]
+  expect(request).toMatchObject({ text: '第一行\n第二行\n第三行', task_budget: 1, approved_budget: { max_model_calls: 1, max_backtests: 0 } })
+  await act(async () => { q.push({ kind: 'done', strategy: { ...original, calls: [call(request.call_id)] } }); q.end() })
+  expect(input.value).toBe('')
+})
+
+it('shows the submitted question before the stream opens and replaces it with its recorded message without duplication', async () => {
+  const q = queue()
+  let start!: (events: ReturnType<typeof q.stream>) => void
+  const send = vi.fn(async () => new Promise<ReturnType<typeof q.stream>>(resolve => { start = resolve }))
+  open(adapter({ streamUserStrategyMessage: send }), original, 'selected-report')
+  const input = await screen.findByLabelText('消息') as HTMLTextAreaElement
+  fireEvent.change(input, { target: { value: '这份报告\n有什么限制？' } })
+  await userEvent.click(screen.getByRole('button', { name: '发送一次模型请求' }))
+  const currentQuestion = await screen.findByRole('article', { name: '本次提问' })
+  expect(within(currentQuestion).getByText('这份报告 有什么限制？').textContent).toBe('这份报告\n有什么限制？')
+  expect(within(currentQuestion).getByRole('link', { name: /selected-report/ }).getAttribute('href')).toBe('/report/selected-report/overview')
+  expect(input.value).toBe('这份报告\n有什么限制？')
+  fireEvent.change(input, { target: { value: '准备中的下一问' } })
+  expect(within(currentQuestion).queryByText('准备中的下一问')).toBeNull()
+  const request = (send.mock.calls[0] as unknown as [string, { call_id: string }])[1]
+  const userMessage: UserStrategy['messages'][number] = { message_id: 'saved-question', call_id: request.call_id, role: 'user', kind: 'message', text: '这份报告\n有什么限制？', base_revision: 4, at: '2026-11-04', proposal_id: null }
+  const stored = { ...original, calls: [call(request.call_id, 'dispatched')], messages: [userMessage] }
+  await act(async () => { start(q.stream()); q.push({ kind: 'state', strategy: stored }) })
+  expect(screen.queryByRole('article', { name: '本次提问' })).toBeNull()
+  expect(screen.getAllByText('这份报告 有什么限制？')).toHaveLength(1)
+  await act(async () => { q.push({ kind: 'done', strategy: { ...stored, calls: [call(request.call_id)] } }); q.end() })
+  expect(input.value).toBe('准备中的下一问')
+  expect(screen.getAllByText('这份报告 有什么限制？')).toHaveLength(1)
+})
+
+it('offers model setup directly while keeping the question and keyboard send disabled until a model is configured', async () => {
+  const send = vi.fn(), launch = vi.fn()
+  open(adapter({ settingsStatus: async () => ({ schema: 'radian.settings-status.v1', settings_file: '/fixture/settings.json', configured: false, provider: null, model: null, base_url: null, api_key_env: null, credential_available: false }), sendUserStrategyMessage: send, launchUserStrategyExperiment: launch }))
+  const setup = await screen.findByRole('link', { name: '配置模型连接' })
+  expect(setup.getAttribute('href')).toBe('/resources/models')
+  expect(setup.closest('details')).toBeNull()
+  const input = screen.getByLabelText('消息') as HTMLTextAreaElement
+  fireEvent.change(input, { target: { value: '先保留这个问题' } })
+  fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true })
+  fireEvent.keyDown(input, { key: 'Enter', metaKey: true })
+  expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(true)
+  expect(screen.getByRole('status').textContent).toBe('选择模型后可发送')
+  expect(input.value).toBe('先保留这个问题')
+  expect(send).not.toHaveBeenCalled(); expect(launch).not.toHaveBeenCalled()
+})
+
 it('streams one explicitly bounded call and real tool activity, preserving newer unsent text', async () => {
   const q = queue(), send = vi.fn(async () => q.stream()), fallback = vi.fn(), launch = vi.fn()
   const api = adapter({ streamUserStrategyMessage: send, sendUserStrategyMessage: fallback, launchUserStrategyExperiment: launch })
@@ -118,6 +198,9 @@ it('treats stream exhaustion without a terminal event as unknown and blocks repl
   await userEvent.click(screen.getByRole('button', { name: '发送一次模型请求' }))
   expect((await screen.findByRole('alert')).textContent).toContain('响应未确认')
   expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.keyDown(screen.getByLabelText('消息'), { key: 'Enter', ctrlKey: true })
+  fireEvent.keyDown(screen.getByLabelText('消息'), { key: 'Enter', metaKey: true })
+  expect(stream).toHaveBeenCalledTimes(1)
   await userEvent.click(screen.getByRole('button', { name: '查询模型请求' }))
   expect(read).toHaveBeenCalledTimes(1); expect(stream).toHaveBeenCalledTimes(1)
 })

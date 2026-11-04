@@ -90,7 +90,7 @@ export function DraftEditorForm({
   return <section aria-label="手工编辑草稿" className="draft-editor">
     {!presentation && <h2 className="draft-editor-title">参数与规则</h2>}
     <p className="muted draft-editor-revision" id="draft-editor-revision">
-      {`基于草稿修订 ${revision}。保存仅生成新修订；实验需另行预览确认。`}
+      {presentation ? `草稿 r${revision} · 保存为新版本，已有报告保持不变。` : `基于草稿修订 ${revision}。保存仅生成新修订；实验需另行预览确认。`}
     </p>
     <div className="draft-editor-fields">
       {fields.map((field, index) => {
@@ -121,17 +121,18 @@ export function DraftEditorForm({
           {field.editable
             ? <p className="muted draft-editor-bound" id={boundsId}>{boundNote(field)}</p>
             : <p className="muted draft-editor-bound" id={stateId}>
-                该字段只读：{`${field.json_type}`} 类型在此不支持修改。它保留宿主登记的值。
+                {presentation ? '此项暂不支持编辑，原值已保留。' : <>该字段只读：{`${field.json_type}`} 类型在此不支持修改。它保留宿主登记的值。</>}
               </p>}
         </div>
       })}
     </div>
     <details className="provenance draft-editor-contract">
       <summary>这里能改什么</summary>
-      {presentation && <dl>{fields.map(field => <div key={field.path}><dt>{field.path}</dt><dd>{field.kind} · {field.json_type} · {field.editable ? '可编辑' : '只读'}</dd></div>)}</dl>}
+      {presentation && <dl>{fields.map(field => <div key={field.path}><dt>{studioLabels[field.path] ?? pathLabel(field.path)}</dt><dd>{field.editable ? '可编辑' : '只读'}</dd></div>)}</dl>}
       <p className="muted">
-        可以调整的是初始资金与宿主已登记的可编辑参数。策略标识、标的、执行成本与风险模型是已注册场景
+        {presentation ? '可调整初始资金和可编辑参数。策略、标的与成本设置由所选模板决定；修改不会改变已生成的报告。' : <>可以调整的是初始资金与宿主已登记的可编辑参数。策略标识、标的、执行成本与风险模型是已注册场景
         自己的设置：它们在这里不能被自由修改，由场景合同提供，本表单不开放任意经济模型或新的策略语义。
+        </>}
       </p>
     </details>
     <div className="draft-editor-actions">

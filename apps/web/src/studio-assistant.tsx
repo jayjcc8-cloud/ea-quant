@@ -9,7 +9,7 @@ import { reason, saved, useRead } from './studio-read'
 
 type RetainedCall = { call_id: string; base_revision: number; text?: string; stream?: boolean }
 type LiveTool = { id: string; tool: string; state: 'running' | 'done' | 'failed'; detail: string }
-type Live = { call_id: string; revision: number; jobId?: string; text: string; tools: LiveTool[]; unconfirmed: boolean }
+type Live = { call_id: string; revision: number; jobId?: string; question: string; text: string; tools: LiveTool[]; unconfirmed: boolean }
 const toolLabels: Record<string, string> = { discover_resources: '发现策略与数据', inspect_research_input: '核查实验输入', read_experiments: '读取正式报告', describe_data: '读取数据说明', experiment_status: '读取实验状态与报告', propose_change: '提出字段修改' }
 const callLabels: Record<UserStrategyCall['status'], string> = { pending: '等待派发', dispatched: '等待模型响应', observed: '响应已记录', refused: '请求被拒绝', unconfigured: '模型未配置', unknown: '结果未知', interrupted_before_dispatch: '派发前中断' }
 const activeTask = (status?: string) => ['running', 'awaiting_budget', 'awaiting_decision'].includes(status ?? '')
@@ -19,9 +19,12 @@ function retainedCalls(key: string): RetainedCall[] {
 }
 function MessageContext({ call }: { call?: UserStrategyCall }) {
   return <small className="studio-message-context">{!call ? '历史消息 · 上下文未记录' : call.evidence?.length ? <>
-    {call.evidence.map(run => <Link key={run.job_id} to={`/report/${encodeURIComponent(run.job_id)}/overview`}>报告 {run.job_id} · {run.draft_revision == null ? '修订未记录' : `r${run.draft_revision}`}</Link>)}
+    {call.evidence.map(run => <Link key={run.job_id} to={`/report/${encodeURIComponent(run.job_id)}/overview`} title={run.job_id} aria-label={`报告 ${run.job_id} · ${run.draft_revision == null ? '修订未记录' : `r${run.draft_revision}`}`}>报告 {run.job_id.slice(0, 8)} · {run.draft_revision == null ? '修订未记录' : `r${run.draft_revision}`}</Link>)}
     <span>提问时草稿 r{call.base_revision}</span>
   </> : `草稿 r${call.base_revision}`}</small>
+}
+function LiveContext({ live }: { live: Live }) {
+  return <small className="studio-message-context">{live.jobId && <Link to={`/report/${encodeURIComponent(live.jobId)}/overview`} title={live.jobId} aria-label={`报告 ${live.jobId}`}>报告 {live.jobId.slice(0, 8)}</Link>}<span>{live.jobId ? '提问时草稿' : '草稿'} r{live.revision}</span></small>
 }
 export function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapter; strategy: UserStrategy; changed: (next: UserStrategy) => void; jobId?: string; evidence?: ReactNode }) {
   const id = strategy.user_strategy_id, key = `quine.studio.calls.${id}`
@@ -34,6 +37,7 @@ export function Assistant({ api, strategy, changed, jobId, evidence }: { api: Ap
   const [conversation, setConversation] = useState<UserStrategyConversation | null>(null), [conversationError, setConversationError] = useState('')
   const [stopping, setStopping] = useState(false), [stopRequested, setStopRequested] = useState(false)
   const sending = useRef(false), stoppingRef = useRef(false), alive = useRef(true), current = useRef<AbortController | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null), composing = useRef(false)
   useEffect(() => { alive.current = true; return () => { alive.current = false; current.current?.abort() } }, [])
   const readConversation = useCallback(async () => {
     if (!streaming) return null
@@ -61,6 +65,10 @@ export function Assistant({ api, strategy, changed, jobId, evidence }: { api: Ap
     setText(value)
     try { if (value) sessionStorage.setItem(textKey, value); else sessionStorage.removeItem(textKey); setTextRetained(true) }
     catch { setTextRetained(false) }
+  }
+  const suggest = (value: string) => {
+    if (!text.trim()) edit(value)
+    inputRef.current?.focus()
   }
   const remember = (items: RetainedCall[]) => { sessionStorage.setItem(key, JSON.stringify(items)); if (alive.current) setRetained(items) }
   const accept = (next: UserStrategy, resolve = true) => {
@@ -113,7 +121,7 @@ export function Assistant({ api, strategy, changed, jobId, evidence }: { api: Ap
     if (streaming) {
       const controller = new AbortController()
       current.current = controller
-      setLive({ call_id, revision: input.base_revision, jobId, text: '', tools: [], unconfirmed: false })
+      setLive({ call_id, revision: input.base_revision, jobId, question: input.text, text: '', tools: [], unconfirmed: false })
       let terminal = false
       try {
         // An explicit one-request task enables stop without taking the legacy default grant of 24.
@@ -210,17 +218,19 @@ export function Assistant({ api, strategy, changed, jobId, evidence }: { api: Ap
     setConversation(after); setConversationError('')
     if (after?.pending?.turn_id === before.pending.turn_id && after.pending.phase === before.pending.phase) throw new Error('旧会话尚未完成核对，请查询原请求')
   })
-  const completedStatus = conversation?.task?.stop_reason === 'completed' ? '本轮已完成' : conversation?.task?.stop_reason === 'cancelled' ? '本轮已结束，后续请求已停止' : conversation?.task?.stop_reason === 'unknown' ? '结果未知，请查询原请求' : '等待输入'
+  const idleStatus = model.error ? '模型连接暂不可读' : !model.value ? '正在读取模型连接…' : !selectedModel?.configured ? '选择模型后可发送' : '等待输入'
+  const completedStatus = conversation?.task?.stop_reason === 'completed' ? '本轮已完成' : conversation?.task?.stop_reason === 'cancelled' ? '本轮已结束，后续请求已停止' : conversation?.task?.stop_reason === 'unknown' ? '结果未知，请查询原请求' : idleStatus
   const status = stopRequested && (busy || strategy.calls.some(call => !settled(call))) ? '停止已请求；正在核对本次响应。' : live?.unconfirmed ? '响应未确认，保留已收到的内容。'
-    : busy ? receiving ? '正在接收回答…' : '正在核对保存状态…' : legacyNote || waiting || (conversationError ? '会话暂不可读，请重新读取。' : streaming && !conversation ? '正在读取会话状态…' : completedStatus)
+    : busy ? receiving ? '正在接收回答…' : '正在确认结果…' : legacyNote || waiting || (conversationError ? '会话暂不可读，请重新读取。' : streaming && !conversation ? '正在读取会话状态…' : completedStatus)
   const locked = busy || inFlight || stopping || localUnknown.length > 0 || Boolean(pending)
-  return <AgentSurface context={jobId ? `冻结报告 ${jobId.slice(0, 8)} · 只读证据` : `当前草稿 r${strategy.draft.revision}`} report={!!jobId}
+  const canSend = !(busy || stopping || inFlight || Boolean(pending) || (streaming && (!conversation || !!conversationError)) || localUnknown.some(call => call.text === text.trim()) || !selectedModel?.configured || !text.trim())
+  return <AgentSurface context={jobId ? `报告 ${jobId.slice(0, 8)}` : `当前草稿 r${strategy.draft.revision}`} report={!!jobId}
     history={<div className="studio-conversation"><AgentFeed identity={`${id}.${jobId ?? 'draft'}`} version={`${strategy.updated_at}|${strategy.messages.length}|${strategy.calls.length}|${live?.text}|${JSON.stringify(live?.tools)}|${status}`}>
       {evidence}
-      {!evidence && <div className="agent-note">{jobId ? '这次讨论只引用所选运行的冻结事实。' : '先检查草稿与数据，再决定下一次实验。'}<small>模型回答为推断；修改提案需要审阅，实验需要独立确认。</small></div>}
-      <details className="agent-context"><summary>来源与上下文</summary><p>研究 {id} · 当前草稿 r{strategy.draft.revision}</p><Link to={`/research/${encodeURIComponent(id)}/draft`}>查看当前草稿</Link>{jobId && <><p><Link to={`/report/${encodeURIComponent(jobId)}/inputs`}>冻结输入 · {jobId}</Link></p><Link to={`/report/${encodeURIComponent(jobId)}/trades`}>交易证据</Link></>}</details>
-      {strategy.messages.map(message => <article className={`message ${message.role}`} key={message.message_id}><small>{message.role === 'user' ? '你' : '模型 · 推断'}</small><MessageContext call={strategy.calls.find(call => call.call_id === message.call_id)} /><p>{message.text}</p></article>)}
-      {live && <section aria-label="当前回答" className="studio-live-answer"><small className="studio-message-context">{live.jobId ? `报告 ${live.jobId} · 提问时草稿 r${live.revision}` : `草稿 r${live.revision}`}</small><p>{live.text || '等待模型输出…'}</p><small>{live.unconfirmed ? '已接收片段 · 结果未确认' : '生成中 · 模型推断'}</small>
+      <details className="agent-context"><summary>上下文</summary><p>{strategy.name} · 草稿 r{strategy.draft.revision}</p><Link to={`/research/${encodeURIComponent(id)}/draft`}>查看当前草稿</Link>{jobId && <><p><Link to={`/report/${encodeURIComponent(jobId)}/inputs`} title={jobId}>冻结输入 · {jobId.slice(0, 8)}</Link></p><Link to={`/report/${encodeURIComponent(jobId)}/trades`}>交易证据</Link></>}<p>AI 回答可能有误，请核对报告与数据。</p></details>
+      {strategy.messages.map(message => <article className={`message ${message.role}`} key={message.message_id}><small>{message.role === 'user' ? '你' : '研究助手'}</small><MessageContext call={strategy.calls.find(call => call.call_id === message.call_id)} /><p className="studio-message-text">{message.text}</p></article>)}
+      {live && !strategy.messages.some(message => message.role === 'user' && message.call_id === live.call_id) && <article aria-label="本次提问" className="message user studio-current-question"><small>你</small><LiveContext live={live} /><p className="studio-message-text">{live.question}</p></article>}
+      {live && <section aria-label="当前回答" className="studio-live-answer"><LiveContext live={live} /><p className="studio-message-text">{live.text || '正在等待回答…'}</p><small>{live.unconfirmed ? '已接收片段 · 结果未确认' : '回答中…'}</small>
         {live.tools.length > 0 && <details className="studio-tool-activity"><summary>本轮活动 · {live.tools.length} 项</summary><ul>{live.tools.map(tool => <li key={tool.id}><details><summary>{toolLabels[tool.tool] ?? tool.tool} · {tool.state === 'running' ? '执行中…' : tool.state === 'done' ? '已完成' : '失败'}</summary><p>{tool.detail || '尚未收到结果'}</p></details></li>)}</ul></details>}
       </section>}
       {(strategy.calls.length > 0 || localUnknown.length > 0) && <section className="call-history" aria-label="模型调用记录"><details><summary><h3>调用记录</h3></summary>
@@ -228,27 +238,40 @@ export function Assistant({ api, strategy, changed, jobId, evidence }: { api: Ap
         {localUnknown.filter(call => !strategy.calls.some(saved => saved.call_id === call.call_id)).map(call => <article key={call.call_id}><code>{call.call_id}</code><p>r{call.base_revision} · 回执未知，保留原请求身份。</p></article>)}
       </details><button className="button" disabled={busy || stopping} onClick={() => void query()}>查询模型请求</button></section>}
       {strategy.proposals.filter(p => p.status === 'open').map(p => <section className="real-proposal" key={p.proposal_id}><h3>建议修改 · r{p.base_revision}</h3><p>{p.items.length} 项变更，等待你审阅。</p>{jobId && <small>修改对象是当前研究草稿，不改变冻结报告。</small>}<Link className="button" to={`/research/${encodeURIComponent(id)}/proposal?proposal=${encodeURIComponent(p.proposal_id)}`}>审阅修改提案</Link><p className="muted">应用只保存新修订，运行仍需独立确认。</p></section>)}
-      {!strategy.messages.length && !strategy.calls.length && !localUnknown.length && !live && <div className="suggestions"><small>你可以这样问</small><button className="button" onClick={() => edit(jobId ? '解释这份报告的结果与限制' : '检查当前草稿的参数与数据')}>检查当前证据</button><button className="button" onClick={() => edit('下一步应该检查哪些证据？')}>检查下一步</button></div>}
+      {!strategy.messages.length && !strategy.calls.length && !localUnknown.length && !live && <div className="suggestions studio-empty-state"><small>{jobId ? '想进一步了解这份报告？' : '从一个研究问题开始'}</small><button className="button" disabled={!!text.trim()} onClick={() => suggest(jobId ? '解释这份报告的结果与限制' : '检查当前草稿的参数与数据')}>检查当前证据</button><button className="button" disabled={!!text.trim()} onClick={() => suggest('下一步应该检查哪些证据？')}>检查下一步</button></div>}
       {(legacyNote || waiting) && <p className="studio-assistant-status">{legacyNote || waiting}{pending?.phase === 'awaiting_observation' && <Link to={`/research/${encodeURIComponent(id)}/experiments`}>查看原实验</Link>}</p>}
       {legacyDecision && <button className="button" disabled={busy || stopping} onClick={() => void decideLegacy()}>{legacyDecision.label}</button>}
     </AgentFeed></div>}
-    input={<><ErrorNote>{error || conversationError || model.error}</ErrorNote>{conversationError && <button className="button" disabled={busy} onClick={() => void query()}>重新读取会话</button>}<label className="sr-only" htmlFor="studio-message">消息</label><textarea id="studio-message" rows={3} value={text} onChange={e => edit(e.target.value)} placeholder={jobId ? '询问这份报告…' : '继续讨论这个研究…'} />
+    input={<><ErrorNote>{error || conversationError || model.error}</ErrorNote>{conversationError && <button className="button" disabled={busy} onClick={() => void query()}>重新读取会话</button>}
+      <small className="studio-assistant-status" role="status" aria-live="polite">{status}</small>
+      <label className="sr-only" htmlFor="studio-message">消息</label><textarea ref={inputRef} id="studio-message" rows={3} value={text} onChange={e => edit(e.target.value)} placeholder={jobId ? '询问这份报告…' : '继续讨论这个研究…'}
+        onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }}
+        onKeyDown={event => {
+          if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229 || event.repeat) return
+          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.shiftKey) {
+            event.preventDefault()
+            if (canSend) void send()
+          }
+        }} />
       {!textRetained && text && <small>未发送消息无法在本机缓冲，离开前请保留输入。</small>}
       <StorageFailureGuard active={!textRetained && !!text} message="未发送消息无法在本机保留，离开将丢失输入。" />
+      {!selectedModel?.configured && (model.value || model.error) && <div className="studio-model-setup"><Link to="/resources/models">配置模型连接</Link><small>也可继续编辑研究草稿。</small></div>}
       <details className="studio-model-controls"><summary>{selectedModel?.configured ? selectedModel.model : '选择模型连接'}</summary>
         {api.selectUserStrategyModelProfile && model.value?.profiles && <label className="research-model-picker">本研究模型连接<select value={strategy.model_profile_id ?? ''} disabled={locked} onChange={event => { const profileId = event.target.value; void act(async () => accept(await api.selectUserStrategyModelProfile!(id, profileId || null))) }}>
           <option value="">跟随工作区默认 · {model.value.profiles.find(item => item.id === model.value?.default_profile_id)?.name ?? '未设置'}</option>
           {strategy.model_profile_id && !model.value.profiles.some(item => item.id === strategy.model_profile_id) && <option value={strategy.model_profile_id}>已选连接不可用，请重新选择</option>}
           {model.value.profiles.map(item => <option key={item.id} value={item.id}>{item.name} · {item.model}{item.configured ? '' : ' · 未配置'}</option>)}
         </select></label>}
-        <small>选择仅影响本研究下一次发送；历史调用与已批准轮次保持原连接。</small>
+        <small>更改用于下一次提问；当前轮次与历史记录保持原连接。</small>
         <div className="research-model-actions"><Link to="/resources/models">管理模型连接</Link><button className="button" disabled={busy} onClick={model.reload}>重新读取连接</button></div>
       </details>
-      <div className="studio-composer-actions"><small className="studio-assistant-status" role="status" aria-live="polite">{status}</small>
+      <div className="studio-composer-actions">
         {streaming && turnId && <button className="button" disabled={stopping || stopRequested} onClick={() => void stop()} aria-label={receiving ? '停止生成' : '结束本轮'}><Icon name="stop" />{receiving ? '停止' : '结束本轮'}</button>}
-        <button aria-label="发送一次模型请求" title="发送一次模型请求" className="button primary real-send" disabled={busy || stopping || inFlight || Boolean(pending) || (streaming && (!conversation || !!conversationError)) || localUnknown.some(call => call.text === text.trim()) || !selectedModel?.configured || !text.trim()} onClick={() => void send()}><Icon name="send" size={22} /></button>
+        <small className="studio-composer-shortcut">⌘ / Ctrl + Enter 发送</small>
+        <button aria-label="发送一次模型请求" title="发送 · ⌘ / Ctrl + Enter" aria-keyshortcuts="Meta+Enter Control+Enter" className="button primary real-send" disabled={!canSend} onClick={() => void send()}><Icon name="send" size={22} /></button>
       </div>
-      <small>{selectedModel?.configured ? '一次发送授权 1 次模型调用；不授权运行实验。' : '模型未配置或不可读；不会生成替代回答。'}</small>
+      {receiving && <small>可先编辑下一问，稍后发送。</small>}
+      {selectedModel?.configured && <small>每次提问调用模型 1 次；回测需另行确认。</small>}
       {localUnknown.length > 0 && <small>同一问题只查询原请求。可以输入不同的新问题，原身份仍保留。</small>}
     </>} />
 }

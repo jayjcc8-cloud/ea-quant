@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -108,14 +108,75 @@ it('switches between modal and inline assistant without remounting or leaving a 
   render(<DetailSurface assistant={<Assistant />}><p>研究正文</p></DetailSurface>)
   await userEvent.click(screen.getByRole('button', { name: '打开研究助手' }))
   fireEvent.change(screen.getByLabelText('消息'), { target: { value: '仍待发送' } })
-  resize?.({ matches: false })
+  act(() => resize?.({ matches: false }))
   await waitFor(() => expect(screen.getByRole('complementary', { name: '研究助手面板' })).toBeTruthy())
   expect(screen.queryByRole('dialog')).toBeNull()
   expect((screen.getByLabelText('消息') as HTMLTextAreaElement).value).toBe('仍待发送')
   expect(mounted).toHaveBeenCalledTimes(1)
-  resize?.({ matches: true })
+  act(() => resize?.({ matches: true }))
   await waitFor(() => expect(screen.queryByRole('textbox', { name: '消息' })).toBeNull())
   await userEvent.click(screen.getByRole('button', { name: '打开研究助手' }))
   expect((screen.getByLabelText('消息') as HTMLTextAreaElement).value).toBe('仍待发送')
   expect(mounted).toHaveBeenCalledTimes(1)
+})
+
+it('collapses the desktop assistant without interrupting its session and restores focus with the unsent input', async () => {
+  narrow = false
+  const mounted = vi.fn(), unmounted = vi.fn()
+  function Assistant({ answer }: { answer: string }) {
+    useEffect(() => { mounted(); return unmounted }, [])
+    return <><label>消息<textarea defaultValue="保留这个问题" /></label><p>{answer}</p></>
+  }
+  const view = render(<DetailSurface assistant={<Assistant answer="正在回答" />}><p>报告正文</p></DetailSurface>)
+  const panel = screen.getByRole('complementary', { name: '研究助手面板' })
+  fireEvent.change(within(panel).getByLabelText('消息'), { target: { value: '尚未发送的新问题' } })
+  await userEvent.click(within(panel).getByRole('button', { name: '收起研究助手' }))
+  const opener = screen.getByRole('button', { name: '打开研究助手' })
+  expect(screen.queryByRole('complementary', { name: '研究助手面板' })).toBeNull()
+  expect(document.activeElement).toBe(opener)
+  expect(opener.getAttribute('aria-expanded')).toBe('false')
+  view.rerender(<DetailSurface assistant={<Assistant answer="回答已经更新" />}><p>报告正文</p></DetailSurface>)
+  await userEvent.click(opener)
+  const input = screen.getByRole('textbox', { name: '消息' }) as HTMLTextAreaElement
+  expect(input.value).toBe('尚未发送的新问题')
+  expect(document.activeElement).toBe(input)
+  expect(screen.getByText('回答已经更新')).toBeTruthy()
+  expect(document.querySelectorAll('.persistent-agent')).toHaveLength(1)
+  expect(mounted).toHaveBeenCalledTimes(1)
+  expect(unmounted).not.toHaveBeenCalled()
+})
+
+it('keeps desktop collapse separate from opening a narrow modal and returns focus when that modal disappears', async () => {
+  narrow = false
+  render(<DetailSurface assistant={<textarea aria-label="消息" defaultValue="研究问题" />}><p>正文</p></DetailSurface>)
+  await userEvent.click(screen.getByRole('button', { name: '收起研究助手' }))
+  act(() => resize?.({ matches: true }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  await userEvent.click(screen.getByRole('button', { name: '打开研究助手' }))
+  const input = screen.getByRole('textbox', { name: '消息' })
+  input.focus()
+  act(() => resize?.({ matches: false }))
+  await waitFor(() => expect(screen.queryByRole('textbox', { name: '消息' })).toBeNull())
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: '打开研究助手' }))
+  await userEvent.click(screen.getByRole('button', { name: '打开研究助手' }))
+  expect((screen.getByRole('textbox', { name: '消息' }) as HTMLTextAreaElement).value).toBe('研究问题')
+  expect(screen.queryByRole('dialog')).toBeNull()
+})
+
+it('preserves the offline preview callback instead of opening a second assistant', async () => {
+  const openAgent = vi.fn()
+  render(<DetailSurface openAgent={openAgent} assistant={<p>预览助手</p>}><p>预览正文</p></DetailSurface>)
+  await userEvent.click(screen.getByRole('button', { name: '打开研究助手' }))
+  expect(openAgent).toHaveBeenCalledTimes(1)
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(screen.getAllByText('预览助手')).toHaveLength(1)
+})
+
+it('does not move focus from the report when a wider window reveals the assistant', async () => {
+  render(<DetailSurface assistant={<textarea aria-label="消息" />}><button>报告操作</button></DetailSurface>)
+  const reportAction = screen.getByRole('button', { name: '报告操作' })
+  reportAction.focus()
+  act(() => resize?.({ matches: false }))
+  await waitFor(() => expect(screen.getByRole('complementary', { name: '研究助手面板' })).toBeTruthy())
+  expect(document.activeElement).toBe(reportAction)
 })
