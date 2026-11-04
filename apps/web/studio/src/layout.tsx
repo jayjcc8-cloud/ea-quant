@@ -198,3 +198,5 @@ export function DraftSurface({ source, parameters, costs }: { source: ReactNode;
 export function ReportOverviewSurface({ metrics, chart, sources }: { metrics: ReactNode; chart: ReactNode; sources: ReactNode }) {
   return <>{metrics}{chart}<section className="panel"><h2>来源与范围</h2>{sources}</section></>;
 }
+
+export function ErrorNote({ children }: { children: ReactNode }) { return children ? <p className="notice error" role="alert">{children}</p> : null }
