@@ -1,7 +1,7 @@
-/* v3 composition over the shared real research controls. Loaded only by /studio. */
-.real-studio { --accent: var(--blue); --border: var(--line); --ink: var(--text); --ink-strong: var(--text); color: var(--text); font-family: var(--font-sans); font-size: var(--font-size); line-height: 1.55; }
+/* Presentation for the real research entry; the offline preview keeps its own theme. */
+.real-studio { --blue: #285bd3; --blue-soft: #eaf1ff; --primary: var(--blue); --sidebar: #f3f5f8; --soft: #f5f7fa; --line: #e1e6ee; --text: #202632; --muted: #657082; --accent: var(--blue); --border: var(--line); --ink: var(--text); --ink-strong: var(--text); color: var(--text); font-family: var(--font-sans); font-size: var(--font-size); line-height: 1.55; }
 .real-studio h1, .real-studio h2, .real-studio h3 { color: var(--text); letter-spacing: 0; }
-.real-studio .home h1, .real-studio .page-heading h1 { font-size: 30px; line-height: 1.3; font-weight: 650; margin: 0 0 12px; }
+.real-studio .home h1, .real-studio .page-heading h1 { font-size: 30px; line-height: 1.35; font-weight: 650; margin: 0 0 8px; }
 .real-studio .sidebar { position: relative; top: auto; height: auto; min-height: 0; padding: 28px 16px 16px; background: var(--sidebar); flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 0; }
 .real-studio .sidebar .brand { padding: 0; margin: 0; gap: 12px; }
 .real-studio .brand > span { color: inherit; font-size: inherit; font-weight: inherit; letter-spacing: normal; }
@@ -70,7 +70,7 @@
 .real-studio .report-key-results dl > div:first-child { padding-left: 0; }
 .real-studio .report-key-results dl > div:last-child { border: 0; }
 .real-studio .report-key-results dd { font-size: clamp(18px, 2.8cqw, 28px); }
-.real-studio .report-source-line { font-size: 12px; gap: 6px 16px; margin: 0 0 14px; }
+.real-studio .report-source-line { font-size: 13px; gap: 4px 14px; margin: 0 0 14px; padding: 8px 12px; background: var(--soft); border-radius: 8px; }
 .real-studio .report-supporting-results { font-size: 12px; gap: 8px 16px; }
 .real-studio .equity-path { padding: 16px; }
 .real-studio .curve-header { flex-wrap: wrap; gap: 8px; }
@@ -87,12 +87,17 @@
 .real-studio .draft-editor-contract dl { font-size: 12px; }
 .real-studio .parameter-form .key-values > div { grid-template-columns: 170px minmax(0, 1fr); border-bottom: 1px solid var(--line); }
 .real-studio .real-data-binding { margin: 20px 0; }
+.real-studio .detail-content { container-type: inline-size; }
+.real-studio .page-heading { clear: both; flex-wrap: wrap; gap: 12px 20px; margin-bottom: 20px; }
+.real-studio .page-heading > div:first-child { flex: 1 1 28rem; min-width: 0; }
 .real-studio .page-heading h1 { overflow-wrap: anywhere; }
+.real-studio .breadcrumb { overflow-wrap: anywhere; }
 .real-studio .primary-nav a, .real-studio .tabs button { border: 0; border-radius: 0; box-shadow: none; background: transparent; }
 .real-studio .tabs button { padding: 10px 0; border-bottom: 3px solid transparent; }
 .real-studio .tabs button.selected { border-bottom-color: var(--blue); }
-.real-studio .page-heading .actions { flex-shrink: 0; margin-top: 0; }
-.real-studio .real-send { display: flex; width: 42px; height: 42px; padding: 0; border-radius: 50%; margin-left: auto; }
+.real-studio .page-heading .actions { flex: 0 1 auto; max-width: 100%; margin: 0; gap: 8px; }
+.real-studio .page-heading .actions .button { min-height: 38px; padding: 7px 13px; font-size: 14px; }
+.real-studio .real-send { display: flex; width: 36px; height: 36px; padding: 0; border-radius: 8px; margin-left: auto; }
 .real-studio .real-send:disabled { opacity: .45; }
 .real-studio .real-proposal small, .real-studio td > small { display: block; }
 /* The assistant stays mounted when its native dialog changes between inline and modal. */
@@ -100,7 +105,13 @@
 .real-studio .persistent-agent[open] { display: flex; flex-direction: column; }
 .real-studio .persistent-agent:not([open]) { display: none; }
 .real-studio .persistent-agent .agent-panel { flex: 1; min-height: 0; height: auto; }
+.real-studio .persistent-agent .agent-close { position: absolute; top: 20px; right: 16px; display: inline-flex; width: 32px; height: 32px; color: var(--muted); }
 .real-studio .persistent-agent::backdrop { background: #20212455; }
+.real-studio .agent-collapsed { grid-template-columns: minmax(0, 1fr); }
+.real-studio .agent-collapsed .agent-open { display: flex; }
+.real-studio .detail-content > .agent-open { float: right; margin: 0 0 8px 16px; }
+.real-studio .detail-content > .agent-open .button { min-height: 34px; padding: 5px 10px; gap: 6px; font-size: 13px; }
+.real-studio .agent-collapsed .breadcrumb { min-height: 34px; margin-bottom: 12px; display: flex; align-items: center; }
 @media (max-width: 1279px) {
   .real-studio .sidebar { padding: 22px 10px 14px; }
   .real-studio .workspace-select { display: block; margin: 18px 0 10px; }
@@ -108,8 +119,7 @@
   .real-studio .real-logo .brand > span:nth-child(2) { display: none; }
   .real-studio .real-logo .brand { justify-content: center; }
   .real-studio .persistent-agent[open] { display: flex; position: fixed; inset: 56px 0 0 auto; width: min(416px, 100vw); height: calc(100dvh - 56px); max-height: calc(100dvh - 56px); box-shadow: -12px 0 36px #0002; }
-  .real-studio .persistent-agent .agent-close { display: inline-flex; align-self: flex-end; gap: 6px; margin: 8px 12px 0; font-size: 13px; }
-
+  .real-studio .detail-content > .breadcrumb { min-height: 34px; margin-bottom: 12px; display: flex; align-items: center; }
 }
 @media (max-width: 760px) {
   .real-studio { --sidebar-width: 0px; }
@@ -118,8 +128,11 @@
   .real-studio .main { grid-column: 1 / -1; }
   .real-studio .workspace-menu { display: inline-flex; align-self: center; flex: 0 0 36px; }
   .real-studio .environment { display: none; }
-  .real-studio .report-key-results dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .real-studio .report-key-results dl { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 16px; }
+  .real-studio .report-key-results dl > div:nth-child(2n) { border-right: 0; }
+  .real-studio .report-key-results dl > div:nth-child(2n + 1) { padding-left: 0; }
   .real-studio .page-heading { flex-wrap: wrap; }
+  .real-studio .page-heading h1 { font-size: 26px; }
   .real-studio .real-research-row { align-items: flex-start; gap: 12px; flex-wrap: wrap; }
   .real-studio .draft-editor-field { grid-template-columns: 1fr; }
   .real-studio .draft-editor-bound { grid-column: 1; }
@@ -188,21 +201,43 @@
 .real-studio .drawer-sidebar .sidebar-footer { display: grid; margin-top: auto; }
 
 /* One scroll owner for streamed conversation; compact controls leave room for evidence. */
-.real-studio .agent-history:has(.studio-conversation) { display: flex; flex-direction: column; overflow: hidden; }
+.real-studio .agent-history:has(.studio-conversation) { display: flex; flex-direction: column; overflow: hidden; min-height: 0; padding: 0; }
 .real-studio .studio-conversation { display: flex; flex-direction: column; min-height: 0; flex: 1; }
 .real-studio .studio-conversation .chat-body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .real-studio .studio-assistant-status { color: var(--muted); font-size: 13px; margin: 10px 0; }
 .real-studio .studio-message-context { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-bottom: 8px; color: var(--muted); font-size: 12px; }
 .real-studio .studio-message-context a { color: var(--blue); }
-.real-studio .studio-model-controls { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; font-size: 13px; }
+.real-studio .studio-model-controls { margin: 0; border: 0; padding: 0; font-size: 13px; min-width: 0; }
 .real-studio .studio-model-controls > summary { cursor: pointer; color: var(--muted); }
 .real-studio .studio-model-controls .research-model-picker { margin-top: 8px; }
-.real-studio .studio-composer-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.real-studio .agent-input > .studio-composer-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin: 0; }
 .real-studio .studio-composer-actions > span { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); }
 .real-studio .studio-composer-actions .real-send { margin: 0; }
 .real-studio .studio-tool-activity { margin: 12px 0; padding: 10px 12px; background: var(--soft); border-radius: 8px; font-size: 13px; }
 .real-studio .studio-tool-activity summary { cursor: pointer; }
 .real-studio .studio-conversation .message { overflow-wrap: anywhere; }
+.real-studio .agent-panel { padding: 24px 20px; }
+.real-studio .agent-heading { padding-right: 32px; margin-bottom: 20px; gap: 10px; }
+.real-studio .agent-heading strong { font-size: 17px; }
+.real-studio .agent-heading small { display: inline-block; padding: 3px 7px; border-radius: 6px; background: var(--soft); font-size: 12px; }
+.real-studio .agent-context { padding: 8px 10px; margin-bottom: 16px; border-color: var(--line); font-size: 13px; }
+.real-studio .agent-input { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 10px; margin-top: 12px; padding: 10px; border-radius: 10px; }
+.real-studio .agent-input > * { grid-column: 1 / -1; }
+.real-studio .agent-input > .studio-model-controls { grid-column: 1; }
+.real-studio .agent-input > .studio-composer-actions { grid-column: 2; }
+.real-studio .agent-input > .studio-model-controls[open] { grid-column: 1 / -1; }
+.real-studio .agent-input:has(.studio-model-controls[open]) > .studio-composer-actions { grid-column: 1 / -1; }
+.real-studio .agent-input > textarea { min-height: 58px; max-height: 140px; font-size: 14px; line-height: 1.6; }
+.real-studio .agent-input > small { margin: 0; font-size: 12px; }
+.real-studio .studio-model-controls > summary { padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; overflow-wrap: anywhere; }
+.real-studio .studio-composer-shortcut { font-size: 11px; color: var(--muted); }
+.real-studio .studio-model-setup { padding: 10px 12px; background: var(--soft); border-radius: 8px; font-size: 13px; }
+.real-studio .studio-model-setup small { display: block; margin-top: 6px; color: var(--muted); }
+.real-studio .studio-empty-state { margin: 4px 0 16px; color: var(--muted); font-size: 14px; }
+.real-studio .suggestions { gap: 8px; margin-top: 16px; }
+.real-studio .message { padding: 12px 14px; margin-bottom: 14px; border-radius: 10px; }
+.real-studio .message.user { margin-left: 24px; }
+.real-studio .studio-message-text, .real-studio .studio-live-answer > p { white-space: pre-wrap; line-height: 1.75; font-size: 14px; }
 
 /* Research progress is a continuation aid, with provenance left in the existing detail views. */
 .real-studio .real-research-state { display: grid; gap: 6px; justify-items: end; font-size: 13px; }
@@ -218,7 +253,6 @@
 
 .real-studio .drawer-sidebar .recent-heading { display: flex; }
 
-.real-studio .studio-live-answer { margin: 12px 0; overflow-wrap: anywhere; }
-.real-studio .studio-live-answer > p { white-space: pre-wrap; }
+.real-studio .studio-live-answer { margin: 12px 0; padding: 12px 14px; background: var(--soft); border-radius: 10px; overflow-wrap: anywhere; }
 .real-studio .call-history > details > summary { cursor: pointer; font-size: 13px; color: var(--muted); }
 .real-studio .call-history > details > summary h3 { display: inline; font-size: inherit; font-weight: 500; }

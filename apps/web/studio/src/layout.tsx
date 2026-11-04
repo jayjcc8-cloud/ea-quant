@@ -171,7 +171,7 @@ export function AgentSurface({ context, report = false, onClose, history, input 
   context: string; report?: boolean; onClose?: () => void; history: ReactNode; input: ReactNode;
 }) {
   return <aside className={`agent-panel${report ? ' report-agent' : ''}`} aria-label="研究助手">
-    <div className="agent-heading"><Logo small /><div><strong>QUINE 研究助手</strong><small>{context}</small></div>
+    <div className="agent-heading"><Logo small /><div><strong>研究助手</strong><small>{context}</small></div>
       {onClose && <button className="icon-button" aria-label="收起 Agent" onClick={onClose}><Icon name="close" /></button>}
     </div>
     <div className="agent-history">{history}</div>
@@ -222,8 +222,12 @@ export function DetailSurface({ children, assistant, openAgent, className = '' }
   children: ReactNode; assistant: ReactNode; openAgent?: () => void; className?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const [narrow, setNarrow] = useState(() => window.matchMedia?.('(max-width: 1279px)').matches ?? false);
   const ref = useRef<HTMLDialogElement>(null), opener = useRef<HTMLButtonElement>(null), panelId = useId();
+  const wasVisible = useRef<boolean | null>(null);
+  const openedByUser = useRef(false);
+  const visible = narrow ? expanded : !collapsed;
   useEffect(() => {
     if (openAgent || !window.matchMedia) return;
     const media = window.matchMedia('(max-width: 1279px)');
@@ -234,21 +238,32 @@ export function DetailSurface({ children, assistant, openAgent, className = '' }
   useEffect(() => {
     const dialog = ref.current, trigger = opener.current;
     if (!dialog) return;
+    const active = document.activeElement as HTMLElement | null;
+    const focused = active?.closest('dialog') === dialog ? active : null;
     // Keep this one assistant subtree mounted as the panel changes mode. A
     // showModal drawer gives keyboard focus containment without a second stream.
     if (dialog.open) { if (dialog.close) dialog.close(); else dialog.open = false; }
-    if (narrow && expanded) dialog.showModal();
-    else if (!narrow) dialog.open = true;
+    if (visible) {
+      if (narrow) dialog.showModal();
+      else dialog.open = true;
+      if (focused) focused.focus();
+      else if (!narrow && openedByUser.current) (dialog.querySelector<HTMLElement>('textarea') ?? dialog.querySelector<HTMLElement>('button'))?.focus();
+    } else if (focused && wasVisible.current) trigger?.focus();
+    openedByUser.current = false;
+    wasVisible.current = visible;
+  }, [narrow, visible]);
+  useEffect(() => {
+    const dialog = ref.current;
     return () => {
-      if (dialog.open) { if (dialog.close) dialog.close(); else dialog.open = false; }
-      if (narrow && expanded) trigger?.focus();
+      if (dialog?.open) { if (dialog.close) dialog.close(); else dialog.open = false; }
     };
-  }, [narrow, expanded]);
-  const close = () => setExpanded(false);
-  return <div className={`detail-layout ${className}${expanded ? ' local-agent-open' : ''}`}>
+  }, []);
+  const close = () => { if (narrow) setExpanded(false); else setCollapsed(true); };
+  const open = () => { if (narrow) setExpanded(true); else { openedByUser.current = true; setCollapsed(false); } };
+  return <div className={`detail-layout ${className}${expanded ? ' local-agent-open' : ''}${!openAgent && !narrow && collapsed ? ' agent-collapsed' : ''}`}>
     <div className="detail-content">
-      <div className="agent-open"><button ref={opener} className="button" aria-controls={panelId} aria-expanded={expanded}
-        onClick={openAgent ?? (() => setExpanded(true))}><Icon name="panel" />打开研究助手</button></div>
+      <div className="agent-open"><button ref={opener} className="button" aria-label="打开研究助手" aria-controls={openAgent ? undefined : panelId} aria-expanded={openAgent ? undefined : visible}
+        onClick={openAgent ?? open}><Icon name="panel" /><span>{openAgent ? '打开研究助手' : '研究助手'}</span></button></div>
       {children}
     </div>
     {openAgent ? <div className="desktop-agent">{assistant}</div> :
@@ -256,7 +271,7 @@ export function DetailSurface({ children, assistant, openAgent, className = '' }
         aria-label="研究助手面板" aria-modal={narrow && expanded ? true : undefined}
         onCancel={event => { event.preventDefault(); close(); }}
         onKeyDown={event => { if (narrow) modalKey(event, close); }}>
-        <button className="button agent-close" onClick={close}><Icon name="close" />收起研究助手</button>{assistant}
+        <button className="icon-button agent-close" aria-label="收起研究助手" title="收起研究助手" onClick={close}><Icon name="panel" /></button>{assistant}
       </dialog>}
   </div>;
 }
