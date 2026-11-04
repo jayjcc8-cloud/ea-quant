@@ -3,7 +3,7 @@ import type { PaperEvents, PaperOverview } from './radian-api'
 
 export type PaperRequest = {
   request_id: string; candidate_id: string; fingerprint: string; name: string
-  prices: number[]; interval_seconds: number
+  prices: number[]; interval_seconds: number; duration_seconds?: number
 }
 export type PaperInstance = {
   strategy?: { id: string; version: number }; run_id: string; request: PaperRequest; source_job_id: string; state: string

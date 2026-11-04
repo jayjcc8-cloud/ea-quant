@@ -171,7 +171,7 @@ it('refuses mismatched report identity instead of presenting success', async () 
 
 it('shows unsupported routes as unavailable and never loads synthetic scenario state', async () => {
   const list = vi.fn()
-  open(adapter({ listResearch: list }), '/simulations')
+  open(adapter({ listResearch: list }), '/live')
   await screen.findByRole('heading', { name: '此候选尚未接入' })
   await waitFor(() => expect(list).not.toHaveBeenCalled())
   expect(localStorage.length).toBe(0)

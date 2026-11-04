@@ -52,3 +52,7 @@ export function compareCanonicalDecimal(leftValue: string, rightValue: string): 
   const rightCoefficient = right.coefficient * power10(scale - right.scale)
   return leftCoefficient < rightCoefficient ? -1 : leftCoefficient > rightCoefficient ? 1 : 0
 }
+
+export function percent(value: string): string {
+  return `${exactDelta('0', value, 2).replace(/^\+/, '')}%`
+}

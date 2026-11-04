@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from threading import Event, Thread
@@ -33,7 +34,9 @@ def main() -> int:
     stopping = Event()
 
     def parent_pipe() -> None:
-        sys.stdin.buffer.read()
+        # Avoid holding a buffered stdin lock when a duration stop exits before EOF.
+        while os.read(sys.stdin.fileno(), 4096):
+            pass
         stopping.set()
 
     Thread(target=parent_pipe, daemon=True).start()
@@ -48,6 +51,7 @@ def main() -> int:
         run_id=RunId(args.request_id),
         prices=tuple(request["prices"]),
         interval=request["interval_seconds"],
+        duration_seconds=request.get("duration_seconds"),
         evidence_reader=manager.reader(),
         parent_stop=stopping.is_set,
         expected_fingerprint=request["fingerprint"],

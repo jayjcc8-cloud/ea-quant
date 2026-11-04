@@ -170,8 +170,12 @@ class DesktopPaper:
             "prices",
             "interval_seconds",
         }
-        if set(value) != expected:
+        if set(value) not in (expected, expected | {"duration_seconds"}):
             raise ValueError("local simulation request fields conflict")
+        if "duration_seconds" in value and (
+            type(value["duration_seconds"]) is not int or not 1 <= value["duration_seconds"] <= 3600
+        ):
+            raise ValueError("local duration must be an integer in 1..3600 seconds")
         _uuid(value["request_id"])
         _uuid(value["candidate_id"])
         if type(value["name"]) is not str or not 1 <= len(value["name"].strip()) <= 80:
@@ -235,21 +239,23 @@ class DesktopPaper:
                 "overview": {"available": False, "reason": "attempt_not_observed"},
             }
             child = self._children.get(request_id)
-            result["process_exit"] = None if child is None else child.poll()
+            # One process observation per response: exit can race manifest/status reads.
+            process_exit = None if child is None else child.poll()
+            result["process_exit"] = process_exit
             if (
                 record.get("spawn_failed")
                 and not (self.runs / request_id).exists()
-                and (child is None or child.poll() is not None)
+                and (child is None or process_exit is not None)
             ):
                 result.update(state="start_failed", terminal_confirmed=True)
                 return result
             if (
                 child is not None
-                and child.poll() is not None
+                and process_exit is not None
                 and not (self.runs / request_id).exists()
             ):
                 record["spawn_failed"] = True
-                record["startup_exit"] = child.returncode
+                record["startup_exit"] = process_exit
                 self._publish(self.requests / f"{request_id}.json", record)
                 result.update(
                     state="start_failed",
@@ -267,22 +273,26 @@ class DesktopPaper:
                     or candidate["fingerprint"] != request["fingerprint"]
                     or manifest["prices"] != request["prices"]
                     or manifest["interval_seconds"] != request["interval_seconds"]
+                    or manifest.get("duration_seconds") != request.get("duration_seconds")
                     or candidate["configuration_sha256"] != record["configuration_sha256"]
                 ):
                     raise ValueError("attempt does not match the persisted startup request")
                 status = read_paper_status(self.runs / request_id)
+                status.pop("stop_trigger", None)
                 terminal = (
                     status["state"] in {"stopped", "failed"}
                     and not status["lease_held"]
                     and status.get("terminal_durable") is True
                 )
-                if terminal and (child is None or child.poll() is not None):
+                if terminal and (child is None or process_exit is not None):
                     # Reuse the existing journal/manifest recovery classification. This
                     # inspects and reconciles the original attempt; it never continues it.
                     recovered = resume_local_paper(self.runs / request_id)
                     terminal = recovered["state"] == "terminal" and not recovered.get(
                         "reconciliation_required", False
                     )
+                    if terminal and "stop_trigger" in recovered:
+                        status["stop_trigger"] = recovered["stop_trigger"]
                 else:
                     terminal = False
                 result.update(
@@ -352,6 +362,7 @@ class DesktopPaper:
                 or candidate["fingerprint"] != request["fingerprint"]
                 or manifest["prices"] != request["prices"]
                 or manifest["interval_seconds"] != request["interval_seconds"]
+                or manifest.get("duration_seconds") != request.get("duration_seconds")
                 or candidate["configuration_sha256"] != record["configuration_sha256"]
                 or candidate["strategy_id"] != record["strategy"]["id"]
                 or candidate["strategy_version"] != record["strategy"].get("version", 1)

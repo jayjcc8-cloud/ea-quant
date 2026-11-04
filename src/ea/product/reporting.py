@@ -599,15 +599,6 @@ def _subtract(left: CanonicalDecimal, right: CanonicalDecimal) -> CanonicalDecim
     return _add(left, _negated(right))
 
 
-def _multiply(*values: CanonicalDecimal) -> CanonicalDecimal:
-    coefficient = 1
-    scale = 0
-    for value in values:
-        coefficient *= value.coefficient
-        scale += value.scale
-    return _scaled(coefficient, scale)
-
-
 def _ratio(numerator: CanonicalDecimal, denominator: CanonicalDecimal) -> CanonicalDecimal:
     if denominator.coefficient <= 0:
         raise ValueError("return denominator is invalid")

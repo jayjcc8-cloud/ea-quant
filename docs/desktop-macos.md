@@ -106,7 +106,13 @@ rejection requires a reason; reopen retains the same identity, reason and termin
 or missing evidence prevents decisions; uncertain creation/decision replies only query saved
 state. EVALUATED means complete selected evidence, not statistical validity or profitability.
 ACCEPTED records research judgment and starts no experiment or simulation.
-Simulation, Live and batches are unavailable in this entry. Model connections can be configured here; saving does not test authentication.
+Saved successful reports can be compared in Records. Accepted Candidates can separately
+configure and confirm a finite local simulation (1–3600 seconds, default 60). The duration is
+frozen with the startup request. At expiry, the existing cooperative stop cuts new decisions
+and drains issued facts; it does not liquidate positions or certify strategy quality. The
+verified terminal distinguishes duration expiry from a requested stop. Source exhaustion and
+other faults remain failures. Closing the app requests stop; reopening reads the same history
+and never automatically resumes. Live and batches remain unavailable in this entry. Model connections can be configured here; saving does not test authentication.
 Return to a research and explicitly send a message to authorize one model call and zero backtests.
 The desktop has one normal entry;
 `/strategies` remains a migration fallback without a parallel navigation link. The standalone

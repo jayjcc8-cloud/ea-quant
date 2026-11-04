@@ -41,6 +41,7 @@ export type PaperHealth = {
 export type HealthUnavailable = { schema: string; available: false; detail: string }
 
 export type PaperOverview = {
+  stop_trigger?: 'requested' | 'duration_budget'
   available: boolean
   /** Absence reason, or the run's own terminal reason when available. */
   reason?: string | null

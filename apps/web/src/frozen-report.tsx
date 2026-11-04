@@ -1,4 +1,5 @@
 import type { BacktestJob, BacktestReport } from './app'
+import { latencyLabel } from './execution-assumptions'
 import type { EquityPath } from './equity-path'
 import { pathPercent } from './equity-path'
 import { TradeAnalyticsPanel, type TradeAnalytics } from './trade-analytics'
@@ -75,7 +76,7 @@ export function FrozenReportDetails({ job, report, path }: { job: BacktestJob; r
       <div><dt>交易所归属 / 市场类型</dt><dd>{input?.instrument.venue ?? report.source?.instrument.venue ?? report.scenario?.instrument.venue ?? '未记录'} / 市场类型未记录</dd></div>
       <div><dt>初始资金</dt><dd>{input?.funding ? `${input.funding.initial_cash} ${input.funding.currency}` : money(e.initial_funding)}</dd></div>
       <div><dt>参数</dt><dd>{Object.entries(input?.strategy.parameters ?? job.parameters ?? {}).map(([key, value]) => `${key}: ${value}`).join(' · ') || '未提供'}</dd></div>
-      <div><dt>执行成本、滑点与延迟</dt><dd>{input?.execution ? <pre>{JSON.stringify(input.execution, null, 2)}</pre> : '未提供'}</dd></div>
+      <div><dt>执行成本、滑点与延迟</dt><dd>{input?.execution ? <><p>{latencyLabel(input.execution.latency)}</p><pre>{JSON.stringify(input.execution, null, 2)}</pre></> : '未提供'}</dd></div>
       <div><dt>数据版本</dt><dd>{evidence.version ? `${evidence.version.dataset_id} · v${evidence.version.version ?? '未知'}` : '注册场景内冻结数据；独立版本未记录'}</dd></div>
       <div><dt>样本性质</dt><dd>{evidence.synthetic ? '合成示例 · 非真实市场数据' : '性质未声明；不由名称或可用时间策略推断'}</dd></div>
       <div><dt>数据来源</dt><dd>{evidence.synthetic ? 'QUINE 内置合成示例 · 冻结记录' : `${evidence.text(evidence.source.reference)} · ${evidence.attribution}`}</dd></div>

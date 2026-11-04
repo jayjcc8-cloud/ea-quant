@@ -1,5 +1,5 @@
 import { useId, useState } from 'react'
-import { compareCanonicalDecimal, exactDelta } from './decimal'
+import { compareCanonicalDecimal, exactDelta, percent as pathPercent } from './decimal'
 
 export type EquityPath = {
   schema: 'ea.backtest-equity-path.v1' | 'ea.backtest-equity-path.v2' | 'ea.backtest-equity-path.v3'; run_id: string; report_sha256: string; currency: string
@@ -7,7 +7,7 @@ export type EquityPath = {
   display_points: { index: number; time: string; equity: string }[]
   max_drawdown: { amount: string; ratio: string; peak_index: number; peak_time: string; peak_equity: string; trough_index: number; trough_time: string; trough_equity: string }
 }
-export const pathPercent = (ratio: string) => `${exactDelta('0', ratio, 2).replace(/^\+/, '')}%`
+export { pathPercent }
 
 /**
  * An ISO instant as a short UTC label, or the recorded string unchanged.
