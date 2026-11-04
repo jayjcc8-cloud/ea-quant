@@ -1,5 +1,108 @@
 /* Presentation for the real research entry; the offline preview keeps its own theme. */
-.real-studio { --blue: #285bd3; --blue-soft: #eaf1ff; --primary: var(--blue); --sidebar: #f3f5f8; --soft: #f5f7fa; --line: #e1e6ee; --text: #202632; --muted: #657082; --accent: var(--blue); --border: var(--line); --ink: var(--text); --ink-strong: var(--text); color: var(--text); font-family: var(--font-sans); font-size: var(--font-size); line-height: 1.55; }
+.real-studio {
+  color-scheme: light;
+  --surface: #ffffff;
+  --shell: #f4f6f9;
+  --sidebar: #f0f3f7;
+  --soft: #f1f4f8;
+  --text: #1f2937;
+  --muted: #536174;
+  --line: #dce2ea;
+  --field-line: #78869a;
+  --blue: #2455c6;
+  --blue-soft: #e9f0ff;
+  --on-blue: #ffffff;
+  --primary: #2455c6;
+  --primary-hover: #1e46a7;
+  --on-primary: #ffffff;
+  --warn: #7a500e;
+  --warn-soft: #fff4db;
+  --error: #a72b35;
+  --error-soft: #fff0f1;
+  --good: #21633c;
+  --good-soft: #eaf6ee;
+  --backdrop: #11182766;
+  /* Shared research controls and model editors use these older semantic names. */
+  --ink: var(--text);
+  --ink-strong: var(--text);
+  --border: var(--line);
+  --line-soft: var(--line);
+  --link: var(--blue);
+  --selection: var(--blue-soft);
+  --accent: var(--blue);
+  --accent-ink: var(--on-blue);
+  --accent-line: var(--blue);
+  --amber: var(--warn);
+  --amber-line: var(--warn);
+  --positive: var(--good);
+  --positive-soft: var(--good-soft);
+  --danger: var(--error);
+  --danger-soft: var(--error-soft);
+  --danger-line: var(--error);
+  --notice: var(--soft);
+  --notice-line: var(--line);
+  --quine-ink: var(--text);
+  --quine-ink-soft: var(--muted);
+  --quine-surface: var(--surface);
+  --quine-surface-soft: var(--soft);
+  --quine-line: var(--line);
+  --quine-line-soft: var(--line);
+  --quine-red: var(--blue);
+  --quine-red-soft: var(--blue-soft);
+  --quine-red-line: var(--blue);
+  --quine-red-ink: var(--blue);
+  --quine-primary: var(--primary);
+  --quine-primary-strong: var(--primary-hover);
+  --quine-primary-ink: var(--on-primary);
+  --quine-positive-soft: var(--good-soft);
+  --quine-positive-line: var(--good);
+  --quine-positive-ink: var(--good);
+  color: var(--text);
+  background: var(--surface);
+  font-family: var(--font-sans);
+  font-size: var(--font-size);
+  line-height: 1.55;
+}
+/* Appearance resolves light/dark/system on the root. The offline preview has
+   its own theme and is deliberately outside these selectors. */
+:root[data-theme="dark"] .real-studio {
+  color-scheme: dark;
+  --surface: #1b1f27;
+  --shell: #121720;
+  --sidebar: #161c25;
+  --soft: #252d39;
+  --text: #edf2f8;
+  --muted: #b5c1d1;
+  --line: #39485c;
+  --field-line: #7b8ca5;
+  --blue: #a9c8ff;
+  --blue-soft: #263b5d;
+  --on-blue: #10223f;
+  --primary: #3e70df;
+  --primary-hover: #3e70df;
+  --on-primary: #ffffff;
+  --warn: #f2ce88;
+  --warn-soft: #3c3020;
+  --error: #ffb4bd;
+  --error-soft: #40262d;
+  --good: #a0e1b5;
+  --good-soft: #1e3329;
+  --backdrop: #050911b3;
+}
+.real-studio :is(input, select, textarea) { color: var(--text); background-color: var(--surface); border-color: var(--field-line); accent-color: var(--primary); }
+.real-studio :is(input[readonly], input:disabled, select:disabled, textarea:disabled) { color: var(--muted); background-color: var(--soft); }
+.real-studio ::placeholder { color: var(--muted); opacity: 1; }
+.real-studio :is(.button, .workspace-select, .sidebar-search, .agent-input) { border-color: var(--field-line); }
+.real-studio .button:hover:not(:disabled) { border-color: var(--field-line); }
+.real-studio .button.primary { border-color: var(--primary); }
+.real-studio .button.primary:hover:not(:disabled) { background: var(--primary-hover); color: var(--on-primary); filter: none; }
+.real-studio :focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
+.real-studio :is(.dialog, .preview-dialog, .storage-leave-dialog) { color: var(--text); background: var(--surface); border-color: var(--field-line); }
+.real-studio dialog::backdrop { background: var(--backdrop); }
+.real-studio .validated { color: var(--good); background: var(--good-soft); border-color: var(--good); }
+.real-studio .validated :is(small, span) { color: inherit; }
+.real-studio .curve-plot svg > path { stroke: var(--field-line); opacity: 1; }
+.real-studio .curve-plot svg > line[stroke-dasharray] { stroke: var(--muted); opacity: 1; }
 .real-studio h1, .real-studio h2, .real-studio h3 { color: var(--text); letter-spacing: 0; }
 .real-studio .home h1, .real-studio .page-heading h1 { font-size: 30px; line-height: 1.35; font-weight: 650; margin: 0 0 8px; }
 .real-studio .sidebar { position: relative; top: auto; height: auto; min-height: 0; padding: 28px 16px 16px; background: var(--sidebar); flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 0; }
@@ -31,13 +134,13 @@
 .real-studio .real-experiment { border-top: 1px solid var(--line); padding: 18px 0; }
 .real-studio .real-experiment strong { overflow-wrap: anywhere; }
 .real-studio .real-experiment-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
-.real-studio .real-experiment .notice button { border: 1px solid var(--line); border-radius: 7px; padding: 8px 14px; white-space: normal; }
+.real-studio .real-experiment .notice button { border: 1px solid var(--field-line); border-radius: 7px; padding: 8px 14px; white-space: normal; }
 .real-studio pre, .real-studio small, .real-studio dd { overflow-wrap: anywhere; }
 .real-studio pre { white-space: pre-wrap; padding: 12px; background: var(--soft); font-size: 12px; max-height: 400px; overflow: auto; }
 .real-studio .field { margin: 14px 0; display: grid; gap: 6px; }
 .real-studio .field label { color: var(--muted); }
 .real-studio .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0; }
-.real-studio .strategy-panel button, .real-studio .data-resource button { border: 1px solid var(--line); border-radius: 7px; padding: 8px 14px; }
+.real-studio .strategy-panel button, .real-studio .data-resource button { border: 1px solid var(--field-line); border-radius: 7px; padding: 8px 14px; }
 .real-studio button.primary { background: var(--primary); color: var(--on-primary); }
 .real-studio .notice.error { color: var(--error); background: var(--error-soft); }
 .real-studio .report-key-results { margin: 20px 0; }
@@ -64,7 +167,7 @@
 .real-studio .primary-nav a { position: relative; display: flex; align-items: center; gap: 6px; padding: 0 10px; }
 .real-studio .primary-nav a[aria-current="page"] { color: var(--text); font-weight: 650; border-bottom: 3px solid var(--blue); }
 .real-studio .primary-nav a small { font-size: 10px; font-weight: 400; }
-.real-studio .environment .recent-dot { margin: 0; background: #448557; }
+.real-studio .environment .recent-dot { margin: 0; background: var(--good); }
 .real-studio .report-key-results dl { border: 0; border-radius: 0; gap: 0; padding: 12px 0; }
 .real-studio .report-key-results dl > div { border-right: 1px solid var(--line); padding: 0 16px; }
 .real-studio .report-key-results dl > div:first-child { padding-left: 0; }
@@ -82,7 +185,7 @@
 .real-studio .draft-editor-path { color: var(--muted); font-size: 14px; font-weight: 400; }
 .real-studio .draft-editor-bound { grid-column: 2; }
 .real-studio .draft-editor-revision { font-size: 12px; }
-.real-studio .draft-editor-actions button { padding: 9px 16px; border: 1px solid var(--line); border-radius: 7px; }
+.real-studio .draft-editor-actions button { padding: 9px 16px; border: 1px solid var(--field-line); border-radius: 7px; }
 .real-studio .draft-editor-contract { margin-top: 14px; }
 .real-studio .draft-editor-contract dl { font-size: 12px; }
 .real-studio .parameter-form .key-values > div { grid-template-columns: 170px minmax(0, 1fr); border-bottom: 1px solid var(--line); }
@@ -106,7 +209,7 @@
 .real-studio .persistent-agent:not([open]) { display: none; }
 .real-studio .persistent-agent .agent-panel { flex: 1; min-height: 0; height: auto; }
 .real-studio .persistent-agent .agent-close { position: absolute; top: 20px; right: 16px; display: inline-flex; width: 32px; height: 32px; color: var(--muted); }
-.real-studio .persistent-agent::backdrop { background: #20212455; }
+.real-studio .persistent-agent::backdrop { background: var(--backdrop); }
 .real-studio .agent-collapsed { grid-template-columns: minmax(0, 1fr); }
 .real-studio .agent-collapsed .agent-open { display: flex; }
 .real-studio .detail-content > .agent-open { float: right; margin: 0 0 8px 16px; }
@@ -180,7 +283,7 @@
 .real-studio .real-search-dialog { width: min(620px, calc(100vw - 32px)); padding: 24px; }
 .real-studio .dialog-head { gap: 20px; }
 .real-studio .dialog-head h2 { margin: 0; }
-.real-studio .real-search-input { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.real-studio .real-search-input { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--field-line); border-radius: 8px; }
 .real-studio .real-search-input input { flex: 1; padding: 0; border: 0; min-width: 0; background: transparent; }
 .real-studio .real-search-results { max-height: min(60dvh, 560px); overflow: auto; margin-top: 16px; }
 .real-studio .real-search-results .recent-link { justify-content: flex-start; padding: 12px; }
@@ -230,7 +333,7 @@
 .real-studio .agent-input:has(.studio-model-controls[open], .studio-composer-actions > .button:not(.real-send)) > .studio-composer-actions { grid-column: 1 / -1; }
 .real-studio .agent-input > textarea { min-height: 58px; max-height: 140px; font-size: 14px; line-height: 1.6; }
 .real-studio .agent-input > small { margin: 0; font-size: 12px; }
-.real-studio .studio-model-controls > summary { padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; overflow-wrap: anywhere; }
+.real-studio .studio-model-controls > summary { padding: 5px 7px; border: 1px solid var(--field-line); border-radius: 6px; overflow-wrap: anywhere; }
 .real-studio .studio-composer-shortcut { font-size: 11px; color: var(--muted); }
 .real-studio .studio-model-setup { padding: 10px 12px; background: var(--soft); border-radius: 8px; font-size: 13px; }
 .real-studio .studio-model-setup small { display: block; margin-top: 6px; color: var(--muted); }
@@ -257,3 +360,56 @@
 .real-studio .studio-live-answer { margin: 12px 0; padding: 12px 14px; background: var(--soft); border-radius: 10px; overflow-wrap: anywhere; }
 .real-studio .call-history > details > summary { cursor: pointer; font-size: 13px; color: var(--muted); }
 .real-studio .call-history > details > summary h3 { display: inline; font-size: inherit; font-weight: 500; }
+
+/* Research setup stays in the central workspace. Optional connections use the
+   same editor in a bounded dialog instead of becoming a second workspace. */
+.real-studio .real-research-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); max-width: 920px; margin: 8px 0 28px; padding: 0; list-style: none; }
+.real-studio .real-research-steps > li { position: relative; display: flex; flex-direction: column; align-items: center; gap: 7px; min-width: 0; color: var(--muted); font-size: 13px; }
+.real-studio .real-research-steps > li:not(:last-child)::after { content: ''; position: absolute; top: 14px; left: 50%; width: 100%; height: 1px; background: var(--field-line); }
+.real-studio .real-research-steps > li > span { z-index: 1; display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid var(--field-line); border-radius: 50%; background: var(--surface); }
+.real-studio .real-research-steps > li > strong { font-weight: 500; }
+.real-studio .real-research-steps > li[aria-current="step"] { color: var(--blue); }
+.real-studio .real-research-steps > li[aria-current="step"] > span { color: var(--on-primary); background: var(--primary); border-color: var(--primary); }
+.real-studio .real-research-steps > li[aria-current="step"] > strong { font-weight: 650; }
+.real-studio .studio-research-setup { max-width: 920px; padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.real-studio .setup-mode { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 24px; }
+.real-studio .setup-mode button { padding: 8px 14px; border: 1px solid var(--field-line); border-radius: 7px; background: var(--surface); color: var(--text); }
+.real-studio .setup-mode button[aria-pressed="true"] { color: var(--blue); background: var(--blue-soft); border-color: var(--blue); box-shadow: inset 0 -2px var(--blue); }
+.real-studio .studio-research-setup fieldset { min-width: 0; margin: 0 0 24px; padding: 0; border: 0; }
+.real-studio .studio-research-setup legend { padding: 0; margin-bottom: 12px; color: var(--text); font-size: 16px; font-weight: 600; }
+.real-studio .setup-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 12px; }
+.real-studio .setup-option { display: flex; align-items: flex-start; gap: 10px; padding: 14px; border: 1px solid var(--field-line); border-radius: 9px; background: var(--surface); color: var(--text); cursor: pointer; }
+.real-studio .setup-option > input { flex: 0 0 17px; margin: 3px 0 0; }
+.real-studio .setup-option > span { min-width: 0; }
+.real-studio .setup-option :is(strong, small) { display: block; }
+.real-studio .setup-option small { margin-top: 5px; line-height: 1.6; }
+.real-studio .setup-option:has(:checked) { border-color: var(--blue); background: var(--blue-soft); box-shadow: inset 0 0 0 1px var(--blue); }
+.real-studio .setup-option:focus-within { outline: 3px solid var(--blue); outline-offset: 3px; }
+.real-studio .setup-summary { margin: 20px 0; padding: 16px; border-radius: 9px; background: var(--soft); color: var(--text); }
+.real-studio .setup-summary h3 { margin: 0 0 8px; }
+.real-studio .setup-summary dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 24px; margin: 12px 0; }
+.real-studio .setup-summary dl > div { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 10px; }
+.real-studio .setup-summary dt { color: var(--muted); }
+.real-studio .setup-summary p { margin: 4px 0; }
+.real-studio .setup-summary details { margin-top: 12px; }
+.real-studio .setup-criterion { padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
+.real-studio .setup-criterion > summary { cursor: pointer; }
+.real-studio .setup-criterion > p { margin-top: 12px; }
+.real-studio .setup-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 20px; margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+.real-studio .setup-footer > :not(button) { max-width: 560px; color: var(--muted); }
+.real-studio .real-model-action { max-width: 100%; overflow-wrap: anywhere; }
+.real-studio .real-model-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--muted); }
+.real-studio .real-model-action[data-configured="true"] .real-model-dot { background: var(--blue); }
+.real-studio .real-model-dialog { width: min(960px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; padding: 24px; }
+.real-studio .real-model-dialog-context { color: var(--muted); overflow-wrap: anywhere; }
+.real-studio .real-model-dialog .settings-form-model { margin: 20px 0 0; }
+.real-studio .real-model-dialog .model-connection-layout { grid-template-columns: 240px minmax(0, 1fr); }
+.real-studio .real-model-dialog-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+@media (max-width: 850px) {
+  .real-studio .studio-research-setup { padding: 20px; }
+  .real-studio .real-model-dialog .model-connection-layout { grid-template-columns: minmax(0, 1fr); }
+  .real-studio .real-model-dialog .model-directory { padding: 0 0 16px; border-bottom: 1px solid var(--line); }
+}
+@media (max-width: 760px) {
+  .real-studio .setup-summary dl { grid-template-columns: minmax(0, 1fr); }
+}
