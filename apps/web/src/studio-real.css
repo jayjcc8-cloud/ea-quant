@@ -225,8 +225,9 @@
 .real-studio .agent-input > * { grid-column: 1 / -1; }
 .real-studio .agent-input > .studio-model-controls { grid-column: 1; }
 .real-studio .agent-input > .studio-composer-actions { grid-column: 2; }
-.real-studio .agent-input > .studio-model-controls[open] { grid-column: 1 / -1; }
-.real-studio .agent-input:has(.studio-model-controls[open]) > .studio-composer-actions { grid-column: 1 / -1; }
+/* The stop action needs its own row so the model name stays readable. */
+.real-studio .agent-input:has(.studio-model-controls[open], .studio-composer-actions > .button:not(.real-send)) > .studio-model-controls,
+.real-studio .agent-input:has(.studio-model-controls[open], .studio-composer-actions > .button:not(.real-send)) > .studio-composer-actions { grid-column: 1 / -1; }
 .real-studio .agent-input > textarea { min-height: 58px; max-height: 140px; font-size: 14px; line-height: 1.6; }
 .real-studio .agent-input > small { margin: 0; font-size: 12px; }
 .real-studio .studio-model-controls > summary { padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; overflow-wrap: anywhere; }
