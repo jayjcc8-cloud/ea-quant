@@ -97,6 +97,9 @@
 .real-studio .button.primary { border-color: var(--primary); }
 .real-studio .button.primary:hover:not(:disabled) { background: var(--primary-hover); color: var(--on-primary); filter: none; }
 .real-studio :focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
+/* Theme surfaces change immediately; inherited link fades must not leave the
+   previous theme's text on the new background, even during the first frame. */
+.real-studio nav a { transition: none; }
 .real-studio :is(.dialog, .preview-dialog, .storage-leave-dialog) { color: var(--text); background: var(--surface); border-color: var(--field-line); }
 .real-studio dialog::backdrop { background: var(--backdrop); }
 .real-studio .validated { color: var(--good); background: var(--good-soft); border-color: var(--good); }
