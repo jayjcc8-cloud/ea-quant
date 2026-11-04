@@ -26,11 +26,11 @@ function MessageContext({ call }: { call?: UserStrategyCall }) {
 function LiveContext({ live }: { live: Live }) {
   return <small className="studio-message-context">{live.jobId && <Link to={`/report/${encodeURIComponent(live.jobId)}/overview`} title={live.jobId} aria-label={`报告 ${live.jobId}`}>报告 {live.jobId.slice(0, 8)}</Link>}<span>{live.jobId ? '提问时草稿' : '草稿'} r{live.revision}</span></small>
 }
-export function Assistant({ api, strategy, changed, jobId, evidence }: { api: ApiAdapter; strategy: UserStrategy; changed: (next: UserStrategy) => void; jobId?: string; evidence?: ReactNode }) {
+export function Assistant({ api, strategy, changed, jobId, evidence, modelVersion = 0, onConfigureModel }: { api: ApiAdapter; strategy: UserStrategy; changed: (next: UserStrategy) => void; jobId?: string; evidence?: ReactNode; modelVersion?: number; onConfigureModel?: () => void }) {
   const id = strategy.user_strategy_id, key = `quine.studio.calls.${id}`
   const textKey = `quine.studio.unsent.${id}.${jobId ? `report.${jobId}` : 'draft'}`
   const streaming = Boolean(api.streamUserStrategyMessage && api.userStrategyConversation && api.resumeUserStrategyConversation)
-  const model = useRead(useCallback(() => api.settingsStatus!(), [api]))
+  const model = useRead(useCallback(() => api.settingsStatus!(), [api]), String(modelVersion))
   const [text, setText] = useState(() => saved(textKey)), [textRetained, setTextRetained] = useState(true)
   const [error, setError] = useState(''), [busy, setBusy] = useState(false)
   const [retained, setRetained] = useState(() => retainedCalls(key)), [live, setLive] = useState<Live | null>(null)
@@ -255,7 +255,7 @@ export function Assistant({ api, strategy, changed, jobId, evidence }: { api: Ap
         }} />
       {!textRetained && text && <small>未发送消息无法在本机缓冲，离开前请保留输入。</small>}
       <StorageFailureGuard active={!textRetained && !!text} message="未发送消息无法在本机保留，离开将丢失输入。" />
-      {!selectedModel?.configured && (model.value || model.error) && <div className="studio-model-setup"><Link to="/resources/models">配置模型连接</Link><small>也可继续编辑研究草稿。</small></div>}
+      {!onConfigureModel && !selectedModel?.configured && (model.value || model.error) && <div className="studio-model-setup"><Link to="/resources/models">配置模型连接</Link><small>也可继续编辑研究草稿。</small></div>}
       <details className="studio-model-controls"><summary>{selectedModel?.configured ? selectedModel.model : '选择模型连接'}</summary>
         {api.selectUserStrategyModelProfile && model.value?.profiles && <label className="research-model-picker">本研究模型连接<select value={strategy.model_profile_id ?? ''} disabled={locked} onChange={event => { const profileId = event.target.value; void act(async () => accept(await api.selectUserStrategyModelProfile!(id, profileId || null))) }}>
           <option value="">跟随工作区默认 · {model.value.profiles.find(item => item.id === model.value?.default_profile_id)?.name ?? '未设置'}</option>
@@ -263,7 +263,7 @@ export function Assistant({ api, strategy, changed, jobId, evidence }: { api: Ap
           {model.value.profiles.map(item => <option key={item.id} value={item.id}>{item.name} · {item.model}{item.configured ? '' : ' · 未配置'}</option>)}
         </select></label>}
         <small>更改用于下一次提问；当前轮次与历史记录保持原连接。</small>
-        <div className="research-model-actions"><Link to="/resources/models">管理模型连接</Link><button className="button" disabled={busy} onClick={model.reload}>重新读取连接</button></div>
+        <div className="research-model-actions">{onConfigureModel ? <button className="button" onClick={onConfigureModel}>管理模型连接</button> : <Link to="/resources/models">管理模型连接</Link>}<button className="button" disabled={busy} onClick={model.reload}>重新读取连接</button></div>
       </details>
       <div className="studio-composer-actions">
         {streaming && turnId && <button className="button" disabled={stopping || stopRequested} onClick={() => void stop()} aria-label={receiving ? '停止生成' : '结束本轮'}><Icon name="stop" />{receiving ? '停止' : '结束本轮'}</button>}

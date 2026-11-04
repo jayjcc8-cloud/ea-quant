@@ -113,6 +113,34 @@ it('offers model setup directly while keeping the question and keyboard send dis
   expect(send).not.toHaveBeenCalled(); expect(launch).not.toHaveBeenCalled()
 })
 
+it('refreshes saved model settings without replacing the composer, aborting its stream or sending another question', async () => {
+  const q = queue(), send = vi.fn(async () => q.stream()), configure = vi.fn()
+  let modelName = 'original-model'
+  const settings = vi.fn(async () => ({ schema: 'radian.settings-status.v1' as const, settings_file: '/fixture/settings.json', configured: true, provider: 'script', model: modelName, base_url: null, api_key_env: null }))
+  const api = adapter({ settingsStatus: settings, streamUserStrategyMessage: send })
+  const page = (version: number) => <MemoryRouter><Assistant api={api} strategy={original} changed={() => {}} modelVersion={version} onConfigureModel={configure} /></MemoryRouter>
+  const view = render(page(0))
+  await screen.findByText('original-model')
+  const input = screen.getByLabelText('消息') as HTMLTextAreaElement
+  fireEvent.change(input, { target: { value: '正在处理的问题' } })
+  await userEvent.click(screen.getByRole('button', { name: '发送一次模型请求' }))
+  await waitFor(() => expect(send).toHaveBeenCalledTimes(1))
+  const args = send.mock.calls[0] as unknown as [string, { call_id: string }, AbortSignal]
+  fireEvent.change(input, { target: { value: '保留下一问' } })
+  modelName = 'newly-saved-model'
+  view.rerender(page(1))
+  await screen.findByText('newly-saved-model')
+  expect(settings).toHaveBeenCalledTimes(2)
+  expect(screen.getByLabelText('消息')).toBe(input)
+  expect(input.value).toBe('保留下一问')
+  expect(args[2].aborted).toBe(false)
+  await act(async () => q.push({ kind: 'text_delta', call_id: args[1].call_id, text: '原请求继续回答' }))
+  expect(await screen.findByText('原请求继续回答')).toBeTruthy()
+  expect((screen.getByRole('button', { name: '发送一次模型请求' }) as HTMLButtonElement).disabled).toBe(true)
+  expect(send).toHaveBeenCalledTimes(1); expect(configure).not.toHaveBeenCalled()
+  await act(async () => { q.push({ kind: 'done', strategy: { ...original, calls: [call(args[1].call_id)] } }); q.end() })
+})
+
 it('streams one explicitly bounded call and real tool activity, preserving newer unsent text', async () => {
   const q = queue(), send = vi.fn(async () => q.stream()), fallback = vi.fn(), launch = vi.fn()
   const api = adapter({ streamUserStrategyMessage: send, sendUserStrategyMessage: fallback, launchUserStrategyExperiment: launch })

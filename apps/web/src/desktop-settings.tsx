@@ -14,7 +14,7 @@ export type DesktopStatus = {
   model: ModelConfigurationStatus
 }
 
-export function DesktopSettings({ api, onSaved, section = 'all' }: { api: ApiAdapter; onSaved: () => void; section?: 'all' | 'model' | 'application' | 'appearance' | 'workspace' }) {
+export function DesktopSettings({ api, onSaved, onSavingChange, section = 'all' }: { api: ApiAdapter; onSaved: () => void; onSavingChange?: (saving: boolean) => void; section?: 'all' | 'model' | 'application' | 'appearance' | 'workspace' }) {
   const [webOnly, setWebOnly] = useState(false)
   const [status, setStatus] = useState<DesktopStatus | null>(null)
   const [error, setError] = useState('')
@@ -73,7 +73,7 @@ export function DesktopSettings({ api, onSaved, section = 'all' }: { api: ApiAda
   }, [status, draftKey, baseline, profileId, profileName, provider, model, endpoint, workspace, theme])
   const save = async (body: object, success: string) => {
     if (pending.current || !api.saveDesktopSettings) return
-    pending.current = true; setBusy(true); setError(''); setMessage('')
+    pending.current = true; setBusy(true); onSavingChange?.(true); setError(''); setMessage('')
     // The password is held only in this form and this request; never persisted in the browser.
     setSecret('')
     try {
@@ -88,7 +88,7 @@ export function DesktopSettings({ api, onSaved, section = 'all' }: { api: ApiAda
         : caught instanceof Error ? caught.message : '保存失败；原设置保留，请重试。')
     } finally {
       pending.current = false
-      if (mounted.current) setBusy(false)
+      if (mounted.current) { setBusy(false); onSavingChange?.(false) }
     }
   }
   let endpointError = ''
