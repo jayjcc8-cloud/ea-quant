@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
+import { createPortal } from 'react-dom'
 
 // A confirmed leave applies to every uncached input on this page. The bypass exists
 // only during the synchronous replay, so multiple guards cannot prompt each other.
@@ -115,7 +116,9 @@ export function StorageFailureGuard({ active, message }: { active: boolean; mess
   }
 
   if (!active || !pending) return null
-  return <dialog ref={dialog} className="preview-dialog storage-leave-dialog" aria-modal="true"
+  // An assistant remains mounted when its panel closes. Its leave decision must
+  // escape that hidden ancestor as well as other top-layer panels.
+  return createPortal(<dialog ref={dialog} className="preview-dialog storage-leave-dialog" aria-modal="true"
       aria-labelledby={titleId} aria-describedby={messageId} tabIndex={-1} onKeyDown={onKeyDown}
       onCancel={event => { event.preventDefault(); close() }}>
       <h2 id={titleId}>离开此页？</h2>
@@ -125,5 +128,5 @@ export function StorageFailureGuard({ active, message }: { active: boolean; mess
         <button ref={cancelButton} type="button" onClick={close}>继续编辑</button>
         <button type="button" onClick={confirmLeave}>放弃并离开</button>
       </div>
-  </dialog>
+  </dialog>, document.body)
 }

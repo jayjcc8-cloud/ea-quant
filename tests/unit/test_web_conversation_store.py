@@ -15,8 +15,11 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from queue import Queue
+from threading import Event, get_ident
 from typing import Any, cast
 
 import pytest
@@ -513,6 +516,78 @@ def _create(strategies: UserStrategyService, name: str) -> UserStrategy:
     return strategies.create(
         name=name, intent="One legacy idea", scenario_id=SCENARIO, criterion=CRITERION
     )
+
+
+def test_first_conversation_read_preserves_a_concurrent_successful_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _started: list[WebService]
+) -> None:
+    strategies, provider = _service(tmp_path, monkeypatch, _started)
+    created = strategies.create(name="Unbound idea", intent="Keep the binding", scenario_id=None)
+    store = strategies._store
+    saving, release = Event(), Event()
+    progress: Queue[str] = Queue()
+    reader: list[int] = []
+    save_json, migrate, lock = store._save_json, store.migrate_conversation, strategies._lock
+
+    def paused_save(value: UserStrategy) -> None:
+        # save() has selected JSON but has not published the new revision yet.
+        saving.set()
+        assert release.wait(5)
+        save_json(value)
+
+    def observed_lock(identity: str) -> Any:
+        if reader == [get_ident()]:
+            progress.put("read reached the mutation lock")
+        return lock(identity)
+
+    def observed_migration(identity: str) -> UserStrategy:
+        value = migrate(identity)
+        if reader == [get_ident()]:
+            progress.put("read completed migration")
+        return value
+
+    def read_conversation() -> dict[str, Any]:
+        reader.append(get_ident())
+        return strategies.conversation_state(created.user_strategy_id)
+
+    monkeypatch.setattr(store, "_save_json", paused_save)
+    monkeypatch.setattr(store, "migrate_conversation", observed_migration)
+    monkeypatch.setattr(strategies, "_lock", observed_lock)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        bound = pool.submit(
+            strategies.bind_scenario,
+            created.user_strategy_id,
+            operation_id="bind-before-migration",
+            base_revision=1,
+            scenario_id=SCENARIO,
+        )
+        try:
+            assert saving.wait(5)
+            read = pool.submit(read_conversation)
+            # No sleep: release only once the read either waits for the binding,
+            # or (on the broken path) has already migrated its old JSON revision.
+            progress.get(timeout=5)
+        finally:
+            release.set()
+        saved, conversation = bound.result(timeout=5), read.result(timeout=5)
+    assert saved.draft.revision == 2
+    assert conversation["revision"] == 2
+    assert store.get(created.user_strategy_id) == saved
+    assert UserStrategyStore(tmp_path / "workspace").get(created.user_strategy_id) == saved
+    assert provider.calls == []
+    assert _started[0].list_jobs() == []
+
+
+def test_migrated_conversation_read_remains_available_while_task_lock_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _started: list[WebService]
+) -> None:
+    strategies, provider = _service(tmp_path, monkeypatch, _started)
+    created = _create(strategies, "Existing conversation")
+    strategies.conversation_state(created.user_strategy_id)
+    with ThreadPoolExecutor(max_workers=1) as pool, strategies._lock(created.user_strategy_id):
+        read = pool.submit(strategies.conversation_state, created.user_strategy_id)
+        assert read.result(timeout=2)["revision"] == created.draft.revision
+    assert provider.calls == []
 
 
 def test_each_conversation_migrates_before_reserving_its_model_call(

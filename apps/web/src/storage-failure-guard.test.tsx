@@ -30,6 +30,21 @@ const renderGuard = (active: boolean, message = '未保存输入在本机无法�
 const location = () => screen.getByLabelText('location').textContent
 afterEach(() => { cleanup(); window.history.replaceState({}, '', '/') })
 
+it('keeps the leave decision outside a closed assistant dialog', () => {
+  window.history.replaceState({}, '', '/start')
+  render(<BrowserRouter><Links /><dialog aria-label="收起的研究助手">
+    <StorageFailureGuard active message="消息无法缓冲" />
+  </dialog><LocationProbe /></BrowserRouter>)
+  const link = screen.getByText('first link')
+  fireEvent.click(link)
+  const confirmation = document.querySelector('.storage-leave-dialog')!
+  expect(confirmation.parentElement).toBe(document.body)
+  fireEvent.click(within(confirmation as HTMLElement).getByRole('button', { name: '继续编辑' }))
+  expect(document.querySelector('.storage-leave-dialog')).toBeNull()
+  expect(document.activeElement).toBe(link)
+  expect(location()).toBe('/start·')
+})
+
 it('opens a native modal above a search dialog and keeps the intercepted link available for one replay', async () => {
   window.history.replaceState({}, '', '/start')
   const nativeShow = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'showModal')
