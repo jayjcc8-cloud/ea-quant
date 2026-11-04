@@ -404,6 +404,9 @@
 .real-studio .real-model-dialog-context { color: var(--muted); overflow-wrap: anywhere; }
 .real-studio .real-model-dialog .settings-form-model { margin: 20px 0 0; }
 .real-studio .real-model-dialog .model-connection-layout { grid-template-columns: 240px minmax(0, 1fr); }
+.real-studio .real-model-dialog .settings-edit-footer { flex-wrap: wrap; align-items: flex-start; }
+.real-studio .real-model-dialog .settings-edit-footer > p { flex: 1 1 360px; font-size: 13px; line-height: 1.6; }
+.real-studio .real-model-dialog .settings-edit-footer > button { flex: 0 0 auto; max-width: 100%; }
 .real-studio .real-model-dialog-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
 @media (max-width: 850px) {
   .real-studio .studio-research-setup { padding: 20px; }
