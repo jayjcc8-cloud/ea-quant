@@ -22,13 +22,19 @@ v3 目前有两个用途不同的入口，均处于开发预览阶段：
 流式回答、工具活动与服务端任务状态分别呈现；停止通过原轮次的控制请求处理，重开读取已保存状态。
 模型选择只影响之后的新消息，历史调用保留当时连接和证据上下文。提案应用、实验确认仍是独立动作。
 
-真实入口保留 v3 的研究导航、中央证据和右侧助手。收窄时通过明确入口展开搜索、导航或助手，支持关闭与焦点返回。
+真实入口以现有研究流程为设计依据；生成效果图用于探索视觉层级，不代表可运行界面或真实研究结果。
+中央区域优先展示策略和证据，右侧助手可按需收起、恢复，输入与会话保持。收窄时通过明确入口展开搜索、导航或助手，支持关闭与焦点返回。
+搜索可用方向键移入结果并按 Enter 打开。草稿保存后，最近研究的修订信息同步更新。
+助手快捷问题只填充空输入；Cmd/Ctrl+Enter 发送，普通 Enter 换行。发送中的提问可见，回答完成后保留原有段落。
 尚未接入的实盘不占主要导航；直接打开旧路径仍说明能力未接入。离线设计预览的页面覆盖与菜单保持其演示用途。
 
 交互参考包括 [DeepSeek Harness 的共享布局与消息界面源码](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/client)、
 [Codex 的公开会话协议](https://github.com/openai/codex/tree/main/codex-rs/app-server-protocol)和
 [Claude Code 的官方桌面交互文档](https://code.claude.com/docs/en/desktop)。
 这些参考用于面板可达性、活动状态和变更审阅方式；QUINE 保留现有组件与业务契约。
+本轮按需参考 DeepSeek 的[输入状态处理](https://github.com/deepseek-ai/deepseek-harness/blob/8bd073392eef6f54e921a093b95076248eb08cbb/packages/client/ui-conversation/src/client/input/machine.ts)
+与[流式阅读跟随](https://github.com/deepseek-ai/deepseek-harness/blob/8bd073392eef6f54e921a093b95076248eb08cbb/packages/client/ui-chat/src/client/chat/use-scroll-follow.ts)原则：确认后清理提交文本，失败保留输入，阅读历史时不抢位置。
+实现复用 QUINE 的现有组件，没有复制上游代码或引入新的状态机框架；上游静态源码研究不等于实测兼容性。
 Codex 公开协议不是其桌面 UI 源码，Claude Code 的公开仓库也不作为可复制的桌面界面实现。
 
 在用户本机继续检查时使用[桌面首次使用验收卡](../first-use-acceptance.md)，记录候选版本和原生结果。

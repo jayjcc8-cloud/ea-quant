@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import type { ApiAdapter } from './app'
 import type { ResearchSummary } from './research-workbench-api'
@@ -15,13 +15,24 @@ function ResearchLinks({ items, selected, close }: { items: ResearchSummary[]; s
   </Link>)}</>
 }
 
-export function WorkspaceNav({ api }: { api: ApiAdapter }) {
+export function WorkspaceNav({ api, researchVersion = '' }: { api: ApiAdapter; researchVersion?: string }) {
   const location = useLocation(), [query, setQuery] = useState('')
   const [panel, setPanel] = useState<'navigation' | 'search' | null>(null)
+  const searchInput = useRef<HTMLInputElement>(null), results = useRef<HTMLDivElement>(null)
   const recent = useRead(useCallback(() => /^\/(?:$|research\/|report\/|records$|resources\/|data$|strategies|simulations|compare|holdout|candidates|settings\/)/.test(location.pathname)
-    ? api.listResearch!({ sort: 'updated' }) : Promise.resolve(null), [api, location.pathname]))
-  const search = useRead(useCallback(() => panel === 'search' ? api.listResearch!({ q: query, sort: 'updated' }) : Promise.resolve(null), [api, panel, query]))
+    ? api.listResearch!({ sort: 'updated' }) : Promise.resolve(null), [api, location.pathname]), researchVersion)
+  const search = useRead(useCallback(() => panel === 'search' ? api.listResearch!({ q: query, sort: 'updated' }) : Promise.resolve(null), [api, panel, query]), researchVersion)
   const close = () => setPanel(null)
+  const moveSearchFocus = (event: ReactKeyboardEvent) => {
+    if (event.nativeEvent.isComposing || !['ArrowDown', 'ArrowUp'].includes(event.key)) return
+    const links = [...results.current?.querySelectorAll<HTMLAnchorElement>('a[href]') ?? []]
+    if (!links.length) return
+    const index = links.findIndex(link => link === document.activeElement)
+    if (index === -1 && event.key === 'ArrowUp') return
+    event.preventDefault()
+    if (event.key === 'ArrowUp' && index === 0) searchInput.current?.focus()
+    else links[Math.min(links.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1))]?.focus()
+  }
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if (event.isComposing || event.defaultPrevented || event.altKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'k') return
@@ -56,8 +67,8 @@ export function WorkspaceNav({ api }: { api: ApiAdapter }) {
   </header>
   {panel && <DialogSurface title={panel === 'search' ? '搜索研究' : '工作区导航'} onClose={close} className={panel === 'search' ? 'real-search-dialog' : 'real-navigation-dialog'}>
     {panel === 'navigation' ? sidebar(true) : <>
-      <label className="real-search-input"><Icon name="search" /><input type="search" data-autofocus aria-label="搜索研究" placeholder="输入研究名称、目标或标的" value={query} onChange={event => setQuery(event.target.value)} /></label>
-      <div className="real-search-results" aria-live="polite">
+      <label className="real-search-input"><Icon name="search" /><input ref={searchInput} type="search" data-autofocus aria-label="搜索研究" placeholder="输入研究名称、目标或标的" value={query} onChange={event => setQuery(event.target.value)} onKeyDown={moveSearchFocus} /></label>
+      <div ref={results} className="real-search-results" aria-live="polite" onKeyDown={moveSearchFocus}>
         <ErrorNote>{search.error}</ErrorNote>
         {!search.value && !search.error && <p role="status">正在搜索研究…</p>}
         {search.value && <><p className="muted">{query ? '匹配研究' : '全部研究'} · {search.value.matched} 项</p>
