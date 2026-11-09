@@ -939,9 +939,11 @@ def _capture_backup(
     try:
         with _attempt(run_dir) as (canonical, run_fd):
             binding, manifest_bytes = _manifest(run_fd, canonical.name)
+            # A restore holds the lease before the attempt manifest becomes visible.
+            # Sample it before looking for provenance that restore may still be writing.
+            held = _lease_held(run_fd)
             if _read_file(run_fd, _RESTORED_CHECKPOINT, optional=True) is not None:
                 raise PaperBackupRefused("a restored checkpoint cannot be recaptured")
-            held = _lease_held(run_fd)
             if running:
                 if not held:
                     raise PaperBackupRefused("running checkpoint requires a held writer lease")

@@ -6,10 +6,12 @@ import json
 import os
 import stat
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
@@ -31,7 +33,7 @@ from ea.experiments.store import (
     LocalResultStore,
     VerifiedIncompleteRecoveryBinding,
 )
-from ea.product import LoadedBacktestScenario, load_backtest_scenario
+from ea.product import LoadedBacktestScenario, load_backtest_scenario, paper_backup
 from ea.product.backtest import _funding_document, _write_once
 from ea.product.paper import PaperTradingSession
 from ea.product.paper_backup import (
@@ -802,6 +804,59 @@ def test_restored_checkpoint_cannot_be_recaptured_as_settled_evidence(tmp_path: 
         assert not new_root.exists()
     finally:
         paper.quiesce()
+
+
+def test_settled_capture_overlapping_checkpoint_restore_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper = _paper(tmp_path)
+    try:
+        _publish_cut(paper, _running_cut(paper))
+        checkpoint = create_paper_checkpoint(paper.run_dir, tmp_path / "backups")
+    finally:
+        paper.quiesce()
+    target = tmp_path / "isolated" / RUN_ID.value
+    archive = tmp_path / "settled"
+    target_reserved = Event()
+    marker_read = Event()
+    restore_finished = Event()
+    materialise = paper_backup._materialise
+    read_file = paper_backup._read_file
+
+    def wait_before_materialising(path: Path, files_fd: int, manifest: PaperBackupManifest) -> None:
+        target_reserved.set()
+        assert marker_read.wait(timeout=10)
+        materialise(path, files_fd, manifest)
+
+    def wait_after_marker_read(
+        parent_fd: int, name: str, *, optional: bool = False
+    ) -> bytes | None:
+        payload = read_file(parent_fd, name, optional=optional)
+        if name == paper_backup._RESTORED_CHECKPOINT:
+            assert payload is None
+            marker_read.set()
+            assert restore_finished.wait(timeout=10)
+        return payload
+
+    def restore() -> None:
+        try:
+            restore_paper_backup(checkpoint.backup_dir, target)
+        finally:
+            restore_finished.set()
+
+    monkeypatch.setattr(paper_backup, "_materialise", wait_before_materialising)
+    monkeypatch.setattr(paper_backup, "_read_file", wait_after_marker_read)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        task = executor.submit(restore)
+        try:
+            assert target_reserved.wait(timeout=10)
+            with pytest.raises(PaperBackupRefused, match="writer lease is held"):
+                create_paper_backup(target, archive)
+        finally:
+            marker_read.set()
+            task.result(timeout=10)
+    assert not archive.exists()
+    assert resume_local_paper(target)["joint"]["recovered"] is True
 
 
 @pytest.mark.parametrize("destination", ["source", "sibling", "symlink"])
