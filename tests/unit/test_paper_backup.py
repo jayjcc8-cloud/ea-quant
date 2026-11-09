@@ -787,3 +787,40 @@ def test_running_checkpoint_refuses_unverified_boundary_and_can_retry(
         assert inspect_paper_backup(result.backup_dir) == result.manifest
     finally:
         paper.quiesce()
+
+
+def test_restored_checkpoint_cannot_be_recaptured_as_settled_evidence(tmp_path: Path) -> None:
+    paper = _paper(tmp_path)
+    try:
+        _publish_cut(paper, _running_cut(paper))
+        checkpoint = create_paper_checkpoint(paper.run_dir, tmp_path / "backups")
+        restored = restore_paper_backup(checkpoint.backup_dir, tmp_path / "isolated" / RUN_ID.value)
+        assert resume_local_paper(restored.run_dir)["joint"]["recovered"] is True
+        new_root = tmp_path / "settled"
+        with pytest.raises(PaperBackupRefused, match="restored checkpoint"):
+            create_paper_backup(restored.run_dir, new_root)
+        assert not new_root.exists()
+    finally:
+        paper.quiesce()
+
+
+@pytest.mark.parametrize("destination", ["source", "sibling", "symlink"])
+def test_restore_refuses_target_inside_a_managed_copy(tmp_path: Path, destination: str) -> None:
+    paper = _paper(tmp_path)
+    try:
+        _publish_cut(paper, _running_cut(paper))
+        checkpoint = create_paper_checkpoint(paper.run_dir, tmp_path / "backups")
+    finally:
+        paper.quiesce()
+    sibling = create_paper_backup(paper.run_dir, tmp_path / "backups")
+    parent = checkpoint.backup_dir if destination == "source" else sibling.backup_dir
+    if destination == "symlink":
+        alias = tmp_path / "alias"
+        alias.symlink_to(parent, target_is_directory=True)
+        parent = alias
+    nested = parent / "isolated" / RUN_ID.value
+    with pytest.raises(PaperBackupRefused, match="inside a backup"):
+        restore_paper_backup(checkpoint.backup_dir, nested)
+    assert not nested.parent.exists()
+    assert inspect_paper_backup(checkpoint.backup_dir) == checkpoint.manifest
+    assert inspect_paper_backup(sibling.backup_dir) == sibling.manifest

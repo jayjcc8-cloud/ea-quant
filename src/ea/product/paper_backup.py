@@ -83,6 +83,7 @@ _RESTORE_SCHEMA = "ea.paper-restore.v1"
 _BACKUP_DIGEST_DOMAIN = b"ea.paper-backup.v1\0"
 _BACKUP_ROOT_PREFIX = "backup-"
 _BACKUP_MANIFEST_NAME = "backup.json"
+_RESTORED_CHECKPOINT = "restored-checkpoint.json"
 _FILES_DIRECTORY = "files"
 _MANIFEST_NAME = "manifest.json"
 _JOURNAL_PATH = f"audit/{AUDIT_JOURNAL_NAME}"
@@ -759,10 +760,7 @@ def _stage_authoritative(
         os.close(files_fd)
 
 
-def _write_backup_manifest(staging: Path, payload: bytes) -> None:
-    path = staging / _BACKUP_MANIFEST_NAME
-    if path.is_symlink() or path.exists():
-        raise PaperBackupRefused("backup manifest already exists in the staging tree")
+def _write_metadata(path: Path, payload: bytes) -> None:
     descriptor: int | None = None
     try:
         descriptor = os.open(path, _CREATE_FLAGS, _FILE_MODE)
@@ -771,7 +769,7 @@ def _write_backup_manifest(staging: Path, payload: bytes) -> None:
     except PaperBackupRefused:
         raise
     except OSError as error:
-        raise PaperBackupRefused("backup manifest could not be published") from error
+        raise PaperBackupRefused(f"{path.name} could not be published") from error
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -941,6 +939,8 @@ def _capture_backup(
     try:
         with _attempt(run_dir) as (canonical, run_fd):
             binding, manifest_bytes = _manifest(run_fd, canonical.name)
+            if _read_file(run_fd, _RESTORED_CHECKPOINT, optional=True) is not None:
+                raise PaperBackupRefused("a restored checkpoint cannot be recaptured")
             held = _lease_held(run_fd)
             if running:
                 if not held:
@@ -979,8 +979,8 @@ def _capture_backup(
                     entries=entries,
                     checkpoint_chain=cut.chain if cut else None,
                 )
-                _write_backup_manifest(
-                    staging,
+                _write_metadata(
+                    staging / _BACKUP_MANIFEST_NAME,
                     _canonical_document(manifest.document(), name="backup manifest"),
                 )
                 if running:
@@ -1206,6 +1206,14 @@ def _read_backup_manifest(directory: Path) -> PaperBackupManifest:
 def _materialise(target: Path, files_fd: int, manifest: PaperBackupManifest) -> None:
     """Write every authoritative file the store did not already publish."""
     with _attempt(target) as (_, run_fd):
+        if manifest.checkpoint_chain_sha256 is not None:
+            # Make the cut's origin durable before its journal can be recovered.
+            # An isolated replay never establishes a newer source recovery point.
+            _write_metadata(
+                target / _RESTORED_CHECKPOINT,
+                _canonical_document(manifest.document(), name="restored checkpoint"),
+            )
+            os.fsync(run_fd)
         for entry in manifest.entries:
             if entry.path == _MANIFEST_NAME:
                 # The store published this attempt manifest as part of preparation.
@@ -1219,6 +1227,19 @@ def _materialise(target: Path, files_fd: int, manifest: PaperBackupManifest) -> 
             os.fsync(run_fd)
         except OSError as error:
             raise PaperBackupRefused("restored attempt could not be made durable") from error
+
+
+def _require_isolated_target(run_dir: Path, source: Path) -> None:
+    # A restore nested in any retained archive would be erased when it is pruned.
+    for parent in run_dir.resolve().parents:
+        if parent == source:
+            raise PaperBackupRefused("restore target is inside a backup")
+        if (parent / _BACKUP_MANIFEST_NAME).is_file():
+            try:
+                _read_backup_manifest(parent)
+            except (PaperBackupError, OSError):
+                continue
+            raise PaperBackupRefused("restore target is inside a backup")
 
 
 def restore_paper_backup(backup_dir: Path, run_dir: Path) -> PaperRestoreResult:
@@ -1242,6 +1263,7 @@ def restore_paper_backup(backup_dir: Path, run_dir: Path) -> PaperRestoreResult:
     requested = run_dir.parent / run_dir.name
     if requested.is_symlink() or requested.exists():
         raise PaperBackupRefused("restore target already exists; it is never overwritten")
+    _require_isolated_target(run_dir, directory)
     created_root = not run_dir.parent.exists()
     target_root = _safe_root(run_dir.parent, name="restore root")
     target = target_root / run_dir.name

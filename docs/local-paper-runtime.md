@@ -185,8 +185,10 @@ ea paper restore --backup "$CHECKPOINT_DIR" --run-dir "$EMPTY_ROOT/$RUN_ID"
 ea paper resume --run-dir "$EMPTY_ROOT/$RUN_ID"
 ```
 
-Use a fresh target named by the original run ID. Restore materialises evidence, and resume
-classifies it without dispatch. The active writer retains its lease. At a drained heartbeat the
+Use a fresh target named by the original run ID outside all backup directories. Restore
+preserves the checkpoint's origin. The original backup remains the dated recovery point,
+and subsequent captures come from the source writer. Resume classifies the restored evidence
+without dispatch. The active writer retains its lease. At a drained heartbeat the
 writer publishes the verified audit length, chain head, time and immutable input digests.
 The backup process copies this prefix as later events continue, verifies the chain and inputs,
 and publishes atomically. A writer without this protocol requires an ordinary settled backup.
