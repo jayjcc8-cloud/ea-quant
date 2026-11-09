@@ -57,6 +57,7 @@ from ea.product.paper_recovery import (
 )
 from ea.product.paper_run import resume_local_paper
 from ea.product.paper_session import PaperSessionWriter, read_paper_binding
+from ea.product.paper_session import _read_file as read_session_file
 from ea.risk.kill_switch import (
     OperatorKillSwitchAuthority,
     canonical_kill_switch_bytes,
@@ -821,7 +822,6 @@ def test_settled_capture_overlapping_checkpoint_restore_is_refused(
     marker_read = Event()
     restore_finished = Event()
     materialise = paper_backup._materialise
-    read_file = paper_backup._read_file
 
     def wait_before_materialising(path: Path, files_fd: int, manifest: PaperBackupManifest) -> None:
         target_reserved.set()
@@ -831,7 +831,7 @@ def test_settled_capture_overlapping_checkpoint_restore_is_refused(
     def wait_after_marker_read(
         parent_fd: int, name: str, *, optional: bool = False
     ) -> bytes | None:
-        payload = read_file(parent_fd, name, optional=optional)
+        payload = read_session_file(parent_fd, name, optional=optional)
         if name == paper_backup._RESTORED_CHECKPOINT:
             assert payload is None
             marker_read.set()
