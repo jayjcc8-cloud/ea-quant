@@ -603,6 +603,19 @@ cmd_backup() {
         printf 'no attempt root at %s yet; nothing to capture\n' "$RUNTIME_ROOT"
         return 0
     }
+    # Checkpoint the current supervised writer independently of the settled queue.
+    # Each kind has its own retention; only settled copies mark a run as captured.
+    checkpoint_exit=0
+    current=$(current_run_dir || true)
+    if [ -n "$current" ] && [ "${current%/*}" = "$RUNTIME_ROOT" ]; then
+        current_status=$("$EA_BIN" paper status --run-dir "$current" 2>/dev/null) || current_status=
+        case "$current_status" in
+            *'"lease_held":true'*)
+                "$EA_BIN" paper backup checkpoint --run-dir "$current" --backup-root "$BACKUP_ROOT" \
+                    --keep "$BACKUP_KEEP" || checkpoint_exit=$?
+                ;;
+        esac
+    fi
     # Newest attempt first. Paths are validated whitespace-free above, and the
     # attempt name is checked below, so this word split is safe.
     for entry in $(ls -1dt "$RUNTIME_ROOT"/*/ 2>/dev/null || true); do
@@ -633,7 +646,7 @@ cmd_backup() {
                     "$entry" "$CAPTURED_RUNS" >&2
                 return 2
             fi
-            return 0
+            return "$checkpoint_exit"
         else
             # One attempt that this command refuses must not block every later
             # capture, and it must not be repaired, forced or captured
@@ -648,7 +661,7 @@ cmd_backup() {
         return "$refused"
     fi
     printf 'no settled attempt needs capture\n'
-    return 0
+    return "$checkpoint_exit"
 }
 
 usage() {

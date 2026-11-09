@@ -1065,7 +1065,7 @@ def run_observer(
         )
     else:
         try:
-            verified = latest_verified_paper_backup(backup_root)
+            verified = latest_verified_paper_backup(backup_root, as_of=observed_at)
         except PaperBackupError as error:
             backup = BackupEvidence(available=False, reason=str(error))
         else:

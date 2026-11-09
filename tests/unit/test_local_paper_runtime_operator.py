@@ -42,7 +42,8 @@ def _stub_ea(directory: Path) -> Path:
         "  exit 0\n"
         "fi\n"
         'if [ "$1" = "paper" ] && [ "$2" = "status" ]; then\n'
-        "  shift 2\n"
+        "  shift 2; prefix=backup\n"
+        '  if [ "${1:-}" = "checkpoint" ]; then prefix=checkpoint; shift; fi\n'
         '  dir=""; while [ $# -gt 0 ]; do case "$1" in --run-dir) dir=$2; shift 2;; '
         "*) shift;; esac; done\n"
         '  held=true; [ -f "$dir/.settled" ] && held=false\n'
@@ -50,12 +51,13 @@ def _stub_ea(directory: Path) -> Path:
         "  exit 0\n"
         "fi\n"
         'if [ "$1" = "paper" ] && [ "$2" = "backup" ]; then\n'
-        "  shift 2\n"
+        "  shift 2; prefix=backup\n"
+        '  if [ "${1:-}" = "checkpoint" ]; then prefix=checkpoint; shift; fi\n'
         '  dir=""; root=""; keep=5\n'
         '  while [ $# -gt 0 ]; do case "$1" in --run-dir) dir=$2; shift 2;; '
         "--backup-root) root=$2; shift 2;; --keep) keep=$2; shift 2;; *) shift;; esac; done\n"
         '  rid=${dir##*/}; [ -f "$dir/.refuse-backup" ] && exit 7\n'
-        '  mkdir -p "$root/backup-20260101T000000000000Z-$rid"\n'
+        '  mkdir -p "$root/$prefix-20260101T000000000000Z-$rid"\n'
         '  printf \'{"backup":"%s/backup-20260101T000000000000Z-%s","keep":%s}\\n\' '
         '"$root" "$rid" "$keep"\n'
         "  exit 0\n"
@@ -743,3 +745,16 @@ def test_gate_begin_pins_operator_inventory_without_starting_anything(harness: H
     )
     harness.run("gate", "end", "--interval", "/srv/interval", check=False)
     assert harness.argv()[-1] == "paper gate interval end --interval /srv/interval"
+
+
+def test_scheduled_checkpoint_then_settled_backup_for_same_writer(harness: Harness) -> None:
+    harness.install()
+    active = _attempt(harness, ATTEMPT_NEW, settled=False, order=1)
+    (harness.supervisor / "state" / "current-run").write_text(str(active) + "\n")
+    harness.run("backup")
+    assert list(harness.backups.glob("checkpoint-*"))
+    assert not _captured_marker(harness).exists()
+    (active / ".settled").touch()
+    harness.run("backup")
+    assert list(harness.backups.glob("backup-*"))
+    assert _captured_marker(harness).read_text().splitlines() == [ATTEMPT_NEW]

@@ -64,6 +64,8 @@ soak. Those remain separate binary/operational claims. No release or live connec
   of its own. The native slice reuses its visual components with real service contracts.
   Local ignored screenshots are not hosted CI evidence.
 - **Local simulated Paper:** M1 recovery, M2 risk guards and M3 health/backup/alerts are delivered.
+  A running writer publishes a drained journal boundary for isolated checkpoint restore.
+  The operator can capture it while the same attempt continues trading locally.
   M4 fault-campaign and gate-preparation tooling exist. The interval CLI records real begin/end
   observations and complete attempt inventories, binds explicit settled backups, and evaluates the
   saved boundary separately from current status. Observed drift/faults and evidence gaps persist;

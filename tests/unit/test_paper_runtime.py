@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -14,6 +15,7 @@ from ea.product.market_stream import LocalSimulatedMarketSource, run_local_marke
 from ea.product.offline_demo import _DemoAudit
 from ea.product.paper import PAPER_MARKET_AUDIT_FRAMES, PaperTradingSession
 from ea.risk.operational_safety import OperationalSafetyLimits
+from ea.runtime.streaming import StreamStatus
 from unit.test_bounded_round_trips_v1 import bounded_scenario
 from unit.test_streaming import RUN_ID, SOURCE, ControlledClock
 
@@ -63,7 +65,13 @@ def session(
     return engine, clock
 
 
-def drive(engine: PaperTradingSession, clock: ControlledClock, *, count: int = 20) -> None:
+def drive(
+    engine: PaperTradingSession,
+    clock: ControlledClock,
+    *,
+    count: int = 20,
+    on_heartbeat: Callable[[StreamStatus], None] | None = None,
+) -> None:
     source = LocalSimulatedMarketSource(
         instrument=engine.scenario.instrument,
         source_id=SOURCE,
@@ -80,6 +88,7 @@ def drive(engine: PaperTradingSession, clock: ControlledClock, *, count: int = 2
         poll_interval_seconds=1.0,
         on_market=engine.on_market,
         on_fact=engine.on_fact,
+        on_heartbeat=on_heartbeat,
     )
 
 

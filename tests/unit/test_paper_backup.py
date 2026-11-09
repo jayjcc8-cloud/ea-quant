@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import os
 import stat
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
@@ -17,7 +20,7 @@ from typer.testing import CliRunner
 
 from ea.cli.app import app
 from ea.core import AuditRecord, RunId, RunReference, Sha256Digest
-from ea.core.execution_messages import order_digest
+from ea.core.execution_messages import fill_digest, order_digest
 from ea.core.ledger_integration import portfolio_risk_refresh_digest
 from ea.experiments._manifest_wire import canonical_json_bytes
 from ea.experiments.audit import (
@@ -30,14 +33,16 @@ from ea.experiments.store import (
     LocalResultStore,
     VerifiedIncompleteRecoveryBinding,
 )
-from ea.product import LoadedBacktestScenario, load_backtest_scenario
+from ea.product import LoadedBacktestScenario, load_backtest_scenario, paper_backup
 from ea.product.backtest import _funding_document, _write_once
 from ea.product.paper import PaperTradingSession
 from ea.product.paper_backup import (
     PaperBackupManifest,
     PaperBackupRefused,
     create_paper_backup,
+    create_paper_checkpoint,
     inspect_paper_backup,
+    latest_verified_paper_backup,
     restore_paper_backup,
 )
 from ea.product.paper_recovery import (
@@ -45,12 +50,14 @@ from ea.product.paper_recovery import (
     recover_paper_broker_observation,
     recover_paper_continuation,
     recover_paper_economic_state,
+    recover_paper_fills,
     recover_paper_orders,
     recover_paper_risk_refreshes,
     scan_paper_outbound_intents,
 )
 from ea.product.paper_run import resume_local_paper
 from ea.product.paper_session import PaperSessionWriter, read_paper_binding
+from ea.product.paper_session import _read_file as read_session_file
 from ea.risk.kill_switch import (
     OperatorKillSwitchAuthority,
     canonical_kill_switch_bytes,
@@ -153,7 +160,9 @@ class _Paper:
         self.store.close()
 
 
-def _paper(tmp_path: Path, *, artifact: bool = True) -> _Paper:
+def _paper(
+    tmp_path: Path, *, artifact: bool = True, observe: Callable[[_Paper], None] | None = None
+) -> _Paper:
     """Build one real attempt on a strict POSIX journal, exactly as the product does."""
     results = tmp_path / "results"
     results.mkdir(mode=0o700, parents=True)
@@ -217,8 +226,9 @@ def _paper(tmp_path: Path, *, artifact: bool = True) -> _Paper:
     # Derived and ephemeral state that a backup must never capture.
     PaperSessionWriter(run_dir, prepared.audit.binding).publish({"state": "running", "cash": "0"})
     (run_dir / "operational.jsonl").write_bytes(b'{"event":"paper.started"}\n')
-    drive(engine, clock)
-    return _Paper(run_dir, store, journal, engine, scenario, kill_switch)
+    paper = _Paper(run_dir, store, journal, engine, scenario, kill_switch)
+    drive(engine, clock, on_heartbeat=(lambda _: observe(paper)) if observe else None)
+    return paper
 
 
 def _records(run_dir: Path) -> tuple[AuditRecord, ...]:
@@ -277,6 +287,12 @@ def _witness(paper: _Paper, run_dir: Path) -> dict[str, Any]:
         "refresh_sequence": None if final is None else final.refresh_sequence,
         "refresh_digest": None if final is None else portfolio_risk_refresh_digest(final).value,
         "orders": [order_digest(order).value for order in orders],
+        "fill_digests": [
+            fill_digest(fill).value
+            for fill in recover_paper_fills(
+                records, spec_set=spec_set, funding=paper.engine.funding
+            )
+        ],
         "intents": [
             (intent.order_owner_sequence, intent.classification.value, intent.terminal)
             for intent in scan.intents
@@ -680,3 +696,186 @@ def test_cli_backup_inspect_and_restore_round_trip(tmp_path: Path) -> None:
     assert held.exit_code == 3
     assert isinstance(inspect_paper_backup(Path(document["backup_dir"])), PaperBackupManifest)
     active.quiesce()
+
+
+def _running_cut(paper: _Paper) -> dict[str, Any]:
+    size, chain = paper.journal.checkpoint_boundary()
+    return {
+        "bytes": size,
+        "chain_sha256": chain.value,
+        "inputs": {
+            name: sha256((paper.run_dir / name).read_bytes()).hexdigest()
+            for name in _AUTHORITATIVE_PATHS[2:]
+        },
+        "captured_at": "2026-01-02T09:31:00.000000+00:00",
+    }
+
+
+def _publish_cut(paper: _Paper, cut: dict[str, Any]) -> None:
+    PaperSessionWriter(paper.run_dir, paper.journal.binding).publish(
+        {"state": "running", "updated_at": cut["captured_at"], "checkpoint": cut}
+    )
+
+
+def test_running_checkpoint_restores_exact_economics_without_releasing_writer(
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def first_buy(paper: _Paper) -> None:
+        live = paper.engine.status()
+        if not captured and live["fills"] == 1 and not live["pending_orders"]:
+            captured.update(
+                cut=_running_cut(paper),
+                cash=live["cash"],
+                position=live["position"],
+                orders=[order_digest(order).value for order in paper.engine.issued],
+                fills=[fill_digest(fill).value for fill in paper.engine.committed],
+            )
+
+    paper = _paper(tmp_path, observe=first_buy)
+    root = tmp_path / "backups"
+    try:
+        cut = captured["cut"]
+        _publish_cut(paper, cut)
+        # Later real fills are already on disk when the copy starts.
+        assert len(paper.engine.committed) == 6
+        assert (paper.run_dir / "audit/audit-v1.journal").stat().st_size > cut["bytes"]
+        backup = create_paper_checkpoint(paper.run_dir, root)
+        assert backup.manifest.checkpoint_chain_sha256 == Sha256Digest(cut["chain_sha256"])
+        assert inspect_paper_backup(backup.backup_dir) == backup.manifest
+        assert create_paper_checkpoint(paper.run_dir, root).backup_dir == backup.backup_dir
+        assert latest_verified_paper_backup(root, as_of=datetime(2026, 1, 1, tzinfo=UTC)) is None
+        latest = latest_verified_paper_backup(root)
+        assert latest and latest.manifest == backup.manifest
+        target = tmp_path / "isolated" / RUN_ID.value
+        restore_paper_backup(backup.backup_dir, target)
+        restored = _witness(paper, target)
+        assert restored["cash"] == captured["cash"] == "797.8"
+        assert restored["position"] == captured["position"] == "2"
+        assert len(captured["orders"]) == len(captured["fills"]) == 1
+        assert restored["orders"] == captured["orders"]
+        assert restored["fill_digests"] == captured["fills"]
+        assert restored["exactly_once"] and restored["joint_recovered"]
+        with pytest.raises(PaperBackupRefused, match="lease"):
+            create_paper_backup(paper.run_dir, root)
+    finally:
+        paper.quiesce()
+    assert _witness(paper, paper.run_dir)["fills"] == 6
+    settled = create_paper_backup(paper.run_dir, root, keep=1)
+    assert settled.backup_dir.exists() and backup.backup_dir.exists()
+
+
+@pytest.mark.parametrize("damage", ["journal head", "journal length", "input"])
+def test_running_checkpoint_refuses_unverified_boundary_and_can_retry(
+    tmp_path: Path, damage: str
+) -> None:
+    paper = _paper(tmp_path)
+    root = tmp_path / "backups"
+    try:
+        cut = _running_cut(paper)
+        damaged = dict(cut)
+        if damage == "journal head":
+            damaged["chain_sha256"] = "0" * 64
+        elif damage == "journal length":
+            damaged["bytes"] += 1
+        else:
+            damaged["inputs"] = {**cut["inputs"], "funding.json": "1" * 64}
+        _publish_cut(paper, damaged)
+        with pytest.raises(PaperBackupRefused):
+            create_paper_checkpoint(paper.run_dir, root)
+        assert not list(root.iterdir())
+        _publish_cut(paper, cut)
+        result = create_paper_checkpoint(paper.run_dir, root)
+        assert inspect_paper_backup(result.backup_dir) == result.manifest
+    finally:
+        paper.quiesce()
+
+
+def test_restored_checkpoint_cannot_be_recaptured_as_settled_evidence(tmp_path: Path) -> None:
+    paper = _paper(tmp_path)
+    try:
+        _publish_cut(paper, _running_cut(paper))
+        checkpoint = create_paper_checkpoint(paper.run_dir, tmp_path / "backups")
+        restored = restore_paper_backup(checkpoint.backup_dir, tmp_path / "isolated" / RUN_ID.value)
+        assert resume_local_paper(restored.run_dir)["joint"]["recovered"] is True
+        new_root = tmp_path / "settled"
+        with pytest.raises(PaperBackupRefused, match="restored checkpoint"):
+            create_paper_backup(restored.run_dir, new_root)
+        assert not new_root.exists()
+    finally:
+        paper.quiesce()
+
+
+def test_settled_capture_overlapping_checkpoint_restore_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper = _paper(tmp_path)
+    try:
+        _publish_cut(paper, _running_cut(paper))
+        checkpoint = create_paper_checkpoint(paper.run_dir, tmp_path / "backups")
+    finally:
+        paper.quiesce()
+    target = tmp_path / "isolated" / RUN_ID.value
+    archive = tmp_path / "settled"
+    target_reserved = Event()
+    marker_read = Event()
+    restore_finished = Event()
+    materialise = paper_backup._materialise
+
+    def wait_before_materialising(path: Path, files_fd: int, manifest: PaperBackupManifest) -> None:
+        target_reserved.set()
+        assert marker_read.wait(timeout=10)
+        materialise(path, files_fd, manifest)
+
+    def wait_after_marker_read(
+        parent_fd: int, name: str, *, optional: bool = False
+    ) -> bytes | None:
+        payload = read_session_file(parent_fd, name, optional=optional)
+        if name == paper_backup._RESTORED_CHECKPOINT:
+            assert payload is None
+            marker_read.set()
+            assert restore_finished.wait(timeout=10)
+        return payload
+
+    def restore() -> None:
+        try:
+            restore_paper_backup(checkpoint.backup_dir, target)
+        finally:
+            restore_finished.set()
+
+    monkeypatch.setattr(paper_backup, "_materialise", wait_before_materialising)
+    monkeypatch.setattr(paper_backup, "_read_file", wait_after_marker_read)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        task = executor.submit(restore)
+        try:
+            assert target_reserved.wait(timeout=10)
+            with pytest.raises(PaperBackupRefused, match="writer lease is held"):
+                create_paper_backup(target, archive)
+        finally:
+            marker_read.set()
+            task.result(timeout=10)
+    assert not archive.exists()
+    assert resume_local_paper(target)["joint"]["recovered"] is True
+
+
+@pytest.mark.parametrize("destination", ["source", "sibling", "symlink"])
+def test_restore_refuses_target_inside_a_managed_copy(tmp_path: Path, destination: str) -> None:
+    paper = _paper(tmp_path)
+    try:
+        _publish_cut(paper, _running_cut(paper))
+        checkpoint = create_paper_checkpoint(paper.run_dir, tmp_path / "backups")
+    finally:
+        paper.quiesce()
+    sibling = create_paper_backup(paper.run_dir, tmp_path / "backups")
+    parent = checkpoint.backup_dir if destination == "source" else sibling.backup_dir
+    if destination == "symlink":
+        alias = tmp_path / "alias"
+        alias.symlink_to(parent, target_is_directory=True)
+        parent = alias
+    nested = parent / "isolated" / RUN_ID.value
+    with pytest.raises(PaperBackupRefused, match="inside a backup"):
+        restore_paper_backup(checkpoint.backup_dir, nested)
+    assert not nested.parent.exists()
+    assert inspect_paper_backup(checkpoint.backup_dir) == checkpoint.manifest
+    assert inspect_paper_backup(sibling.backup_dir) == sibling.manifest

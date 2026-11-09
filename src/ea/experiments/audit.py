@@ -661,6 +661,21 @@ class PosixAuditJournal:
         """Durably verified EOF byte offset, used to derive exact test boundaries."""
         return self._verified_eof
 
+    def checkpoint_boundary(self) -> tuple[int, Sha256Digest]:
+        """Return the size and chain head of the same acknowledged, nonterminal prefix."""
+        with self._lock:
+            if (
+                self._closed
+                or self._failed
+                or self._needs_rescan
+                or self._terminal
+                or not self._entries
+            ):
+                raise _audit_error(
+                    OutcomeCode.CONFLICTING_ID, "running audit boundary is unavailable"
+                )
+            return self._verified_eof, Sha256Digest(self._entries[-1].chain_head_sha256.hex())
+
     @property
     def closing(self) -> bool:
         return self._closing

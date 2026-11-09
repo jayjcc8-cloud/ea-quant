@@ -286,6 +286,21 @@ def run_local_paper(
         result.update(engine.status())
         result["health"] = project_health()
         result["updated_at"] = clock.now().isoformat()
+        # On the single writer, between dispatches, after the immutable inputs exist.
+        # Retain the last drained boundary while the broker still owes a fact.
+        if (
+            result["state"] == "running"
+            and not result["pending_facts"]
+            and not result["pending_orders"]
+        ):
+            assert journal is not None
+            size, head = journal.checkpoint_boundary()
+            result["checkpoint"] = {
+                "bytes": size,
+                "chain_sha256": head.value,
+                "captured_at": result["updated_at"],
+                "inputs": input_digests,
+            }
         result["operational_log_failures"] = logger.failure_count
         writer.publish(result)
 
@@ -331,20 +346,21 @@ def run_local_paper(
             kill_switch=kill_switch,
             crash_after=crash_after,
         )
-        _write_once(
-            attempt / "funding.json",
-            _canonical(_funding_document(engine.funding, engine.gate.funding_outcome)),
-        )
-        _write_once(
-            attempt / "kill-switch.json",
-            canonical_kill_switch_bytes(kill_switch),
-        )
-        _write_once(
-            attempt / "operational-safety.json",
-            canonical_operational_safety_limits_bytes(engine.operational_safety.limits),
-        )
+        inputs = {
+            "funding.json": _canonical(
+                _funding_document(engine.funding, engine.gate.funding_outcome)
+            ),
+            "kill-switch.json": canonical_kill_switch_bytes(kill_switch),
+            "operational-safety.json": canonical_operational_safety_limits_bytes(
+                engine.operational_safety.limits
+            ),
+        }
         if artifact is not None:
-            _write_once(attempt / "strategy.eastrategy", artifact)
+            inputs["strategy.eastrategy"] = artifact
+        input_digests = {}
+        for filename, payload in inputs.items():
+            _write_once(attempt / filename, payload)
+            input_digests[filename] = sha256(payload).hexdigest()
         logger.emit("paper.started")
         if duration_seconds is not None:
             deadline = time.monotonic() + duration_seconds

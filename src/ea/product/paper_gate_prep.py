@@ -212,7 +212,7 @@ def observe_paper_snapshot(
         backup_state = BackupSummary.UNAVAILABLE
     else:
         try:
-            verified = latest_verified_paper_backup(backup_root)
+            verified = latest_verified_paper_backup(backup_root, as_of=now)
         except PaperBackupError:
             backup_state = BackupSummary.UNAVAILABLE
         else:

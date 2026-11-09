@@ -249,16 +249,17 @@ def _healthy_snapshot(*, repo_sha: str | None = None) -> PaperSnapshot:
 
 
 def test_snapshot_is_collected_from_the_real_local_inputs(tmp_path: Path) -> None:
-    live = Live(tmp_path)
-    alerts = _clean_alert_stream(tmp_path)
     backups = tmp_path / "backups"
     _fresh_backup_on_the_host(tmp_path, backups)
+    observed_at = datetime.now(UTC)
+    live = Live(tmp_path, at=observed_at)
+    alerts = _clean_alert_stream(tmp_path, at=observed_at)
 
     snapshot = observe_paper_snapshot(
         run_dir=live.run_dir,
         repository=REPO,
         supervisor_state=SupervisorState.RUNNING,
-        now=OBSERVED_AT + timedelta(seconds=1),
+        now=observed_at,
         backup_root=backups,
         alert_stream_path=alerts,
     )

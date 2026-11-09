@@ -17,9 +17,9 @@ import pytest
 from typer.testing import CliRunner
 
 from ea.cli.app import app
-from ea.product.paper_backup import create_paper_backup
+from ea.product.paper_backup import PaperBackupError, create_paper_backup, create_paper_checkpoint
 from ea.product.paper_evidence import GateType, decode_paper_snapshot
-from ea.product.paper_gate_history import decode_paper_interval_history
+from ea.product.paper_gate_history import decode_paper_interval_history, read_attempt_evidence
 from ea.product.paper_interval_capture import (
     PaperIntervalError,
     begin_interval,
@@ -27,7 +27,12 @@ from ea.product.paper_interval_capture import (
     observe_interval,
     settle_interval,
 )
-from ea.product.paper_session import PaperSessionError, read_paper_status, request_paper_stop
+from ea.product.paper_session import (
+    PaperSessionError,
+    read_paper_binding,
+    read_paper_status,
+    request_paper_stop,
+)
 from unit.test_bounded_round_trips_v1 import bounded_scenario
 from unit.test_candidate_runtime import _create_candidate_evidence
 from unit.test_paper_gate_prep import REPO, Live, _operator_surface
@@ -191,9 +196,15 @@ def test_real_clean_stop_after_seal_does_not_interrupt_the_window(
     tmp_path: Path, accepted: tuple[Path, str, Path]
 ) -> None:
     with running(accepted, tmp_path / "runs") as (run, _):
+        checkpoint = create_paper_checkpoint(run, tmp_path / "backups")
         interval = start_capture(tmp_path, run)
         observe_interval(interval)
         sealed = observe_interval(interval, end=True)
+    with pytest.raises(PaperIntervalError, match="settled"):
+        settle_interval(interval, [checkpoint.backup_dir])
+    assert not (interval / "history.json").exists()
+    with pytest.raises(PaperBackupError, match="settled"):
+        read_attempt_evidence(checkpoint.backup_dir, read_paper_binding(run)[0])
     captured = backup(run, tmp_path)
     settle_interval(interval, [captured])
     result = evaluate_interval(interval)

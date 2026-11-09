@@ -63,33 +63,19 @@ output is a deterministic verdict.
 from __future__ import annotations
 
 import json
-import os
-import stat
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
-from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from ea.core.audit import (
-    AUDIT_FRAME_DIGEST_DOMAIN,
-    EMPTY_CHAIN_HEAD_SHA256,
-    EMPTY_RECORD_SHA256,
-    MAX_AUDIT_HEADER_BYTES,
-    MAX_AUDIT_RECORDS,
-    MAX_LARGE_AUDIT_PAYLOAD_BYTES,
-    AuditContractError,
     AuditRecordKind,
-    AuditSubjectKind,
-    audit_chain_head,
-    audit_record_digest,
-    decode_audit_record,
 )
 from ea.core.outcomes import OutcomeCode
 from ea.core.run import RunBinding, RunContractError, RunId, RunReference, Sha256Digest
 from ea.core.time import TimeValidationError, require_utc
-from ea.experiments.audit import AUDIT_JOURNAL_NAME, AUDIT_JOURNAL_PREAMBLE
+from ea.experiments.audit import AUDIT_JOURNAL_NAME
 from ea.product.paper_backup import PaperBackupEntry, PaperBackupError, inspect_paper_backup
 from ea.product.paper_evidence import (
     GateType,
@@ -104,6 +90,7 @@ from ea.product.paper_evidence import (
     decode_gate_identity,
     decode_paper_snapshot,
 )
+from ea.product.paper_journal_reader import CapturedJournalError, verified_journal_records
 
 INTERVAL_HISTORY_SCHEMA = "ea.paper-interval-history.v1"
 
@@ -135,7 +122,6 @@ _FILES_DIRECTORY_NAME = "files"
 _JOURNAL_ENTRY_PATH = f"audit/{AUDIT_JOURNAL_NAME}"
 _PAPER_TERMINAL_SCHEMA = "ea.audit-paper-terminal.v1"
 _RUN_TERMINAL_SCHEMAS = frozenset({"ea.audit-run-terminal.v1", "ea.audit-run-terminal.v2"})
-_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 # The closed stop vocabulary the local Paper runtime can durably record, taken
 # from ``ea.runtime.streaming.StreamStopReason`` and the capacity stop in
@@ -551,126 +537,27 @@ class _JournalSummary:
     terminal_reason: str | None
 
 
-def _read_exact(descriptor: int, size: int, offset: int) -> bytes:
-    """Read one exact byte range, or refuse: captured evidence has no torn tail."""
-    chunk = os.pread(descriptor, size, offset)
-    if len(chunk) != size:
-        raise _fail(OutcomeCode.CONFLICTING_ID, "captured journal is truncated")
-    return chunk
-
-
-def _summarise_journal(
-    path: Path,
-    binding: RunBinding,
-    entry: PaperBackupEntry,
-) -> _JournalSummary:
-    """Verify one captured journal completely, in bounded memory, read-only.
-
-    ``reopen_posix_audit_journal`` is a writer path over the attempt: it repairs
-    a torn tail and re-admits the preparation record, so it can never be pointed
-    at captured bytes. This reader instead walks the frames with ``pread`` and
-    re-verifies, exactly as a linear rescan does, the preamble, every frame
-    checksum and length bound, every sequence number, both chain links, the
-    exact binding and the first record's preparation -- but it *classifies*
-    rather than retains. One captured attempt may hold ``MAX_AUDIT_RECORDS``
-    frames, so no decoded record, header or payload survives the frame that
-    carried it: only the count, the terminal's own outcome, its reason and one
-    aggregate boolean do, and judging a full legacy journal costs bounded memory
-    instead of its size. The bytes are hashed as they are read and required to
-    match the digest the backup recorded, so the classification is exactly of
-    the bytes that were verified, and a short or torn frame can never be
-    reported as partial success.
-    """
-    descriptor: int | None = None
+def _summarise_journal(path: Path, binding: RunBinding, entry: PaperBackupEntry) -> _JournalSummary:
+    count = 0
+    state = AttemptEvidenceState.INCOMPLETE
+    reason = None
+    failing_transition = False
     try:
-        descriptor = os.open(path, _READ_FLAGS)
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_size != entry.size_bytes:
-            raise _fail(OutcomeCode.CONFLICTING_ID, "captured journal size conflicts")
-        size = info.st_size
-        hasher = sha256()
-        preamble = _read_exact(descriptor, len(AUDIT_JOURNAL_PREAMBLE), 0)
-        if preamble != AUDIT_JOURNAL_PREAMBLE:
-            raise _fail(OutcomeCode.CONFLICTING_ID, "captured journal preamble is invalid")
-        hasher.update(preamble)
-        offset = len(AUDIT_JOURNAL_PREAMBLE)
-        count = 0
-        previous_record = EMPTY_RECORD_SHA256
-        previous_chain = EMPTY_CHAIN_HEAD_SHA256
-        terminal_seen = False
-        terminal_state: AttemptEvidenceState | None = None
-        terminal_reason: str | None = None
-        failing_transition = False
-        while offset < size:
-            raw_header_length = _read_exact(descriptor, 8, offset)
-            header_length = int.from_bytes(raw_header_length, "big")
-            if not 1 <= header_length <= MAX_AUDIT_HEADER_BYTES:
-                raise _fail(OutcomeCode.CONFLICTING_ID, "captured journal header bound conflicts")
-            offset += 8
-            header = _read_exact(descriptor, header_length, offset)
-            offset += header_length
-            raw_payload_length = _read_exact(descriptor, 8, offset)
-            payload_length = int.from_bytes(raw_payload_length, "big")
-            if not 1 <= payload_length <= MAX_LARGE_AUDIT_PAYLOAD_BYTES:
-                raise _fail(OutcomeCode.CONFLICTING_ID, "captured journal payload bound conflicts")
-            offset += 8
-            payload = _read_exact(descriptor, payload_length, offset)
-            offset += payload_length
-            checksum = _read_exact(descriptor, 32, offset)
-            offset += 32
-            framed = raw_header_length + header + raw_payload_length + payload
-            if checksum != sha256(AUDIT_FRAME_DIGEST_DOMAIN + framed).digest():
-                raise _fail(OutcomeCode.CONFLICTING_ID, "captured journal checksum conflicts")
-            try:
-                record = decode_audit_record(
-                    binding=binding, canonical_header=header, canonical_payload=payload
-                )
-            except AuditContractError as error:
-                raise _fail(OutcomeCode.CONFLICTING_ID, "captured frame conflicts") from error
+        for record in verified_journal_records(
+            path, binding, size_bytes=entry.size_bytes, expected_sha256=entry.sha256
+        ):
             count += 1
-            if (
-                record.record_id.owner_sequence != count
-                or count > MAX_AUDIT_RECORDS
-                or record.previous_record_sha256 != previous_record
-                or record.previous_chain_head_sha256 != previous_chain
-                or terminal_seen
-            ):
-                raise _fail(OutcomeCode.CONFLICTING_ID, "captured journal chain conflicts")
-            if count == 1 and (
-                record.record_kind is not AuditRecordKind.RUN_PREPARED
-                or record.subject_kind is not AuditSubjectKind.RUN_MANIFEST
-                or record.subject_sha256 != binding.manifest_sha256
-            ):
-                raise _fail(
-                    OutcomeCode.CONFLICTING_ID, "captured journal does not begin with preparation"
-                )
-            previous_record = audit_record_digest(record)
-            previous_chain = audit_chain_head(record)
-            terminal_seen = record.record_kind is AuditRecordKind.RUN_TERMINAL
-            if terminal_seen:
-                # The terminal is the last frame a journal can carry, so at most
-                # one outcome is ever classified and nothing is accumulated.
-                terminal_state, terminal_reason = _terminal_outcome(record.canonical_payload)
+            if record.record_kind is AuditRecordKind.RUN_TERMINAL:
+                state, reason = _terminal_outcome(record.canonical_payload)
             elif record.record_kind is AuditRecordKind.RUNTIME_FAILING_SAFETY_TRANSITION:
                 failing_transition = True
-            hasher.update(framed)
-            hasher.update(checksum)
-        if offset != size or count == 0:
-            raise _fail(OutcomeCode.CONFLICTING_ID, "captured journal is not a complete journal")
-        if Sha256Digest(hasher.hexdigest()) != entry.sha256:
-            raise _fail(OutcomeCode.CONFLICTING_ID, "captured journal does not match its digest")
+    except CapturedJournalError as error:
+        raise _fail(OutcomeCode.CONFLICTING_ID, str(error)) from error
     except OSError as error:
         raise PaperBackupError("captured journal could not be read") from error
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-    if not terminal_seen or terminal_state is None:
-        # No durable terminal: the attempt did not complete, whatever it left.
-        return _JournalSummary(count, AttemptEvidenceState.INCOMPLETE, None)
-    if terminal_state is AttemptEvidenceState.CLEAN and failing_transition:
-        # A recorded failing safety transition is never erased by a later terminal.
-        return _JournalSummary(count, AttemptEvidenceState.FAILED, terminal_reason)
-    return _JournalSummary(count, terminal_state, terminal_reason)
+    if state is AttemptEvidenceState.CLEAN and failing_transition:
+        state = AttemptEvidenceState.FAILED
+    return _JournalSummary(count, state, reason)
 
 
 def _terminal_outcome(canonical_payload: bytes) -> tuple[AttemptEvidenceState, str | None]:
@@ -742,6 +629,8 @@ def read_attempt_evidence(backup_dir: Path, expected: RunBinding) -> PaperAttemp
     _require_binding(expected, field="expected")
     _require_path(backup_dir, field="backup_dir")
     manifest = inspect_paper_backup(backup_dir)
+    if manifest.checkpoint_chain_sha256 is not None:
+        raise PaperBackupError("a running checkpoint is not settled attempt evidence")
     captured = RunBinding(
         RunReference(manifest.run_id, manifest.lineage_sha256),
         manifest.attempt_manifest_sha256,

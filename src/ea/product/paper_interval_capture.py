@@ -388,6 +388,8 @@ def settle_interval(interval_dir: Path, backup_dirs: list[Path]) -> dict[str, An
     observed = {name: item for row in rows for name, item in row["inventory"].items() if item}
     for path in backup_dirs:
         manifest = inspect_paper_backup(path)
+        if manifest.checkpoint_chain_sha256 is not None:
+            raise PaperIntervalError("a running checkpoint cannot supply settled attempt evidence")
         name = manifest.run_id.value
         binding = {
             "run_id": name,
@@ -437,6 +439,6 @@ def evaluate_interval(interval_dir: Path) -> dict[str, Any]:
         "current_status": current_status,
         "backup_freshness_source": (
             "Saved snapshot: newest verified copy in the configured backup root; "
-            "not the active run's recovery point. Settled backups do not refresh it."
+            "settled backups and running checkpoints published after sealing do not refresh it."
         ),
     }
