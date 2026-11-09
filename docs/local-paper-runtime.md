@@ -172,14 +172,25 @@ and `enable` it again before `ea-runtime start`.
 ## Scheduled backup
 
 `com.ea.paper-backup.plist` is a second LaunchAgent with `StartInterval` (default
-`BACKUP_INTERVAL_SECONDS=300`) that runs `ea-runtime backup`, which invokes the existing
-`ea paper backup` once per tick. There is no cron, no APScheduler and no new scheduling code.
+`BACKUP_INTERVAL_SECONDS=300`) that runs `ea-runtime backup`. Each tick checkpoints the active supervised writer and
+can also capture one previously uncaptured settled attempt. Each run has separate retention
+for `checkpoint-*` and `backup-*` copies. Only settled copies enter `captured-runs`.
 
-`ea paper backup` is not an online snapshot: it refuses a held writer lease and captures only a
-settled attempt. A tick therefore captures **the newest attempt whose writer has released and
-which has not been captured yet**, and prints `no settled attempt needs capture` otherwise.
-Re-running a tick never captures the same attempt twice, and a refused or skipped tick publishes
-nothing.
+For an active Paper attempt, run:
+
+```sh
+ea paper backup checkpoint --run-dir "$RUN_DIR" --backup-root "$BACKUP_ROOT"
+ea paper backup inspect --backup "$CHECKPOINT_DIR"
+ea paper restore --backup "$CHECKPOINT_DIR" --run-dir "$EMPTY_ROOT/$RUN_ID"
+ea paper resume --run-dir "$EMPTY_ROOT/$RUN_ID"
+```
+
+Use a fresh target named by the original run ID. Restore materialises evidence, and resume
+classifies it without dispatch. The active writer retains its lease. At a drained heartbeat the
+writer publishes the verified audit length, chain head, time and immutable input digests.
+The backup process copies this prefix as later events continue, verifies the chain and inputs,
+and publishes atomically. A writer without this protocol requires an ordinary settled backup.
+Inspect a checkpoint's creation time to see exactly how far recovery reaches.
 
 "Has been captured" is recorded in `~/EA/supervisor/state/captured-runs`, one run id per line,
 appended only after `ea paper backup` exits 0. It has to be recorded separately from the backup
@@ -325,13 +336,11 @@ backup supply settled evidence without moving the boundary. Evaluation reports
 `historical_verdict`, `boundary_snapshot`, `boundary_identity`, `ended_at` and `history`, with
 `current_status` separately labelled. Exit 3 means non-PASS or unavailable evidence.
 
-**Backup freshness is still the saved snapshot's newest verified copy in the configured backup
-root, not a recovery point for the active run.** Its FRESH threshold remains 36 hours, while the
-operator normally backs up each settled run once. A continuous 72h/7d attempt therefore does not
-naturally satisfy that freshness condition. Post-end backups never refresh the sealed snapshot;
-this workflow never re-backs up old runs to manufacture freshness. In-process consistent
-checkpoints/online backup remain separate work. Short synthetic checks prove this workflow,
-not a long-duration PASS.
+Backup freshness uses the newest verified settled backup or running checkpoint in the
+configured root as of the observation time. A checkpoint ages from its writer's boundary.
+The threshold remains 36 hours. Interval settlement still requires the ordinary backup made
+after the writer releases its lease. A later backup never refreshes a sealed observation.
+Short synthetic exercises do not establish a 72-hour or 7-day result.
 
 Evidence remains local and unsigned. Retain the dedicated runtime root, complete launch log,
 observations and backups; manual rewriting/removal of both runtime and evidence is outside the

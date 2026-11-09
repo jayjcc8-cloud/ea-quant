@@ -57,7 +57,7 @@ app.add_typer(candidate_app, name="candidate")
 paper_app = typer.Typer(help="Explicit local simulated Paper start, status and cooperative stop.")
 app.add_typer(paper_app, name="paper")
 backup_app = typer.Typer(
-    help="Quiesced consistent backup, verification and isolated restore of Paper attempts.",
+    help="Capture settled backups or running checkpoints, verify, and restore in isolation.",
     invoke_without_command=True,
 )
 paper_app.add_typer(backup_app, name="backup")
@@ -690,6 +690,24 @@ def paper_backup(
         )
     except PaperBackupError as error:
         raise _paper_backup_failure("backup", error) from None
+    typer.echo(canonical_json(result.document()).decode("ascii"))
+
+
+@backup_app.command("checkpoint")
+def paper_checkpoint(
+    run_dir: Annotated[Path, typer.Option("--run-dir")],
+    backup_root: Annotated[Path, typer.Option("--backup-root")],
+    keep: Annotated[int, typer.Option("--keep", min=1)] = 5,
+) -> None:
+    """Capture a running Paper writer's durable point without stopping it."""
+    from ea.product.paper_backup import PaperBackupError, create_paper_checkpoint
+
+    try:
+        result = create_paper_checkpoint(
+            run_dir.expanduser().absolute(), backup_root.expanduser().absolute(), keep=keep
+        )
+    except PaperBackupError as error:
+        raise _paper_backup_failure("checkpoint", error) from None
     typer.echo(canonical_json(result.document()).decode("ascii"))
 
 

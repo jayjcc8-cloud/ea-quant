@@ -1,10 +1,8 @@
-"""Quiesced consistent backup and isolated restore for local Paper attempts.
+"""Consistent backup and isolated restore for local Paper attempts.
 
-V1 is deliberately not an online snapshot. The writer lease must be released
-before a single authoritative byte is read, so the captured set is settled by
-construction rather than by copy-on-write or incremental machinery: wait for the
-writer release, verify the attempt settled, then capture. Nothing here persists
-Paper state and nothing here decides whether an attempt may trade again.
+Settled v1 captures require a released writer lease. A running checkpoint copies
+only the verified append-only journal prefix published by the writer between
+dispatches and checks its complete chain against the writer's retained digest.
 
 The authoritative set is the attempt manifest, the audit journal -- the only
 source of Orders, Fills, Ledger, refresh, reconciliation and recovery evidence --
@@ -66,10 +64,21 @@ from ea.experiments.store import (
     StoreError,
 )
 from ea.product.backtest import BacktestRunError, _safe_output_root
-from ea.product.paper_session import PaperSessionError, _attempt, _lease_held, _manifest
+from ea.product.paper_journal_reader import CapturedJournalError, verified_journal_records
+from ea.product.paper_session import (
+    PaperSessionError,
+    _attempt,
+    _child_directory,
+    _lease_held,
+    _manifest,
+    _read_file,
+    _status_document,
+)
 from ea.strategy.package import MAX_ARTIFACT_BYTES
 
 _BACKUP_SCHEMA = "ea.paper-backup.v1"
+_CHECKPOINT_SCHEMA = "ea.paper-checkpoint.v1"
+_CHECKPOINT_PREFIX = "checkpoint-"
 _RESTORE_SCHEMA = "ea.paper-restore.v1"
 _BACKUP_DIGEST_DOMAIN = b"ea.paper-backup.v1\0"
 _BACKUP_ROOT_PREFIX = "backup-"
@@ -220,6 +229,7 @@ class PaperBackupManifest:
     configuration_sha256: str | None
     entries: tuple[PaperBackupEntry, ...]
     files_sha256: Sha256Digest
+    checkpoint_chain_sha256: Sha256Digest | None = None
 
     def __post_init__(self) -> None:
         if type(self.created_at) is not str or not _is_stamp(self.created_at):
@@ -250,7 +260,14 @@ class PaperBackupManifest:
 
     def document(self) -> dict[str, Any]:
         return {
-            "schema": _BACKUP_SCHEMA,
+            "schema": _BACKUP_SCHEMA
+            if self.checkpoint_chain_sha256 is None
+            else _CHECKPOINT_SCHEMA,
+            **(
+                {"checkpoint_chain_sha256": self.checkpoint_chain_sha256.value}
+                if self.checkpoint_chain_sha256 is not None
+                else {}
+            ),
             "created_at": self.created_at,
             "ea_version": self.ea_version,
             "run": {
@@ -456,7 +473,9 @@ def _require_private(info: os.stat_result, spec: _AuthoritativeFile) -> None:
 
 
 @contextmanager
-def _opened_entry(parent_fd: int, spec: _AuthoritativeFile) -> Iterator[tuple[int, os.stat_result]]:
+def _opened_entry(
+    parent_fd: int, spec: _AuthoritativeFile, *, prefix_size: int | None = None
+) -> Iterator[tuple[int, os.stat_result]]:
     """Open one bounded authoritative file and require it to be unchanged after use."""
     descriptor: int | None = None
     try:
@@ -489,9 +508,13 @@ def _opened_entry(parent_fd: int, spec: _AuthoritativeFile) -> Iterator[tuple[in
         after = os.fstat(descriptor)
         if (
             _identity(after) != _identity(before)
-            or after.st_size != before.st_size
             or after.st_mode != before.st_mode
-            or after.st_mtime_ns != before.st_mtime_ns
+            or after.st_nlink != 1
+            or (
+                prefix_size is None
+                and (after.st_size != before.st_size or after.st_mtime_ns != before.st_mtime_ns)
+            )
+            or (prefix_size is not None and after.st_size < before.st_size)
         ):
             raise PaperBackupRefused(f"{spec.path} changed while being captured")
     finally:
@@ -499,7 +522,7 @@ def _opened_entry(parent_fd: int, spec: _AuthoritativeFile) -> Iterator[tuple[in
 
 
 def _capture_entry(
-    parent_fd: int, spec: _AuthoritativeFile, sink_fd: int | None
+    parent_fd: int, spec: _AuthoritativeFile, sink_fd: int | None, *, prefix_size: int | None = None
 ) -> tuple[int, Sha256Digest] | None:
     """Stream one authoritative file, hashing it and optionally copying it.
 
@@ -507,8 +530,11 @@ def _capture_entry(
     """
     hasher = sha256()
     try:
-        with _opened_entry(parent_fd, spec) as (descriptor, before):
-            remaining = before.st_size
+        with _opened_entry(parent_fd, spec, prefix_size=prefix_size) as (descriptor, before):
+            size = before.st_size if prefix_size is None else prefix_size
+            if not 1 <= size <= before.st_size:
+                raise PaperBackupRefused("checkpoint exceeds the available journal")
+            remaining = size
             while remaining:
                 chunk = os.read(descriptor, min(remaining, _CHUNK_BYTES))
                 if not chunk:
@@ -517,7 +543,7 @@ def _capture_entry(
                 if sink_fd is not None:
                     _write_all(sink_fd, chunk)
                 remaining -= len(chunk)
-            return before.st_size, Sha256Digest(hasher.hexdigest())
+            return size, Sha256Digest(hasher.hexdigest())
     except FileNotFoundError:
         if spec.optional:
             return None
@@ -669,7 +695,11 @@ def _require_recorded_identity(files_fd: int, manifest: PaperBackupManifest) -> 
 
 
 def _copy_entry(
-    destination_fd: int, spec: _AuthoritativeFile, source_parent_fd: int
+    destination_fd: int,
+    spec: _AuthoritativeFile,
+    source_parent_fd: int,
+    *,
+    prefix_size: int | None = None,
 ) -> PaperBackupEntry | None:
     """Copy one authoritative file into a fresh 0600 file while hashing it."""
     descriptor: int | None = None
@@ -680,11 +710,15 @@ def _copy_entry(
             except OSError as error:
                 raise PaperBackupRefused(f"{spec.path} could not be written") from error
             try:
-                captured = _capture_entry(source_parent_fd, spec, descriptor)
+                captured = _capture_entry(
+                    source_parent_fd, spec, descriptor, prefix_size=prefix_size
+                )
                 if captured is None:
+                    os.unlink(_leaf(spec.path), dir_fd=parent_fd)
                     return None
                 size, checksum = captured
                 os.fsync(descriptor)
+                os.fsync(parent_fd)
                 return PaperBackupEntry(spec.path, size, checksum)
             finally:
                 os.close(descriptor)
@@ -694,7 +728,9 @@ def _copy_entry(
         raise PaperBackupRefused(f"{spec.path} could not be written") from error
 
 
-def _stage_authoritative(staging: Path, run_fd: int) -> tuple[PaperBackupEntry, ...]:
+def _stage_authoritative(
+    staging: Path, run_fd: int, *, journal_bytes: int | None = None
+) -> tuple[PaperBackupEntry, ...]:
     """Capture the whole authoritative set into a fresh staging tree."""
     files = _create_directory(staging, _FILES_DIRECTORY)
     files_fd = os.open(files, _DIR_FLAGS)
@@ -709,7 +745,12 @@ def _stage_authoritative(staging: Path, run_fd: int) -> tuple[PaperBackupEntry, 
                 except OSError as error:
                     raise PaperBackupRefused(f"{spec.path} could not be staged") from error
             with _entry_parent(run_fd, spec.path) as source_fd:
-                entry = _copy_entry(files_fd, spec, source_fd)
+                entry = _copy_entry(
+                    files_fd,
+                    spec,
+                    source_fd,
+                    prefix_size=journal_bytes if spec.path == _JOURNAL_PATH else None,
+                )
             if entry is not None:
                 staged.append(entry)
         _fsync_directory(files)
@@ -747,11 +788,11 @@ def _publish_directory(staging: Path, final: Path) -> None:
     _fsync_directory(final.parent)
 
 
-def _backup_name(created_at: datetime, run_id: RunId) -> str:
-    return f"{_BACKUP_ROOT_PREFIX}{created_at.strftime('%Y%m%dT%H%M%S%fZ')}-{run_id.value}"
+def _backup_name(created_at: datetime, run_id: RunId, prefix: str = _BACKUP_ROOT_PREFIX) -> str:
+    return f"{prefix}{created_at.strftime('%Y%m%dT%H%M%S%fZ')}-{run_id.value}"
 
 
-def _owned_backups(root: Path, run_id: RunId) -> tuple[str, ...]:
+def _owned_backups(root: Path, run_id: RunId, prefix: str) -> tuple[str, ...]:
     """Names of published backups this module can positively identify as its own.
 
     A directory is only ever prunable when it holds a canonical ``backup.json``
@@ -761,19 +802,24 @@ def _owned_backups(root: Path, run_id: RunId) -> tuple[str, ...]:
     """
     owned: list[str] = []
     for entry in os.scandir(root):
-        if not entry.name.startswith(_BACKUP_ROOT_PREFIX):
+        if not entry.name.startswith(prefix):
             continue
         if not entry.is_dir(follow_symlinks=False):
             continue
         try:
-            if _read_backup_manifest(Path(entry.path)).run_id == run_id:
+            manifest = _read_backup_manifest(Path(entry.path))
+            if manifest.run_id == run_id and (manifest.checkpoint_chain_sha256 is not None) == (
+                prefix == _CHECKPOINT_PREFIX
+            ):
                 owned.append(entry.name)
         except (PaperBackupError, OSError):
             continue
     return tuple(sorted(owned))
 
 
-def _apply_retention(root: Path, run_id: RunId, published: str, keep: int) -> tuple[str, ...]:
+def _apply_retention(
+    root: Path, run_id: RunId, published: str, keep: int, prefix: str
+) -> tuple[str, ...]:
     """Deterministically keep only the newest ``keep`` backups of one run.
 
     Names sort chronologically because the stamp prefix is fixed-width UTC. The
@@ -783,7 +829,7 @@ def _apply_retention(root: Path, run_id: RunId, published: str, keep: int) -> tu
     that is already published.
     """
     try:
-        owned = _owned_backups(root, run_id)
+        owned = _owned_backups(root, run_id, prefix)
     except OSError as error:
         raise PaperBackupRefused("backup root could not be listed for retention") from error
     stale = tuple(name for name in (owned[: max(0, len(owned) - keep)]) if name != published)
@@ -811,6 +857,7 @@ def _build_manifest(
     attempt_manifest_sha256: Sha256Digest,
     source_document: dict[str, Any],
     entries: tuple[PaperBackupEntry, ...],
+    checkpoint_chain: Sha256Digest | None = None,
 ) -> PaperBackupManifest:
     raw = source_document.get("candidate")
     candidate = dict(raw) if type(raw) is dict and raw else None
@@ -827,6 +874,7 @@ def _build_manifest(
         configuration_sha256=_optional_digest(candidate, "configuration_sha256"),
         entries=entries,
         files_sha256=_boundary_sha256(entries),
+        checkpoint_chain_sha256=checkpoint_chain,
     )
 
 
@@ -842,25 +890,86 @@ def create_paper_backup(
     settled before any byte is read. A held lease, an existing target, or any
     authoritative file that changes mid-capture fails closed without publishing.
     """
+    return _capture_backup(run_dir, backup_root, keep=keep, running=False)
+
+
+def create_paper_checkpoint(
+    run_dir: Path, backup_root: Path, *, keep: int = _DEFAULT_KEEP
+) -> PaperBackupResult:
+    """Capture the last drained boundary of the active local Paper writer."""
+    return _capture_backup(run_dir, backup_root, keep=keep, running=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _Checkpoint:
+    captured_at: datetime
+    size: int
+    chain: Sha256Digest
+    inputs: dict[str, str]
+
+
+def _checkpoint_cut(run_fd: int, binding: RunBinding) -> _Checkpoint:
+    with _child_directory(run_fd, "outputs") as outputs:
+        payload = _read_file(outputs, "paper-status.json")
+    assert payload is not None
+    status = _status_document(payload, binding)
+    cut = status.get("checkpoint")
+    if status["state"] != "running" or not isinstance(cut, dict):
+        raise PaperBackupRefused("no running writer checkpoint is available")
+    size = cut.get("bytes")
+    if type(size) is not int or not 1 <= size <= MAX_AUDIT_JOURNAL_BYTES:
+        raise PaperBackupRefused("writer checkpoint journal length is invalid")
+    when = datetime.fromisoformat(cut["captured_at"])
+    if when.utcoffset() != timedelta(0) or when > datetime.now(UTC):
+        raise PaperBackupRefused("writer checkpoint timestamp is invalid")
+    inputs = cut.get("inputs")
+    if type(inputs) is not dict or not all(_is_digest_text(value) for value in inputs.values()):
+        raise PaperBackupRefused("writer checkpoint input digests are invalid")
+    return _Checkpoint(when, size, Sha256Digest(cut["chain_sha256"]), inputs)
+
+
+def _capture_backup(
+    run_dir: Path, backup_root: Path, *, keep: int, running: bool
+) -> PaperBackupResult:
     if type(keep) is not int or keep < 1:
         raise PaperBackupInputError("backup retention must keep at least one backup")
     if not isinstance(run_dir, Path) or not run_dir.is_absolute():
         raise PaperBackupInputError("run_dir must be an absolute Path")
     created_at = datetime.now(UTC)
+    prefix = _CHECKPOINT_PREFIX if running else _BACKUP_ROOT_PREFIX
+    cut: _Checkpoint | None = None
     try:
         with _attempt(run_dir) as (canonical, run_fd):
             binding, manifest_bytes = _manifest(run_fd, canonical.name)
-            if _lease_held(run_fd):
+            held = _lease_held(run_fd)
+            if running:
+                if not held:
+                    raise PaperBackupRefused("running checkpoint requires a held writer lease")
+                cut = _checkpoint_cut(run_fd, binding)
+                created_at = cut.captured_at
+            elif held:
                 raise PaperBackupRefused(
                     "writer lease is held; quiesce the attempt before capturing it"
                 )
             # The backup root is only created once the capture is known to be
             # permitted, so a refusal leaves the operator's filesystem untouched.
             root = _safe_root(backup_root, name="backup root")
-            name = _backup_name(created_at, binding.reference.run_id)
+            name = _backup_name(created_at, binding.reference.run_id, prefix)
             staging = _create_directory(root, f".{name}.{uuid4().hex}.tmp")
             try:
-                entries = _stage_authoritative(staging, run_fd)
+                entries = _stage_authoritative(
+                    staging, run_fd, journal_bytes=cut.size if cut else None
+                )
+                if cut is not None:
+                    inputs = {
+                        item.path: item.sha256.value
+                        for item in entries
+                        if item.path not in (_MANIFEST_NAME, _JOURNAL_PATH)
+                    }
+                    if inputs != cut.inputs:
+                        raise PaperBackupRefused(
+                            "captured inputs differ from the running writer checkpoint"
+                        )
                 manifest = _build_manifest(
                     created_at=created_at,
                     run_id=binding.reference.run_id,
@@ -868,17 +977,23 @@ def create_paper_backup(
                     attempt_manifest_sha256=binding.manifest_sha256,
                     source_document=json.loads(manifest_bytes),
                     entries=entries,
+                    checkpoint_chain=cut.chain if cut else None,
                 )
                 _write_backup_manifest(
                     staging,
                     _canonical_document(manifest.document(), name="backup manifest"),
                 )
+                if running:
+                    inspect_paper_backup(staging)
+                    if (root / name).exists() and inspect_paper_backup(root / name) == manifest:
+                        _discard_directory(staging)
+                        return PaperBackupResult(root / name, manifest, ())
                 _fsync_directory(staging)
                 _publish_directory(staging, root / name)
             except BaseException:
                 _discard_directory(staging)
                 raise
-            if _lease_held(run_fd):
+            if not running and _lease_held(run_fd):
                 # A writer acquired the attempt while it was being captured, so
                 # the capture may interleave with new evidence: publish nothing.
                 _discard_directory(root / name)
@@ -886,7 +1001,7 @@ def create_paper_backup(
             return PaperBackupResult(
                 root / name,
                 manifest,
-                _apply_retention(root, binding.reference.run_id, name, keep),
+                _apply_retention(root, binding.reference.run_id, name, keep, prefix),
             )
     except PaperBackupRefused:
         raise
@@ -920,6 +1035,21 @@ def inspect_paper_backup(backup_dir: Path) -> PaperBackupManifest:
             ),
         )
         _verify_entries(files_fd, manifest.entries)
+        if manifest.checkpoint_chain_sha256 is not None:
+            entry = next(item for item in manifest.entries if item.path == _JOURNAL_PATH)
+            for _ in verified_journal_records(
+                directory / _FILES_DIRECTORY / _JOURNAL_PATH,
+                RunBinding(
+                    RunReference(manifest.run_id, manifest.lineage_sha256),
+                    manifest.attempt_manifest_sha256,
+                ),
+                size_bytes=entry.size_bytes,
+                expected_sha256=entry.sha256,
+                expected_head=manifest.checkpoint_chain_sha256,
+            ):
+                pass
+    except CapturedJournalError as error:
+        raise PaperBackupRefused(str(error)) from error
     except PaperBackupRefused:
         raise
     except OSError as error:
@@ -956,7 +1086,7 @@ class VerifiedPaperBackup:
 
 
 def latest_verified_paper_backup(
-    backup_root: Path, *, run_id: RunId | None = None
+    backup_root: Path, *, run_id: RunId | None = None, as_of: datetime | None = None
 ) -> VerifiedPaperBackup | None:
     """Return the newest backup whose contents still re-verify, or ``None``.
 
@@ -980,13 +1110,15 @@ def latest_verified_paper_backup(
         names = tuple(
             entry.name
             for entry in os.scandir(directory)
-            if entry.name.startswith(_BACKUP_ROOT_PREFIX) and entry.is_dir(follow_symlinks=False)
+            if entry.name.startswith((_BACKUP_ROOT_PREFIX, _CHECKPOINT_PREFIX))
+            and entry.is_dir(follow_symlinks=False)
         )
     except OSError as error:
         raise PaperBackupInputError("backup root could not be listed") from error
 
     # Order by the recorded creation instant, which is the manifest's own claim
     # and is re-verified below; the directory name is only a tie-break.
+    latest_stamp = (as_of or datetime.now(UTC)).astimezone(UTC).strftime(_STAMP_FORMAT)
     dated: list[tuple[str, str]] = []
     for name in names:
         try:
@@ -1001,6 +1133,8 @@ def latest_verified_paper_backup(
         try:
             manifest = inspect_paper_backup(candidate)
         except (PaperBackupError, OSError):
+            continue
+        if manifest.created_at > latest_stamp or (run_id is not None and manifest.run_id != run_id):
             continue
         return VerifiedPaperBackup(
             backup_dir=candidate,
@@ -1040,7 +1174,9 @@ def _read_backup_manifest(directory: Path) -> PaperBackupManifest:
             )
             for item in raw_entries
         )
-        return PaperBackupManifest(
+        if document["schema"] not in (_BACKUP_SCHEMA, _CHECKPOINT_SCHEMA):
+            raise PaperBackupRefused("unknown backup schema")
+        manifest = PaperBackupManifest(
             created_at=document["created_at"],
             ea_version=document["ea_version"],
             run_id=RunId(run["run_id"]),
@@ -1052,7 +1188,15 @@ def _read_backup_manifest(directory: Path) -> PaperBackupManifest:
             configuration_sha256=document["configuration_sha256"],
             entries=entries,
             files_sha256=Sha256Digest(document["files_sha256"]),
+            checkpoint_chain_sha256=(
+                Sha256Digest(document["checkpoint_chain_sha256"])
+                if document["schema"] == _CHECKPOINT_SCHEMA
+                else None
+            ),
         )
+        if manifest.document() != document:
+            raise PaperBackupRefused("unexpected backup manifest fields")
+        return manifest
     except PaperBackupRefused:
         raise
     except (PaperBackupError, KeyError, TypeError, ValueError) as error:

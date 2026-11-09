@@ -366,7 +366,7 @@ def observe_backup_staleness(
             "no backup root is configured, so no backup age can be observed",
         )
     try:
-        latest = latest_verified_paper_backup(backup_root)
+        latest = latest_verified_paper_backup(backup_root, as_of=now)
     except PaperBackupError as error:
         return AlertSignalReading(
             AlertType.BACKUP_STALE,
